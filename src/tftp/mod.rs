@@ -10,10 +10,8 @@ use crate::tftp::{
 
 mod packet;
 mod state;
-
-pub trait Handler {
-    async fn read(&self, filename: &String) -> Result<Vec<u8>>;
-}
+pub use state::Handler;
+pub use state::Reader;
 
 pub struct Server<H: Handler> {
     address: String,
@@ -23,7 +21,7 @@ pub struct Server<H: Handler> {
 impl<H: Handler + 'static> Server<H> {
     pub fn new(handler: H) -> Self {
         Self {
-            address: "0.0.0.0:57".to_owned(),
+            address: "0.0.0.0:69".to_owned(),
             handler,
         }
     }
@@ -75,8 +73,7 @@ impl<H: Handler + 'static> Router<H> {
         // Delegate control to the state object
         let state = self.connections.get_mut(&addr).unwrap();
         let control_flow = state.handle(packet).await;
-        drop(state);
-        
+
         // Handle the response from the state object.
         // First determine if the state object is "complete" and can be removed,
         // then send the packet.
@@ -85,7 +82,7 @@ impl<H: Handler + 'static> Router<H> {
             ControlFlow::Closed(packet) => {
                 self.connections.remove(&addr);
                 packet
-            },
+            }
         };
 
         if let Some(packet) = packet_opt {

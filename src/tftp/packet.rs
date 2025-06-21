@@ -122,10 +122,16 @@ impl Packet {
                 filename: _,
                 mode: _,
             } => true,
-            Packet::Wrq { filename: _, mode } => true,
-            Packet::Data { block, data } => false,
-            Packet::Ack { block } => false,
-            Packet::Error { code, message } => false,
+            Packet::Wrq {
+                filename: _,
+                mode: _,
+            } => true,
+            Packet::Data { block: _, data: _ } => false,
+            Packet::Ack { block: _ } => false,
+            Packet::Error {
+                code: _,
+                message: _,
+            } => false,
         }
     }
 }
@@ -314,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_parse_err() {
-        let bytes = [0x00, 0x05, 0x00, 0x01, b'B', b'B', b'\0'];
+        let bytes = [0x00, 0x05, 0x00, 0x02, b'B', b'B', b'\0'];
         let result = Packet::parse(&bytes[..]);
         assert!(result.is_ok());
         assert_eq!(

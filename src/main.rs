@@ -1,4 +1,5 @@
 mod database;
+mod director;
 mod http;
 mod tftp;
 
@@ -20,8 +21,10 @@ async fn main() {
 
     let db = Mutex::new(database::open(&args.db_path).unwrap());
 
+    let tftp_handler = director::DirectorTftpHandler {};
+
     let http_handle = tokio::spawn(http::start(db));
-    let tftp_handle = tokio::spawn(tftp::Server::new().serve());
+    let tftp_handle = tokio::spawn(tftp::Server::new(tftp_handler).serve());
 
     http_handle.await.unwrap().unwrap();
     log::info!("http server shutdown");
