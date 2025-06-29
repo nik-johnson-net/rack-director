@@ -228,7 +228,7 @@ mod tests {
         let bytes = [0x00, 0xFF, 0x00];
         let result = read_u16(&bytes[0..3]);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), (255 as u16, &bytes[2..3]));
+        assert_eq!(result.unwrap(), (255_u16, &bytes[2..3]));
     }
 
     #[test]

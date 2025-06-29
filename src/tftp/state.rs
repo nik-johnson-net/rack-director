@@ -6,12 +6,12 @@ use crate::tftp::packet::{Error, Packet};
 use anyhow::Result;
 
 pub trait Handler {
-    type Reader: Reader;
-    async fn create_reader(&self, filename: &str) -> Result<Self::Reader>;
+    type Reader: Reader + Send + Sync;
+    fn create_reader(&self, filename: &str) -> impl Future<Output = Result<Self::Reader>> + Send;
 }
 
 pub trait Reader {
-    async fn read(&mut self) -> Result<Vec<u8>>;
+    fn read(&mut self) -> impl Future<Output = Result<Vec<u8>>> + Send;
 }
 
 // ControlFlow is used to respond to TFTP packets, and to signal whether the connection should continue or be closed.
@@ -105,6 +105,24 @@ impl<H: Handler + 'static> State<H> {
         }
     }
 
+    pub async fn handle_timeout(&mut self) -> ControlFlow {
+        debug!("TFTP: Timeout for {}", self.addr);
+        match &self.state {
+            TransferState::Uninitialized => {
+                log::warn!("TFTP: Timeout in Uninitialized state for {}", self.addr);
+                ControlFlow::Closed(None)
+            }
+            TransferState::Reading { data, block, .. } => ControlFlow::Continue(Packet::Data {
+                block: *block,
+                data: data.clone(),
+            }),
+            TransferState::Complete => {
+                log::warn!("TFTP: Timeout in Complete state for {}", self.addr);
+                ControlFlow::Closed(None)
+            }
+        }
+    }
+
     // Return an IllegalOperation error response.
     fn error(&self, filename: Option<String>) -> Result<HandleResponse<H>> {
         debug!(
@@ -176,7 +194,7 @@ async fn handle_ack<H: Handler>(
     let data = if acked_block == *block {
         // If the ACK is for the current block, and the current block is < 512 bytes, the transfer is complete.
         if data.len() < 512 {
-            debug!("TFTP: Transfer complete for block {}", acked_block);
+            debug!("TFTP: Transfer complete for block {acked_block}");
             return Ok(HandleResponse {
                 next_state: Some(TransferState::Complete),
                 response: ControlFlow::Closed(None),
@@ -265,24 +283,21 @@ mod tests {
 
         assert!(
             matches!(result, ControlFlow::Continue(packet::Packet::Data { block: 0, ref data }) if data == &vec![0; 512]),
-            "Got response {:?}",
-            result
+            "Got response {result:?}"
         );
 
         // Simulate ACK for the first block
         let result = state.handle(Packet::Ack { block: 0 }).await;
         assert!(
             matches!(result, ControlFlow::Continue(packet::Packet::Data { block: 1, ref data }) if data == &vec![0; 1]),
-            "Got response {:?}",
-            result
+            "Got response {result:?}"
         );
 
         // Simulate ACK for the second block
         let result = state.handle(Packet::Ack { block: 1 }).await;
         assert!(
             matches!(result, ControlFlow::Closed(None)),
-            "Got response {:?}",
-            result
+            "Got response {result:?}"
         );
     }
 }
