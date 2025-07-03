@@ -8,7 +8,7 @@ pub struct DirectorTftpHandler {
 impl Handler for DirectorTftpHandler {
     type Reader = DirectorTftpReader;
 
-    async fn create_reader(&self, filename: &str) -> anyhow::Result<Self::Reader> {
+    async fn create_reader(&self, _filename: &str) -> anyhow::Result<Self::Reader> {
         todo!()
     }
 }

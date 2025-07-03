@@ -1,4 +1,5 @@
 mod ui;
+mod cnc;
 
 use std::sync::Arc;
 
@@ -13,7 +14,9 @@ struct AppState {
 pub async fn start(db: Mutex<rusqlite::Connection>) -> Result<()> {
     let state = Arc::new(AppState { db });
 
-    let app = Router::new().merge(ui::routes(state.clone()));
+    let app = Router::new()
+        .merge(ui::routes(state.clone()))
+        .merge(cnc::routes(state.clone()));
 
     log::info!("Starting http server on 0.0.0.0:3000");
     // run our app with hyper, listening globally on port 3000
