@@ -4,9 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 const LATEST_VERSION: i32 = 1;
-const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
-    include_str!("migrations/1.sql"),
-];
+const MIGRATIONS: [&str; LATEST_VERSION as usize] = [include_str!("migrations/1.sql")];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
     let conn = rusqlite::Connection::open(path)?;
@@ -58,16 +56,13 @@ pub fn is_device_known(conn: &Connection, uuid: &str) -> Result<bool> {
 }
 
 pub fn register_device(conn: &Connection, uuid: &str) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO devices (uuid) VALUES (?1)",
-        [uuid],
-    )?;
-    
+    conn.execute("INSERT OR IGNORE INTO devices (uuid) VALUES (?1)", [uuid])?;
+
     conn.execute(
         "UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
         [uuid],
     )?;
-    
+
     Ok(())
 }
 

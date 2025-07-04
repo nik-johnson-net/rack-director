@@ -115,25 +115,6 @@ impl Packet {
 
         bytes
     }
-
-    pub fn can_initiate(&self) -> bool {
-        match self {
-            Packet::Rrq {
-                filename: _,
-                mode: _,
-            } => true,
-            Packet::Wrq {
-                filename: _,
-                mode: _,
-            } => true,
-            Packet::Data { block: _, data: _ } => false,
-            Packet::Ack { block: _ } => false,
-            Packet::Error {
-                code: _,
-                message: _,
-            } => false,
-        }
-    }
 }
 
 fn parse_opcode(data: &[u8]) -> Result<(u16, &[u8])> {

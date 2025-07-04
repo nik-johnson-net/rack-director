@@ -1,5 +1,5 @@
-mod ui;
 mod cnc;
+mod ui;
 
 use std::sync::Arc;
 

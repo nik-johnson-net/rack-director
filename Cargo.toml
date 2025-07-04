@@ -11,7 +11,7 @@ log = { version = "0.4.27", features = ["kv"] }
 rusqlite = { version = "0.36.0", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 std-logger = "0.5.7"
-tokio = { version = "1.45.1", features = ["rt-multi-thread", "net", "macros", "sync", "signal", "fs", "time"] }
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "net", "macros", "sync", "signal", "fs", "time", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3.12"

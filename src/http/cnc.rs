@@ -1,9 +1,15 @@
 use std::sync::Arc;
 
-use axum::{Router, extract::{State, Query}, routing::get, response::Response, http::{StatusCode, header}};
+use axum::{
+    Router,
+    extract::{Query, State},
+    http::{StatusCode, header},
+    response::Response,
+    routing::get,
+};
 use serde::Deserialize;
 
-use crate::{http::AppState, database};
+use crate::{database, http::AppState};
 
 #[derive(Deserialize)]
 struct IpxeQuery {
@@ -26,29 +32,27 @@ async fn ipxe_handler(
     };
 
     let db = state.db.lock().await;
-    
-    let is_known = database::is_device_known(&db, &uuid)
-        .map_err(|e| {
-            log::error!("Failed to check device: {e}");
+
+    let is_known = database::is_device_known(&db, &uuid).map_err(|e| {
+        log::error!("Failed to check device: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if !is_known {
+        database::register_device(&db, &uuid).map_err(|e| {
+            log::error!("Failed to register device: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    
-    if !is_known {
-        database::register_device(&db, &uuid)
-            .map_err(|e| {
-                log::error!("Failed to register device: {e}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
     }
-    
+
     drop(db);
-    
+
     let ipxe_script = if is_known {
         generate_boot_local_script()
     } else {
         generate_intake_script()
     };
-    
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/plain")
@@ -60,7 +64,8 @@ fn generate_boot_local_script() -> String {
     r#"#!ipxe
 # Boot to local disk for known device
 sanboot --no-describe --drive 0x80
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn generate_intake_script() -> String {
@@ -69,7 +74,8 @@ fn generate_intake_script() -> String {
 kernel http://rack-director/intake/vmlinuz
 initrd http://rack-director/intake/initrd.gz
 boot
-"#.to_string()
+"#
+    .to_string()
 }
 
 #[cfg(test)]
@@ -80,18 +86,16 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use tokio::sync::Mutex;
-    use tempfile::tempdir;
     use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
     use tower::util::ServiceExt;
 
     async fn setup_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
-        let state = Arc::new(AppState {
-            db: Mutex::new(db),
-        });
+        let state = Arc::new(AppState { db: Mutex::new(db) });
         (state, temp_dir)
     }
 
@@ -107,7 +111,7 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -120,7 +124,7 @@ mod tests {
     async fn test_ipxe_known_device() {
         let (state, _temp_dir) = setup_test_state().await;
         let test_uuid = "550e8400-e29b-41d4-a716-446655440001";
-        
+
         {
             let db = state.db.lock().await;
             database::register_device(&db, test_uuid).unwrap();
@@ -135,7 +139,7 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
