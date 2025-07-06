@@ -8,10 +8,10 @@ use axum::Router;
 use tokio::sync::Mutex;
 
 struct AppState {
-    db: Mutex<rusqlite::Connection>,
+    db: Arc<Mutex<rusqlite::Connection>>,
 }
 
-pub async fn start(db: Mutex<rusqlite::Connection>) -> Result<()> {
+pub async fn start(db: Arc<Mutex<rusqlite::Connection>>) -> Result<()> {
     let state = Arc::new(AppState { db });
 
     let app = Router::new()
