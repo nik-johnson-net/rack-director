@@ -3,8 +3,11 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-const LATEST_VERSION: i32 = 1;
-const MIGRATIONS: [&str; LATEST_VERSION as usize] = [include_str!("migrations/1.sql")];
+const LATEST_VERSION: i32 = 2;
+const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
+    include_str!("migrations/1.sql"),
+    include_str!("migrations/2.sql"),
+];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
     let conn = rusqlite::Connection::open(path)?;
@@ -64,6 +67,47 @@ pub fn register_device(conn: &Connection, uuid: &str) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+pub fn create_interface(conn: &Connection, device_id: i32, mac_address: &str, is_bmc: bool) -> Result<i32> {
+    conn.execute(
+        "INSERT INTO interfaces (device_id, mac_address, is_bmc) VALUES (?1, ?2, ?3)",
+        [&device_id.to_string(), mac_address, &is_bmc.to_string()]
+    )?;
+    
+    Ok(conn.last_insert_rowid() as i32)
+}
+
+pub fn update_interface_ip(conn: &Connection, interface_id: i32, ipv4_address: Option<&str>, ipv6_address: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE interfaces SET ipv4_address = ?1, ipv6_address = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+        rusqlite::params![ipv4_address, ipv6_address, interface_id]
+    )?;
+    
+    Ok(())
+}
+
+pub fn find_interface_by_mac(conn: &Connection, mac_address: &str) -> Result<Option<i32>> {
+    let mut stmt = conn.prepare("SELECT id FROM interfaces WHERE mac_address = ?1")?;
+    let mut rows = stmt.query_map([mac_address], |row| {
+        Ok(row.get::<_, i32>(0)?)
+    })?;
+    
+    if let Some(row) = rows.next() {
+        Ok(Some(row?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn create_subnet(conn: &Connection, name: &str, network_ipv4: Option<&str>, network_ipv6: Option<&str>, 
+                    gateway_ipv4: Option<&str>, gateway_ipv6: Option<&str>, dns_servers: &str, lease_time: u32) -> Result<i32> {
+    conn.execute(
+        "INSERT INTO subnets (name, network_ipv4, network_ipv6, gateway_ipv4, gateway_ipv6, dns_servers, lease_time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![name, network_ipv4, network_ipv6, gateway_ipv4, gateway_ipv6, dns_servers, lease_time]
+    )?;
+    
+    Ok(conn.last_insert_rowid() as i32)
 }
 
 #[cfg(test)]

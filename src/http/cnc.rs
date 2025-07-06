@@ -95,7 +95,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
-        let state = Arc::new(AppState { db: Mutex::new(db) });
+        let state = Arc::new(AppState { db: Arc::new(Mutex::new(db)) });
         (state, temp_dir)
     }
 
