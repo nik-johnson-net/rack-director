@@ -1,11 +1,52 @@
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
+use tokio::sync::Mutex;
 
+use crate::director::store::DirectorStore;
 use crate::tftp::Handler;
 use crate::tftp::Reader;
+
+mod store;
+
+pub enum BootTarget {
+    LocalDisk,
+    NetBoot {
+        ramdisk: String,
+        kernel: String,
+        cmdline: String,
+    },
+}
+
+#[derive(Clone)]
+pub struct Director {
+    store: DirectorStore,
+}
+
+impl Director {
+    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
+        let store = DirectorStore::new(conn);
+        Director { store }
+    }
+
+    pub async fn register_device(&self, uuid: &str) -> anyhow::Result<()> {
+        self.store.register_device(uuid).await?;
+
+        Ok(())
+    }
+
+    pub async fn next_boot_target(&self, uuid: &str) -> anyhow::Result<BootTarget> {
+        self.store
+            .update_device_last_seen(uuid)
+            .await
+            .expect("update device last seen should not fail");
+
+        Ok(BootTarget::LocalDisk)
+    }
+}
 
 pub struct DirectorTftpHandler {
     root: PathBuf,

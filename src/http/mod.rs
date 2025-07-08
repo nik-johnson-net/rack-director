@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::Router;
-use tokio::sync::Mutex;
+
+use crate::director::Director;
 
 struct AppState {
-    db: Mutex<rusqlite::Connection>,
+    director: Director,
 }
 
-pub async fn start(db: Mutex<rusqlite::Connection>) -> Result<()> {
-    let state = Arc::new(AppState { db });
+pub async fn start(director: Director) -> Result<()> {
+    let state = Arc::new(AppState { director });
 
     let app = Router::new()
         .merge(ui::routes(state.clone()))
