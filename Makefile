@@ -6,7 +6,7 @@ default: bundle
 
 build_release:
 	@echo "Building rack-director release version $(VERSION)"
-	@cargo build --release
+	@cargo build --release -p rack-director
 
 $(BUNDLE_DIR)/tftp/undionly.kpxe:
 	@echo "Downloading undionly.kpxe"

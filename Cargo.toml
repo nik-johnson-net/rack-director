@@ -1,23 +1,22 @@
-[package]
-name = "rack-director"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "rack-director",
+]
+resolver = "3"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.98"
 async-trait = "0.1.88"
 axum = "0.8.4"
 axum-extra = "0.10.1"
-chrono = "0.4.41"
+chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.40", features = ["derive"] }
 log = { version = "0.4.27", features = ["kv"] }
 rusqlite = { version = "0.36.0", features = ["bundled", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.140"
 std-logger = "0.5.7"
-tokio = { version = "1.45.1", features = ["rt-multi-thread", "net", "macros", "sync", "signal", "fs", "time", "io-util"] }
-
-[dev-dependencies]
 tempfile = "3.12"
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "net", "macros", "sync", "signal", "fs", "time", "io-util"] }
 tokio-test = "0.4"
 tower = { version = "0.4", features = ["util"] }
