@@ -8,6 +8,10 @@ build_release:
 	@echo "Building rack-director release version $(VERSION)"
 	@cargo build --release -p rack-director
 
+build_agent_release:
+	@echo "Building rack-agent release version $(VERSION)"
+	@cargo build --release -p rack-agent
+
 $(BUNDLE_DIR)/tftp/undionly.kpxe:
 	@echo "Downloading undionly.kpxe"
 	@mkdir -p $(BUNDLE_DIR)/tftp
@@ -18,7 +22,7 @@ $(BUNDLE_DIR)/tftp/ipxe.efi:
 	@mkdir -p $(BUNDLE_DIR)/tftp
 	@wget -O $(BUNDLE_DIR)/tftp/ipxe.efi https://boot.ipxe.org/ipxe.efi
 
-$(BUNDLE_DIR)/agent-image/vmlinuz $(BUNDLE_DIR)/agent-image/initramfs.img $(BUNDLE_DIR)/agent-image/agent-image.sqfs:
+$(BUNDLE_DIR)/agent-image/vmlinuz $(BUNDLE_DIR)/agent-image/initramfs.img $(BUNDLE_DIR)/agent-image/agent-image.sqfs: build_agent_release
 	@echo "Building agent image"
 	@docker build --output=$(BUNDLE_DIR)/agent-image agent-image/
 

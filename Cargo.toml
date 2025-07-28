@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = [ "common", "rack-agent",
     "rack-director",
 ]
 resolver = "3"

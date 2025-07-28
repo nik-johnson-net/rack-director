@@ -9,6 +9,8 @@ RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} --installr
   redhat-release systemd passwd rootfiles sudo dracut dracut-network dnf lvm2 mdadm
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /agent-image install kernel NetworkManager
 COPY build-agent.sh /usr/local/bin/build-agent.sh
+COPY rack-agent.service /agent-image/etc/systemd/system/rack-agent.service
+COPY --from=target rack-agent /agent-image/usr/local/sbin/rack-agent
 RUN chmod +x /usr/local/bin/build-agent.sh
 RUN /usr/local/bin/build-agent.sh
 

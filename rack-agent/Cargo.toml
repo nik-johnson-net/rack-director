@@ -1,0 +1,16 @@
+[package]
+name = "rack-agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+common = { version = "0.1.0", path = "../common" }
+dmidecode = "1.0.0"
+log.workspace = true
+std-logger.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
