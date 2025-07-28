@@ -7,6 +7,7 @@ use tokio::io::BufReader;
 use tokio::sync::Mutex;
 
 use crate::director::store::DirectorStore;
+use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::tftp::Handler;
 use crate::tftp::Reader;
 
@@ -24,12 +25,14 @@ pub enum BootTarget {
 #[derive(Clone)]
 pub struct Director {
     store: DirectorStore,
+    plans_store: PlansStore,
 }
 
 impl Director {
     pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
-        let store = DirectorStore::new(conn);
-        Director { store }
+        let store = DirectorStore::new(conn.clone());
+        let plans_store = PlansStore::new(conn);
+        Director { store, plans_store }
     }
 
     pub async fn register_device(&self, uuid: &str) -> anyhow::Result<()> {
@@ -44,7 +47,133 @@ impl Director {
             .await
             .expect("update device last seen should not fail");
 
+        // Check if there's an active plan for this device
+        if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await? {
+            if let Some(current_action) = plan.get_current_action() {
+                // Return appropriate boot target based on the current action
+                return Ok(self.get_boot_target_for_action(current_action));
+            }
+        }
+
+        // Default to local disk if no active plan
         Ok(BootTarget::LocalDisk)
+    }
+
+    fn get_boot_target_for_action(&self, action: &crate::plans::Action) -> BootTarget {
+        match action.action_type.as_str() {
+            "install_os" => BootTarget::NetBoot {
+                ramdisk: "install-initrd.img".to_string(),
+                kernel: "install-vmlinuz".to_string(),
+                cmdline: "install".to_string(),
+            },
+            "configure_network" => BootTarget::NetBoot {
+                ramdisk: "config-initrd.img".to_string(),
+                kernel: "config-vmlinuz".to_string(),
+                cmdline: "configure".to_string(),
+            },
+            "run_diagnostics" => BootTarget::NetBoot {
+                ramdisk: "diag-initrd.img".to_string(),
+                kernel: "diag-vmlinuz".to_string(),
+                cmdline: "diagnostics".to_string(),
+            },
+            // Default to local boot for unknown actions
+            _ => BootTarget::LocalDisk,
+        }
+    }
+
+    pub async fn update_attributes(
+        &self,
+        uuid: &str,
+        attributes: serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.store.update_attributes(uuid, attributes).await?;
+        Ok(())
+    }
+
+    pub async fn create_plan(&self, plan: &Plan) -> anyhow::Result<i64> {
+        self.plans_store.create_plan(plan).await
+    }
+
+    pub async fn get_active_plan_for_device(
+        &self,
+        device_uuid: &str,
+    ) -> anyhow::Result<Option<Plan>> {
+        self.plans_store
+            .get_active_plan_for_device(device_uuid)
+            .await
+    }
+
+    pub async fn mark_action_success(&self, device_uuid: &str) -> anyhow::Result<()> {
+        // Get the current active plan
+        let mut plan = match self
+            .plans_store
+            .get_active_plan_for_device(device_uuid)
+            .await?
+        {
+            Some(plan) => plan,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "No active plan found for device {}",
+                    device_uuid
+                ));
+            }
+        };
+
+        // Start the plan if it's pending
+        if plan.status == PlanStatus::Pending {
+            plan.start();
+        }
+
+        // Mark current action as successful and advance
+        let _result = plan.mark_action_success();
+
+        // Update the plan in the database
+        self.plans_store
+            .update_plan_status(
+                plan.id.unwrap(),
+                plan.status.clone(),
+                plan.current_step,
+                plan.error_message.as_deref(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn mark_action_failed(
+        &self,
+        device_uuid: &str,
+        error_message: &str,
+    ) -> anyhow::Result<()> {
+        // Get the current active plan
+        let mut plan = match self
+            .plans_store
+            .get_active_plan_for_device(device_uuid)
+            .await?
+        {
+            Some(plan) => plan,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "No active plan found for device {}",
+                    device_uuid
+                ));
+            }
+        };
+
+        // Mark current action as failed
+        let _result = plan.mark_action_failed(error_message.to_string());
+
+        // Update the plan in the database
+        self.plans_store
+            .update_plan_status(
+                plan.id.unwrap(),
+                plan.status.clone(),
+                plan.current_step,
+                plan.error_message.as_deref(),
+            )
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -90,5 +219,77 @@ impl Reader for DirectorTftpReader {
         let mut chunk = vec![0; 512]; // Read in chunks of 512 bytes
         let _ = self.file.read(&mut chunk).await?;
         Ok(chunk)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{database, plans::PlanStatus};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    async fn setup_test_director() -> (Director, tempfile::TempDir) {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = database::open(&db_path).unwrap();
+        let director = Director::new(Arc::new(Mutex::new(db)));
+        (director, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_single_active_plan_constraint() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = "550e8400-e29b-41d4-a716-446655440006";
+
+        // Register device
+        director.register_device(test_uuid).await.unwrap();
+
+        // Create first plan
+        let first_actions = vec![crate::plans::Action::new(
+            "install_os".to_string(),
+            std::collections::HashMap::new(),
+        )];
+        let first_plan = crate::plans::Plan::new(test_uuid.to_string(), first_actions);
+        director.create_plan(&first_plan).await.unwrap();
+
+        // Verify first plan is active
+        let active_plan = director
+            .get_active_plan_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        assert_eq!(
+            active_plan.as_ref().unwrap().actions[0].action_type,
+            "install_os"
+        );
+
+        // Create second plan - this should be rejected
+        let second_actions = vec![crate::plans::Action::new(
+            "configure_network".to_string(),
+            std::collections::HashMap::new(),
+        )];
+        let second_plan = crate::plans::Plan::new(test_uuid.to_string(), second_actions);
+        let result = director.create_plan(&second_plan).await;
+
+        // Verify the second plan creation was rejected
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("an active plan already exists")
+        );
+
+        // Verify the first plan is still active and unchanged
+        let active_plan = director
+            .get_active_plan_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.actions[0].action_type, "install_os");
+        assert_eq!(plan.status, PlanStatus::Pending);
     }
 }

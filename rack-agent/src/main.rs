@@ -34,7 +34,7 @@ async fn main() {
     let director_url = resolve_director_url(args.director_url)
         .await
         .unwrap_or_else(|e| {
-            log::error!("Failed to resolve director URL: {}", e);
+            log::error!("Failed to resolve director URL: {e}");
             std::process::exit(1);
         });
 

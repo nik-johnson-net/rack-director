@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS devices (
     uuid TEXT UNIQUE NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     first_seen_at DATETIME DEFAULT 0,
-    last_seen_at DATETIME DEFAULT 0
+    last_seen_at DATETIME DEFAULT 0,
+    attributes JSONB DEFAULT '{}'
 );
 
 -- Create index for UUID lookups

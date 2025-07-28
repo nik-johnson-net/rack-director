@@ -1,6 +1,7 @@
 mod database;
 mod director;
 mod http;
+mod plans;
 mod tftp;
 
 use std::sync::Arc;
@@ -25,6 +26,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
+    // First step is to configure the logger.
+    std_logger::Config::logfmt().init();
+
     let args = Args::parse();
 
     let db = Arc::new(Mutex::new(database::open(&args.db_path).unwrap()));

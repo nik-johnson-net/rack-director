@@ -3,8 +3,11 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-const LATEST_VERSION: i32 = 1;
-const MIGRATIONS: [&str; LATEST_VERSION as usize] = [include_str!("migrations/1.sql")];
+const LATEST_VERSION: i32 = 2;
+const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
+    include_str!("migrations/1.sql"),
+    include_str!("migrations/2.sql"),
+];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -59,5 +62,47 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         assert!(open(db_path).is_ok());
+    }
+
+    #[test]
+    fn test_database_schema() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = open(db_path).unwrap();
+
+        // Test that tables exist
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+            .unwrap();
+        let table_names: Vec<String> = stmt
+            .query_map([], |row| Ok(row.get::<_, String>(0)?))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(table_names.contains(&"devices".to_string()));
+        assert!(table_names.contains(&"plans".to_string()));
+        assert!(table_names.contains(&"migrations".to_string()));
+    }
+
+    #[test]
+    fn test_device_operations() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = open(db_path).unwrap();
+
+        // Test creating a device
+        conn.execute("INSERT INTO devices (uuid) VALUES (?1)", ["test-uuid"])
+            .unwrap();
+
+        // Test querying the device
+        let mut stmt = conn
+            .prepare("SELECT uuid FROM devices WHERE uuid = ?1")
+            .unwrap();
+        let uuid: String = stmt
+            .query_row(["test-uuid"], |row| Ok(row.get(0)?))
+            .unwrap();
+
+        assert_eq!(uuid, "test-uuid");
     }
 }

@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
 axum-extra = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }

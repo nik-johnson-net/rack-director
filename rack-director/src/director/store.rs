@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct DirectorStore {
-    conn: Arc<Mutex<rusqlite::Connection>>,
+    pub conn: Arc<Mutex<rusqlite::Connection>>,
 }
 
 impl DirectorStore {
@@ -25,6 +25,20 @@ impl DirectorStore {
         conn.execute(
             "UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
             [uuid],
+        )?;
+        Ok(())
+    }
+
+    pub async fn update_attributes(
+        &self,
+        uuid: &str,
+        attributes: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
+            [&serde_json::to_string(&attributes)?, uuid],
         )?;
         Ok(())
     }
