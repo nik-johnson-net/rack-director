@@ -15,7 +15,10 @@ impl DirectorStore {
 
     pub async fn register_device(&self, uuid: &str) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn.execute("INSERT INTO devices (uuid) VALUES (?1)", [uuid])?;
+        conn.execute(
+            "INSERT INTO devices (uuid, lifecycle) VALUES (?1, 'new')",
+            [uuid],
+        )?;
         Ok(())
     }
 

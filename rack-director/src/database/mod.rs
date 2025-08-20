@@ -3,10 +3,11 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-const LATEST_VERSION: i32 = 2;
+const LATEST_VERSION: i32 = 3;
 const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
+    include_str!("migrations/3.sql"),
 ];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
@@ -82,6 +83,7 @@ mod tests {
 
         assert!(table_names.contains(&"devices".to_string()));
         assert!(table_names.contains(&"plans".to_string()));
+        assert!(table_names.contains(&"lifecycle_transitions".to_string()));
         assert!(table_names.contains(&"migrations".to_string()));
     }
 
@@ -92,8 +94,11 @@ mod tests {
         let conn = open(db_path).unwrap();
 
         // Test creating a device
-        conn.execute("INSERT INTO devices (uuid) VALUES (?1)", ["test-uuid"])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO devices (uuid, lifecycle) VALUES (?1, 'new')",
+            ["test-uuid"],
+        )
+        .unwrap();
 
         // Test querying the device
         let mut stmt = conn

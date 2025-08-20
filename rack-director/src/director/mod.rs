@@ -7,6 +7,7 @@ use tokio::io::BufReader;
 use tokio::sync::Mutex;
 
 use crate::director::store::DirectorStore;
+use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, LifecycleTransition};
 use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::tftp::Handler;
 use crate::tftp::Reader;
@@ -26,13 +27,19 @@ pub enum BootTarget {
 pub struct Director {
     store: DirectorStore,
     plans_store: PlansStore,
+    lifecycle_store: LifecycleStore,
 }
 
 impl Director {
     pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
         let store = DirectorStore::new(conn.clone());
-        let plans_store = PlansStore::new(conn);
-        Director { store, plans_store }
+        let plans_store = PlansStore::new(conn.clone());
+        let lifecycle_store = LifecycleStore::new(conn);
+        Director {
+            store,
+            plans_store,
+            lifecycle_store,
+        }
     }
 
     pub async fn register_device(&self, uuid: &str) -> anyhow::Result<()> {
@@ -48,11 +55,11 @@ impl Director {
             .expect("update device last seen should not fail");
 
         // Check if there's an active plan for this device
-        if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await? {
-            if let Some(current_action) = plan.get_current_action() {
-                // Return appropriate boot target based on the current action
-                return Ok(self.get_boot_target_for_action(current_action));
-            }
+        if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await?
+            && let Some(current_action) = plan.get_current_action()
+        {
+            // Return appropriate boot target based on the current action
+            return Ok(self.get_boot_target_for_action(current_action));
         }
 
         // Default to local disk if no active plan
@@ -137,6 +144,12 @@ impl Director {
             )
             .await?;
 
+        // Handle lifecycle transition if plan is complete
+        if plan.status == PlanStatus::Success {
+            self.handle_plan_completion_success(plan.id.unwrap())
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -172,6 +185,137 @@ impl Director {
                 plan.error_message.as_deref(),
             )
             .await?;
+
+        // Handle lifecycle transition if plan failed
+        self.handle_plan_completion_failure(plan.id.unwrap(), error_message)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn start_lifecycle_transition(
+        &self,
+        device_uuid: &str,
+        to_state: DeviceLifecycle,
+    ) -> anyhow::Result<i64> {
+        // Get current device lifecycle
+        let current_lifecycle = self
+            .lifecycle_store
+            .get_device_lifecycle(device_uuid)
+            .await?
+            .unwrap_or(DeviceLifecycle::New);
+
+        // Check if transition is allowed
+        if !LifecycleManager::is_transition_allowed(&current_lifecycle, &to_state) {
+            return Err(anyhow::anyhow!(
+                "Transition from {:?} to {:?} is not allowed",
+                current_lifecycle,
+                to_state
+            ));
+        }
+
+        // Check if there's already an active transition
+        if let Some(_active_transition) = self
+            .lifecycle_store
+            .get_active_transition_for_device(device_uuid)
+            .await?
+        {
+            return Err(anyhow::anyhow!(
+                "Device {} already has an active lifecycle transition",
+                device_uuid
+            ));
+        }
+
+        // Get transition type
+        let transition_type = LifecycleManager::get_transition_type(&current_lifecycle, &to_state)
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine transition type"))?;
+
+        // Create plan for this transition
+        let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
+        let plan = Plan::new(device_uuid.to_string(), actions);
+        let plan_id = self.create_plan(&plan).await?;
+
+        // Create lifecycle transition
+        let transition = LifecycleTransition::new(
+            device_uuid.to_string(),
+            current_lifecycle,
+            to_state,
+            Some(plan_id),
+        );
+
+        let transition_id = self.lifecycle_store.create_transition(&transition).await?;
+
+        Ok(transition_id)
+    }
+
+    pub async fn get_device_lifecycle(
+        &self,
+        device_uuid: &str,
+    ) -> anyhow::Result<Option<DeviceLifecycle>> {
+        self.lifecycle_store.get_device_lifecycle(device_uuid).await
+    }
+
+    pub async fn get_active_transition_for_device(
+        &self,
+        device_uuid: &str,
+    ) -> anyhow::Result<Option<LifecycleTransition>> {
+        self.lifecycle_store
+            .get_active_transition_for_device(device_uuid)
+            .await
+    }
+
+    pub async fn get_device_transitions(
+        &self,
+        device_uuid: &str,
+        include_completed: bool,
+    ) -> anyhow::Result<Vec<LifecycleTransition>> {
+        self.lifecycle_store
+            .get_transitions_for_device(device_uuid, include_completed)
+            .await
+    }
+
+    async fn handle_plan_completion_success(&self, plan_id: i64) -> anyhow::Result<()> {
+        // Find the lifecycle transition associated with this plan
+        if let Some(transition) = self
+            .lifecycle_store
+            .get_transition_by_plan_id(plan_id)
+            .await?
+        {
+            // Update device lifecycle to the target state
+            self.lifecycle_store
+                .update_device_lifecycle(&transition.device_uuid, transition.to_state.clone())
+                .await?;
+
+            // Complete the transition successfully
+            self.lifecycle_store
+                .complete_transition(transition.id.unwrap(), true, None)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_plan_completion_failure(
+        &self,
+        plan_id: i64,
+        error_message: &str,
+    ) -> anyhow::Result<()> {
+        // Find the lifecycle transition associated with this plan
+        if let Some(transition) = self
+            .lifecycle_store
+            .get_transition_by_plan_id(plan_id)
+            .await?
+        {
+            // Move device to broken state on failure
+            self.lifecycle_store
+                .update_device_lifecycle(&transition.device_uuid, DeviceLifecycle::Broken)
+                .await?;
+
+            // Complete the transition with failure
+            self.lifecycle_store
+                .complete_transition(transition.id.unwrap(), false, Some(error_message))
+                .await?;
+        }
 
         Ok(())
     }
