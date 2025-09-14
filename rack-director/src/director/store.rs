@@ -42,4 +42,35 @@ impl DirectorStore {
         )?;
         Ok(())
     }
+
+    pub async fn get_all_devices(
+        &self,
+    ) -> Result<Vec<(String, Option<serde_json::Map<String, serde_json::Value>>)>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare("SELECT uuid, attributes FROM devices")?;
+        let rows = stmt.query_map([], |row| {
+            let uuid: String = row.get(0)?;
+            let attributes_json: Option<String> = row.get(1)?;
+            let attributes = match attributes_json {
+                Some(json_str) => {
+                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                        &json_str,
+                    ) {
+                        Ok(map) => Some(map),
+                        Err(_) => None,
+                    }
+                }
+                None => None,
+            };
+            Ok((uuid, attributes))
+        })?;
+
+        let mut devices = Vec::new();
+        for row in rows {
+            devices.push(row?);
+        }
+
+        Ok(devices)
+    }
 }

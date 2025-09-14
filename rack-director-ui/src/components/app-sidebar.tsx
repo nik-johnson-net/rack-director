@@ -10,7 +10,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
-import { useMatch } from "react-router";
+import { Link, useMatch } from "react-router";
 
 // Menu items.
 const items = [
@@ -65,10 +65,10 @@ function AppSidebarMenuItem({ url, title, icon: Icon }: { url: string; title: st
   return (
     <SidebarMenuItem key={title}>
       <SidebarMenuButton asChild isActive={isActive !== null}>
-        <a href={url}>
+        <Link to={url}>
           <Icon />
           <span>{title}</span>
-        </a>
+        </Link>
       </SidebarMenuButton>
     </SidebarMenuItem>
   )

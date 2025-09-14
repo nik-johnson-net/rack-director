@@ -1,6 +1,6 @@
 VERSION := $(shell cargo metadata --frozen --no-deps --format-version 1 | jq -r '.packages | map(select(.name == "rack-director"))[0] | .version')
 BUNDLE_DIR := target/bundle/rack-director-$(VERSION)
-.PHONY: build_release bundle
+.PHONY: build_release bundle devserver
 
 default: bundle
 
@@ -32,3 +32,6 @@ bundle: build_release $(BUNDLE_DIR)/tftp/undionly.kpxe $(BUNDLE_DIR)/tftp/ipxe.e
 	@cp target/release/rack-director $(BUNDLE_DIR)/rack-director
 	@tar -czf target/bundle/rack-director-$(VERSION).tar.gz -C target/bundle rack-director-$(VERSION)
 	@echo "Bundle created at target/bundle/rack-director-$(VERSION).tar.gz"
+
+devserver:
+	scripts/devserver.sh
