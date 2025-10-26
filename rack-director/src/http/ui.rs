@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State}, http::{header, StatusCode}, response::{Html, IntoResponse}, routing::get, Json, Router
+    Json, Router,
+    extract::{Path, State},
+    http::{StatusCode, header},
+    response::{Html, IntoResponse},
+    routing::get,
 };
 use serde::Serialize;
 
@@ -9,9 +13,10 @@ use crate::http::AppState;
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(http_index))
         .route("/assets/{asset}", get(http_assets))
         .route("/ui/devices", get(devices_index))
+        .route("/", get(http_index))
+        .route("/{*wildcard}", get(http_index))
         .with_state(state)
 }
 
@@ -25,9 +30,7 @@ async fn http_index() -> Result<Html<Vec<u8>>, StatusCode> {
     }
 }
 
-async fn http_assets(
-    Path(asset): Path<String>,
-) -> impl IntoResponse {
+async fn http_assets(Path(asset): Path<String>) -> impl IntoResponse {
     match tokio::fs::read(format!("./rack-director-ui/dist/assets/{}", asset)).await {
         Ok(data) => {
             let content_type = match asset.rsplit_once('.') {
@@ -37,7 +40,7 @@ async fn http_assets(
                 None => "text/plain",
             };
             Ok(([(header::CONTENT_TYPE, content_type)], data))
-        },
+        }
         Err(e) => {
             log::warn!("Asset not found: {}", e);
             Err(StatusCode::NOT_FOUND)

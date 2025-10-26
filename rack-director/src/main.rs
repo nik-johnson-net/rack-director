@@ -17,7 +17,6 @@ const DEFAULT_DATABASE_PATH: &str = ".db.sqlite";
 #[cfg(not(debug_assertions))]
 const DEFAULT_DATABASE_PATH: &str = "/var/lib/rack-director/db.sqlite";
 
-
 #[derive(Parser, Debug)]
 struct Args {
     // Path to the database file.
