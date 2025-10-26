@@ -25,11 +25,6 @@ impl PlansStore {
         self.get_active_plan_for_device_internal(&conn, device_uuid)
     }
 
-    pub async fn get_plan_by_id(&self, plan_id: i64) -> Result<Option<Plan>> {
-        let conn = self.conn.lock().await;
-        self.get_plan_by_id_internal(&conn, plan_id)
-    }
-
     pub async fn update_plan_status(
         &self,
         plan_id: i64,
@@ -86,48 +81,6 @@ impl PlansStore {
         )?;
 
         let mut plan_iter = stmt.query_map([device_uuid], |row| {
-            let actions_json: String = row.get(5)?;
-            let actions: Vec<Action> = serde_json::from_str(&actions_json).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    5,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-
-            let status_str: String = row.get(2)?;
-            let status = PlanStatus::from(status_str);
-
-            Ok(Plan {
-                id: Some(row.get(0)?),
-                device_uuid: row.get(1)?,
-                status,
-                current_step: row.get(3)?,
-                total_steps: row.get(4)?,
-                actions,
-                error_message: row.get(6)?,
-                created_at: row.get(7)?,
-                started_at: row.get(8)?,
-                completed_at: row.get(9)?,
-            })
-        })?;
-
-        if let Some(plan_result) = plan_iter.next() {
-            return Ok(Some(plan_result?));
-        }
-
-        Ok(None)
-    }
-
-    fn get_plan_by_id_internal(&self, conn: &Connection, plan_id: i64) -> Result<Option<Plan>> {
-        let mut stmt = conn.prepare(
-            "SELECT id, device_uuid, status, current_step, total_steps, actions, error_message, 
-                    created_at, started_at, completed_at 
-             FROM plans 
-             WHERE id = ?1",
-        )?;
-
-        let mut plan_iter = stmt.query_map([plan_id], |row| {
             let actions_json: String = row.get(5)?;
             let actions: Vec<Action> = serde_json::from_str(&actions_json).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(

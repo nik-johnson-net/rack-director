@@ -1,6 +1,7 @@
 mod database;
 mod director;
 mod http;
+mod lifecycle;
 mod plans;
 mod tftp;
 
