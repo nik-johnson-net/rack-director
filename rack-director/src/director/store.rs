@@ -54,12 +54,9 @@ impl DirectorStore {
             let attributes_json: Option<String> = row.get(1)?;
             let attributes = match attributes_json {
                 Some(json_str) => {
-                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
                         &json_str,
-                    ) {
-                        Ok(map) => Some(map),
-                        Err(_) => None,
-                    }
+                    ).ok()
                 }
                 None => None,
             };

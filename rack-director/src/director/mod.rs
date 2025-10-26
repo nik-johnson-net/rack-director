@@ -48,12 +48,11 @@ impl Director {
             .expect("update device last seen should not fail");
 
         // Check if there's an active plan for this device
-        if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await? {
-            if let Some(current_action) = plan.get_current_action() {
+        if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await?
+            && let Some(current_action) = plan.get_current_action() {
                 // Return appropriate boot target based on the current action
                 return Ok(self.get_boot_target_for_action(current_action));
             }
-        }
 
         // Default to local disk if no active plan
         Ok(BootTarget::LocalDisk)
@@ -181,9 +180,7 @@ impl Director {
     ) -> anyhow::Result<Vec<(String, Option<serde_json::Map<String, serde_json::Value>>)>> {
         self.store
             .get_all_devices()
-            .await
-            .map_err(anyhow::Error::from)
-    }
+            .await}
 }
 
 pub struct DirectorTftpHandler {
