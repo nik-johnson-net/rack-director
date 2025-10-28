@@ -319,6 +319,13 @@ impl Director {
 
         Ok(())
     }
+
+    pub async fn get_all_devices(
+        &self,
+    ) -> anyhow::Result<Vec<(String, Option<serde_json::Map<String, serde_json::Value>>)>> {
+        self.store
+            .get_all_devices()
+            .await}
 }
 
 pub struct DirectorTftpHandler {
@@ -435,5 +442,53 @@ mod tests {
         let plan = active_plan.unwrap();
         assert_eq!(plan.actions[0].action_type, "install_os");
         assert_eq!(plan.status, PlanStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_get_all_devices() {
+        let (director, _temp_dir) = setup_test_director().await;
+
+        // Initially should return empty list
+        let devices = director.get_all_devices().await.unwrap();
+        assert_eq!(devices.len(), 0);
+
+        // Register a device
+        let test_uuid1 = "550e8400-e29b-41d4-a716-446655440001";
+        director.register_device(test_uuid1).await.unwrap();
+
+        // Should now return one device
+        let devices = director.get_all_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].0, test_uuid1);
+        // Default attributes should be empty JSON object
+        let attrs = devices[0].1.as_ref().unwrap();
+        assert!(attrs.is_empty());
+
+        // Register another device with attributes
+        let test_uuid2 = "550e8400-e29b-41d4-a716-446655440002";
+        director.register_device(test_uuid2).await.unwrap();
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("test-server".to_string()),
+        );
+        director
+            .update_attributes(test_uuid2, attributes.clone())
+            .await
+            .unwrap();
+
+        // Should now return two devices
+        let devices = director.get_all_devices().await.unwrap();
+        assert_eq!(devices.len(), 2);
+
+        // Find the device with attributes
+        let device_with_attrs = devices.iter().find(|(uuid, _)| uuid == test_uuid2).unwrap();
+        assert!(device_with_attrs.1.is_some());
+        let attrs = device_with_attrs.1.as_ref().unwrap();
+        assert_eq!(
+            attrs.get("hostname").unwrap().as_str().unwrap(),
+            "test-server"
+        );
     }
 }

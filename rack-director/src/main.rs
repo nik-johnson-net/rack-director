@@ -12,6 +12,10 @@ use tokio::sync::Mutex;
 
 use crate::director::Director;
 
+#[cfg(debug_assertions)]
+const DEFAULT_DATABASE_PATH: &str = ".db.sqlite";
+
+#[cfg(not(debug_assertions))]
 const DEFAULT_DATABASE_PATH: &str = "/var/lib/rack-director/db.sqlite";
 
 #[derive(Parser, Debug)]
