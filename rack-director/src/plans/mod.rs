@@ -52,6 +52,7 @@ impl Action {
         }
     }
 
+    #[allow(unused)]
     pub fn with_description(mut self, description: String) -> Self {
         self.description = Some(description);
         self
@@ -96,10 +97,12 @@ impl Plan {
         }
     }
 
+    #[allow(unused)]
     pub fn is_completed(&self) -> bool {
         matches!(self.status, PlanStatus::Success | PlanStatus::Failed)
     }
 
+    #[allow(unused)]
     pub fn is_active(&self) -> bool {
         matches!(self.status, PlanStatus::Pending | PlanStatus::Running)
     }

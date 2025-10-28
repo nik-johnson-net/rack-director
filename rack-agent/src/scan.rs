@@ -14,7 +14,7 @@ pub struct DeviceScanArgs {
     no_upload: bool,
 }
 
-pub async fn device_scan(client: &RackDirector, scan_args: &DeviceScanArgs) -> Result<()> {
+pub async fn device_scan(_client: &RackDirector, _scan_args: &DeviceScanArgs) -> Result<()> {
     read_dmi().await?;
 
     Ok(())
@@ -61,31 +61,31 @@ fn parse_dmi(bytes: &[u8]) -> Result<()> {
         };
 
         match decoded_table {
-            dmidecode::Structure::Bios(bios) => todo!(),
-            dmidecode::Structure::System(system) => todo!(),
-            dmidecode::Structure::BaseBoard(base_board) => todo!(),
-            dmidecode::Structure::Enclosure(enclosure) => todo!(),
-            dmidecode::Structure::Processor(processor) => todo!(),
-            dmidecode::Structure::Cache(cache) => todo!(),
-            dmidecode::Structure::PortConnector(port_connector) => todo!(),
-            dmidecode::Structure::SystemSlots(system_slots) => todo!(),
-            dmidecode::Structure::OemStrings(oem_strings) => todo!(),
-            dmidecode::Structure::SystemConfigurationOptions(system_configuration_options) => {
+            dmidecode::Structure::Bios(_bios) => todo!(),
+            dmidecode::Structure::System(_system) => todo!(),
+            dmidecode::Structure::BaseBoard(_base_board) => todo!(),
+            dmidecode::Structure::Enclosure(_enclosure) => todo!(),
+            dmidecode::Structure::Processor(_processor) => todo!(),
+            dmidecode::Structure::Cache(_cache) => todo!(),
+            dmidecode::Structure::PortConnector(_port_connector) => todo!(),
+            dmidecode::Structure::SystemSlots(_system_slots) => todo!(),
+            dmidecode::Structure::OemStrings(_oem_strings) => todo!(),
+            dmidecode::Structure::SystemConfigurationOptions(_system_configuration_options) => {
                 todo!()
             }
-            dmidecode::Structure::BiosLanguage(bios_language) => todo!(),
-            dmidecode::Structure::GroupAssociations(group_associations) => todo!(),
-            dmidecode::Structure::SystemEventLog(system_event_log) => todo!(),
-            dmidecode::Structure::MemoryDevice(memory_device) => todo!(),
-            dmidecode::Structure::MemoryError32(memory_error32) => todo!(),
-            dmidecode::Structure::MemoryArrayMappedAddress(memory_array_mapped_address) => todo!(),
-            dmidecode::Structure::MemoryDeviceMappedAddress(memory_device_mapped_address) => {
+            dmidecode::Structure::BiosLanguage(_bios_language) => todo!(),
+            dmidecode::Structure::GroupAssociations(_group_associations) => todo!(),
+            dmidecode::Structure::SystemEventLog(_system_event_log) => todo!(),
+            dmidecode::Structure::MemoryDevice(_memory_device) => todo!(),
+            dmidecode::Structure::MemoryError32(_memory_error32) => todo!(),
+            dmidecode::Structure::MemoryArrayMappedAddress(_memory_array_mapped_address) => todo!(),
+            dmidecode::Structure::MemoryDeviceMappedAddress(_memory_device_mapped_address) => {
                 todo!()
             }
-            dmidecode::Structure::BuiltInPointingDevice(built_in_pointing_device) => todo!(),
-            dmidecode::Structure::PortableBattery(portable_battery) => todo!(),
-            dmidecode::Structure::PhysicalMemoryArray(physical_memory_array) => todo!(),
-            dmidecode::Structure::Other(raw_structure) => todo!(),
+            dmidecode::Structure::BuiltInPointingDevice(_built_in_pointing_device) => todo!(),
+            dmidecode::Structure::PortableBattery(_portable_battery) => todo!(),
+            dmidecode::Structure::PhysicalMemoryArray(_physical_memory_array) => todo!(),
+            dmidecode::Structure::Other(_raw_structure) => todo!(),
         }
     }
 
