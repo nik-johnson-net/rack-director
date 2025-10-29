@@ -198,8 +198,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
+        let db = Arc::new(Mutex::new(db));
         let state = Arc::new(AppState {
-            director: Director::new(Arc::new(Mutex::new(db))),
+            director: Director::new(db.clone()),
+            dhcp_store: crate::dhcp::DhcpStore::new(db),
         });
         (state, temp_dir)
     }

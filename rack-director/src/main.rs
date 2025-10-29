@@ -1,4 +1,5 @@
 mod database;
+mod dhcp;
 mod director;
 mod http;
 mod lifecycle;
@@ -27,6 +28,10 @@ struct Args {
     // Path to the directory containing the TFTP files.
     #[arg(long, default_value = "/usr/lib/rack-director/tftp")]
     tftp_path: String,
+
+    // DHCP server port (optional, defaults to 67)
+    #[arg(long)]
+    dhcp_port: Option<u16>,
 }
 
 #[tokio::main]
@@ -40,12 +45,28 @@ async fn main() {
     let director: Director = Director::new(db.clone());
     let tftp_handler = director::DirectorTftpHandler::new(args.tftp_path);
 
-    let http_handle = tokio::spawn(http::start(director.clone()));
+    // Initialize DHCP server and store
+    let dhcp_store = dhcp::DhcpStore::new(db.clone());
+    let dhcp_server = dhcp::DhcpServer::new(db.clone(), director.clone(), args.dhcp_port)
+        .await
+        .unwrap();
+
+    let http_handle = tokio::spawn(http::start(director.clone(), dhcp_store));
     let tftp_handle = tokio::spawn(tftp::Server::new(tftp_handler).serve());
+    let dhcp_handle = tokio::spawn(dhcp_server.serve());
 
-    http_handle.await.unwrap().unwrap();
-    log::info!("http server shutdown");
-
-    tftp_handle.await.unwrap().unwrap();
-    log::info!("tftp server shutdown");
+    tokio::select! {
+        result = http_handle => {
+            result.unwrap().unwrap();
+            log::info!("http server shutdown");
+        }
+        result = tftp_handle => {
+            result.unwrap().unwrap();
+            log::info!("tftp server shutdown");
+        }
+        result = dhcp_handle => {
+            result.unwrap().unwrap();
+            log::info!("dhcp server shutdown");
+        }
+    }
 }

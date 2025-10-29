@@ -1,3 +1,4 @@
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -323,9 +324,16 @@ impl Director {
     pub async fn get_all_devices(
         &self,
     ) -> anyhow::Result<Vec<(String, Option<serde_json::Map<String, serde_json::Value>>)>> {
-        self.store
-            .get_all_devices()
-            .await}
+        self.store.get_all_devices().await
+    }
+
+    pub async fn find_device_by_mac(&self, mac: &str) -> anyhow::Result<Option<String>> {
+        self.store.find_device_by_mac(mac).await
+    }
+
+    pub async fn get_device_static_ip(&self, uuid: &str) -> anyhow::Result<Option<Ipv4Addr>> {
+        self.store.get_device_static_ip(uuid).await
+    }
 }
 
 pub struct DirectorTftpHandler {

@@ -3,11 +3,12 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-const LATEST_VERSION: i32 = 3;
+const LATEST_VERSION: i32 = 4;
 const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
     include_str!("migrations/3.sql"),
+    include_str!("migrations/4.sql"),
 ];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
@@ -76,7 +77,7 @@ mod tests {
             .prepare("SELECT name FROM sqlite_master WHERE type='table'")
             .unwrap();
         let table_names: Vec<String> = stmt
-            .query_map([], |row| Ok(row.get::<_, String>(0)?))
+            .query_map([], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -104,9 +105,7 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT uuid FROM devices WHERE uuid = ?1")
             .unwrap();
-        let uuid: String = stmt
-            .query_row(["test-uuid"], |row| Ok(row.get(0)?))
-            .unwrap();
+        let uuid: String = stmt.query_row(["test-uuid"], |row| row.get(0)).unwrap();
 
         assert_eq!(uuid, "test-uuid");
     }

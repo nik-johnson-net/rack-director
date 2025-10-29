@@ -7,14 +7,19 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::Router;
 
+use crate::dhcp::DhcpStore;
 use crate::director::Director;
 
 struct AppState {
     director: Director,
+    dhcp_store: DhcpStore,
 }
 
-pub async fn start(director: Director) -> Result<()> {
-    let state = Arc::new(AppState { director });
+pub async fn start(director: Director, dhcp_store: DhcpStore) -> Result<()> {
+    let state = Arc::new(AppState {
+        director,
+        dhcp_store,
+    });
 
     let app = Router::new()
         .merge(ui::routes(state.clone()))

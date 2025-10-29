@@ -1,4 +1,3 @@
-
 pub struct RackDirector {
     // client: reqwest::Client;
 }
