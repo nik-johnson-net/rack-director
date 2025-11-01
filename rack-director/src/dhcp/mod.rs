@@ -6,8 +6,8 @@ mod store;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::Arc;
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
+use tokio::{net::UdpSocket, task::JoinHandle};
 
 use crate::director::Director;
 
@@ -19,14 +19,19 @@ use handler::DhcpHandler;
 
 pub struct DhcpServer {
     handler: DhcpHandler,
-    port: u16,
+    address: String,
+}
+
+pub struct StartResult {
+    pub join_handle: JoinHandle<Result<()>>,
+    pub port: u16,
 }
 
 impl DhcpServer {
     pub async fn new(
         db: Arc<Mutex<Connection>>,
         director: Director,
-        port: Option<u16>,
+        address: Option<String>,
     ) -> Result<Self> {
         let store = DhcpStore::new(db);
         let config = store.load_config().await?;
@@ -47,16 +52,22 @@ impl DhcpServer {
 
         Ok(Self {
             handler,
-            port: port.unwrap_or(67),
+            address: address.unwrap_or("0.0.0.0:67".to_string()),
         })
     }
 
     /// Start the DHCP server (long-running task)
-    pub async fn serve(self) -> Result<()> {
-        let addr = format!("0.0.0.0:{}", self.port);
-        let socket = Arc::new(UdpSocket::bind(&addr).await?);
-        log::info!("DHCP server listening on {}", addr);
+    pub async fn serve(self) -> Result<StartResult> {
+        let socket = Arc::new(UdpSocket::bind(&self.address).await?);
+        let local_addr = socket.local_addr()?;
+        log::info!("DHCP server listening on {}", local_addr);
 
+        let join_handle = tokio::spawn(self.serve_task(socket));
+        let port = local_addr.port();
+        Ok(StartResult { join_handle, port })
+    }
+
+    pub async fn serve_task(self, socket: Arc<UdpSocket>) -> Result<()> {
         let mut buf = vec![0u8; 1500]; // MTU size
 
         loop {
@@ -95,7 +106,9 @@ mod tests {
         let db = Arc::new(Mutex::new(conn));
         let director = Director::new(db.clone());
 
-        let server = DhcpServer::new(db, director, Some(6767)).await.unwrap();
-        assert_eq!(server.port, 6767);
+        let server = DhcpServer::new(db, director, Some("0.0.0.0:6767".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(server.address, "0.0.0.0:6767".to_string());
     }
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::UdpSocket;
+use tokio::task::JoinHandle;
 
 use crate::tftp::{connection::Connection, packet::Packet};
 
@@ -10,6 +11,11 @@ mod packet;
 mod state;
 pub use state::Handler;
 pub use state::Reader;
+
+pub struct StartResult {
+    pub join_handle: JoinHandle<Result<()>>,
+    pub port: u16,
+}
 
 pub struct Server<H: Handler> {
     address: String,
@@ -30,10 +36,11 @@ impl<H: Handler + Send + Sync + 'static> Server<H> {
         self
     }
 
-    pub async fn serve(self) -> Result<()> {
+    pub async fn serve(self) -> Result<StartResult> {
         let socket = tokio::net::UdpSocket::bind(self.address).await?;
-        serve(socket, self.handler).await?;
-        Ok(())
+        let port = socket.local_addr()?.port();
+        let join_handle = tokio::spawn(serve(socket, self.handler));
+        Ok(StartResult { join_handle, port })
     }
 }
 
