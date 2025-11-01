@@ -49,6 +49,11 @@ impl Director {
         Ok(())
     }
 
+    pub async fn device_exists(&self, uuid: &str) -> anyhow::Result<bool> {
+        let exists = self.store.device_exists(uuid).await?;
+        Ok(exists)
+    }
+
     pub async fn next_boot_target(&self, uuid: &str) -> anyhow::Result<BootTarget> {
         self.store
             .update_device_last_seen(uuid)

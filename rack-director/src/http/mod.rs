@@ -1,5 +1,6 @@
 mod api;
 mod cnc;
+mod error;
 mod ui;
 
 use std::sync::Arc;

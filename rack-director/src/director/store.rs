@@ -24,6 +24,17 @@ impl DirectorStore {
         Ok(())
     }
 
+    pub async fn device_exists(&self, uuid: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let res = conn
+            .query_one("SELECT 1 FROM devices WHERE uuid = ?1", [uuid], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map(|op: Option<i32>| op.is_some())?;
+        Ok(res)
+    }
+
     pub async fn update_device_last_seen(&self, uuid: &str) -> Result<()> {
         let conn = self.conn.lock().await;
 

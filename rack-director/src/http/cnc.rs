@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{director::BootTarget, http::AppState};
 
+use crate::http::error::Error;
+
 #[derive(Deserialize)]
 struct IpxeQuery {
     uuid: Option<String>,
@@ -30,28 +32,27 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-// TODO: If uuid is new, register it and return an ipxe menu to discovery.
-// TODO: Return valid url to this server
-// TODO: Ask director service what a known server should do.
-// TODO: Configurable if unknown UUIDs should auto run discovery or not
 async fn ipxe_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<IpxeQuery>,
     Host(host): Host,
-) -> Result<Response<String>, StatusCode> {
+) -> Result<Response<String>, Error> {
     let root_url = format!("http://{host}");
 
     let uuid = match params.uuid {
         Some(uuid) if !uuid.is_empty() => uuid,
-        Some(_) => return Err(StatusCode::BAD_REQUEST),
+        Some(_) => return Err(Error::BadRequest("foo".to_string())),
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
     // Non-fatal, continue anyways.
-    if let Err(e) = state.director.register_device(&uuid).await {
+    if !state.director.device_exists(&uuid).await?
+        && let Err(e) = state.director.register_device(&uuid).await
+    {
         warn!("Couldn't register device {uuid}: {e}");
     };
 
+    // Non-fatal. If the boot target can't be found, redirect loop back here to try again
     let boot_target = match state.director.next_boot_target(&uuid).await {
         Ok(x) => x,
         Err(e) => {
