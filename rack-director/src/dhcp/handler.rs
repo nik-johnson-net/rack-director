@@ -241,30 +241,48 @@ impl DhcpHandler {
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Ack));
 
-        // Determine boot mode from DHCP options
-        let boot_mode = self.detect_boot_mode(req);
-        let boot_opts = self.boot_config.get_boot_options(boot_mode)?;
+        // Check if this is iPXE making a second DHCP request
+        let is_ipxe = self.is_ipxe(req);
 
-        log::debug!(
-            "Boot mode: {:?}, next_server: {}, filename: {}",
-            boot_mode,
-            boot_opts.next_server,
-            boot_opts.filename
-        );
+        if is_ipxe {
+            // iPXE second-stage boot: Return HTTP URL for boot script
+            let boot_opts = self.boot_config.get_ipxe_boot_script()?;
 
-        // Option 66 (TFTP Server Name)
-        msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
-            boot_opts.next_server.clone().into_bytes(),
-        ));
+            log::debug!(
+                "iPXE detected, returning HTTP boot script: {}",
+                boot_opts.filename
+            );
 
-        // Option 67 (Bootfile Name)
-        msg.opts_mut().insert(v4::DhcpOption::BootfileName(
-            boot_opts.filename.into_bytes(),
-        ));
+            // Option 67 (Bootfile Name) - HTTP URL for iPXE script
+            msg.opts_mut().insert(v4::DhcpOption::BootfileName(
+                boot_opts.filename.into_bytes(),
+            ));
+        } else {
+            // First-stage boot: Determine boot mode and return bootloader via TFTP
+            let boot_mode = self.detect_boot_mode(req);
+            let boot_opts = self.boot_config.get_boot_options(boot_mode)?;
 
-        // siaddr field (next server IP)
-        let next_server_ip: Ipv4Addr = boot_opts.next_server.parse()?;
-        msg.set_siaddr(next_server_ip);
+            log::debug!(
+                "Boot mode: {:?}, next_server: {}, filename: {}",
+                boot_mode,
+                boot_opts.next_server,
+                boot_opts.filename
+            );
+
+            // Option 66 (TFTP Server Name)
+            msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
+                boot_opts.next_server.clone().into_bytes(),
+            ));
+
+            // Option 67 (Bootfile Name)
+            msg.opts_mut().insert(v4::DhcpOption::BootfileName(
+                boot_opts.filename.into_bytes(),
+            ));
+
+            // siaddr field (next server IP)
+            let next_server_ip: Ipv4Addr = boot_opts.next_server.parse()?;
+            msg.set_siaddr(next_server_ip);
+        }
 
         Ok(msg)
     }
@@ -285,6 +303,20 @@ impl DhcpHandler {
         ));
 
         Ok(msg)
+    }
+
+    fn is_ipxe(&self, msg: &Message) -> bool {
+        // Check Option 77 (User-Class) for "iPXE" identifier
+        for (_code, opt) in msg.opts().iter() {
+            if let v4::DhcpOption::UserClass(data) = opt {
+                // The UserClass option contains a Vec<u8>
+                // iPXE sends "iPXE" as the user class identifier
+                if data == b"iPXE" {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn detect_boot_mode(&self, msg: &Message) -> BootMode {

@@ -1,0 +1,3 @@
+Mock iPXE EFI bootloader for testing UEFI PXE boot flows.
+This file simulates the iPXE bootloader that would be fetched via TFTP
+and then load the iPXE script from the HTTP endpoint.

@@ -128,6 +128,24 @@ impl DhcpClient {
         requested_ip: Ipv4Addr,
         server_ip: Ipv4Addr,
     ) -> Result<(Ipv4Addr, BootOptions)> {
+        self.request_internal(requested_ip, server_ip, false)
+    }
+
+    /// Send DHCP REQUEST as iPXE (second-stage boot) and receive HTTP boot script URL
+    pub fn request_as_ipxe(
+        &mut self,
+        requested_ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+    ) -> Result<(Ipv4Addr, BootOptions)> {
+        self.request_internal(requested_ip, server_ip, true)
+    }
+
+    fn request_internal(
+        &mut self,
+        requested_ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+        is_ipxe: bool,
+    ) -> Result<(Ipv4Addr, BootOptions)> {
         // Build DHCP REQUEST message
         let mut msg = Message::default();
         msg.set_xid(self.xid)
@@ -148,6 +166,12 @@ impl DhcpClient {
         msg.opts_mut().insert(DhcpOption::ClientSystemArchitecture(
             v4::Architecture::from(self.architecture as u16),
         ));
+
+        // If this is iPXE, add User-Class option (Option 77)
+        if is_ipxe {
+            msg.opts_mut()
+                .insert(DhcpOption::UserClass(b"iPXE".to_vec()));
+        }
 
         // Encode and send
         let mut buf = Vec::new();
@@ -193,11 +217,8 @@ impl DhcpClient {
 
     /// Extract boot options (next-server and bootfile name) from DHCP message
     fn extract_boot_options(&self, msg: &Message) -> Result<BootOptions> {
-        // Get next-server from siaddr field
+        // Get next-server from siaddr field (may be unspecified for HTTP boot)
         let next_server = msg.siaddr();
-        if next_server.is_unspecified() {
-            return Err(anyhow!("No next-server (siaddr) in DHCP response"));
-        }
 
         // Get bootfile name from Option 67
         let bootfile_name = msg
