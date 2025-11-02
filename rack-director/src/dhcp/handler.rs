@@ -3,7 +3,7 @@ use dhcproto::{
     Decodable, Encodable,
     decoder::Decoder,
     encoder::Encoder,
-    v4::{self, Message, MessageType, Opcode},
+    v4::{self, Architecture, Message, MessageType, Opcode},
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -41,7 +41,7 @@ impl DhcpHandler {
     pub async fn handle_packet(
         &self,
         data: &[u8],
-        _peer_addr: SocketAddr,
+        peer_addr: SocketAddr,
         socket: Arc<UdpSocket>,
     ) -> Result<()> {
         // Decode DHCP message using dhcproto
@@ -74,9 +74,10 @@ impl DhcpHandler {
             let mut buf = Vec::new();
             resp.encode(&mut Encoder::new(&mut buf))?;
 
-            // Broadcast response (DHCP protocol requirement)
-            let broadcast_addr = SocketAddr::from(([255, 255, 255, 255], 68));
-            socket.send_to(&buf, broadcast_addr).await?;
+            // Send response back to peer
+            // In production, this would be broadcast to 255.255.255.255:68
+            // For localhost testing, we send unicast to the peer address
+            socket.send_to(&buf, peer_addr).await?;
         }
 
         Ok(())
@@ -290,16 +291,15 @@ impl DhcpHandler {
         // Check Option 93 (Client System Architecture)
         for (_code, opt) in msg.opts().iter() {
             if let v4::DhcpOption::ClientSystemArchitecture(arch) = opt {
-                // Format the architecture as a string to match against
-                let arch_str = format!("{:?}", arch);
-                return if arch_str.contains("EFI") {
-                    if arch_str.contains("Arm") || arch_str.contains("AArch64") {
-                        BootMode::UefiArm64
-                    } else {
-                        BootMode::UefiBoot
+                return match arch {
+                    Architecture::Intelx86PC => BootMode::BiosLegacy, // Intel x86PC
+                    Architecture::BC | Architecture::X86_64 => BootMode::UefiBoot, // EFI IA32, EFI BC (x86-64), EFI Xscale
+                    Architecture::Unknown(11) => BootMode::UefiArm64, // EFI ARM 64-bit (AArch64)
+                    _ => {
+                        // Unknown architecture, assume BIOS for safety
+                        log::warn!("Unknown client architecture: {:?}", arch);
+                        BootMode::BiosLegacy
                     }
-                } else {
-                    BootMode::BiosLegacy
                 };
             }
         }

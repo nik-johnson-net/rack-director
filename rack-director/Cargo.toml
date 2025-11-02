@@ -19,6 +19,8 @@ std-logger = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+reqwest = "0.12"
 tempfile = { workspace = true }
+tftp_client = "0.1"
 tokio-test = { workspace = true }
 tower = { workspace = true }

@@ -190,7 +190,7 @@ async fn handle_ack<H: Handler>(
     data: &mut Vec<u8>,
     acked_block: u16,
 ) -> Result<HandleResponse<H>> {
-    let next_block = *block + 1;
+    let next_block = block.wrapping_add(1);
     let data = if acked_block == *block {
         // If the ACK is for the current block, and the current block is < 512 bytes, the transfer is complete.
         if data.len() < 512 {

@@ -381,7 +381,8 @@ impl DirectorTftpReader {
 impl Reader for DirectorTftpReader {
     async fn read(&mut self) -> anyhow::Result<Vec<u8>> {
         let mut chunk = vec![0; 512]; // Read in chunks of 512 bytes
-        let _ = self.file.read(&mut chunk).await?;
+        let n = self.file.read(&mut chunk).await?;
+        chunk.truncate(n); // Return only the bytes that were actually read
         Ok(chunk)
     }
 }
