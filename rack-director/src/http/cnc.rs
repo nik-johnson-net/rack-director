@@ -26,6 +26,7 @@ struct IpxeQuery {
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/cnc/ipxe", get(ipxe_handler))
+        .route("/cnc/install_script", get(install_script_handler))
         .route("/cnc/update_attributes", post(update_attributes))
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
@@ -90,6 +91,126 @@ initrd {root_url}/cnc/images/{ramdisk}
 boot
 "#
     )
+}
+
+async fn install_script_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<IpxeQuery>,
+) -> Result<Response<String>, Error> {
+    let uuid = params
+        .uuid
+        .ok_or_else(|| Error::BadRequest("Missing uuid parameter".to_string()))?;
+
+    if uuid.is_empty() {
+        return Err(Error::BadRequest("Empty uuid parameter".to_string()));
+    }
+
+    // Get device
+    let device = state
+        .director
+        .get_device(&uuid)
+        .await
+        .map_err(|e| Error::InternalServerError(e.to_string()))?;
+
+    // Get device role
+    let role = state
+        .roles_store
+        .get_device_role(&uuid)
+        .map_err(|e| Error::InternalServerError(e.to_string()))?
+        .ok_or_else(|| Error::NotFound("Device has no role assigned".to_string()))?;
+
+    // Determine device architecture (default to x86-64 for now)
+    let arch = crate::operating_systems::Architecture::X86_64;
+
+    // Get OS architecture configuration
+    let os_arch = state
+        .os_store
+        .get_architecture(role.os_id, arch)
+        .map_err(|e| Error::NotFound(format!("OS architecture not found: {}", e)))?;
+
+    // Get OS
+    let os = state
+        .os_store
+        .get(role.os_id)
+        .map_err(|e| Error::InternalServerError(e.to_string()))?;
+
+    // Check if install script exists
+    let script_path = os_arch
+        .install_script_path
+        .ok_or_else(|| Error::NotFound("No install script for this OS architecture".to_string()))?;
+
+    // Download install script template from storage
+    let script_bytes = state
+        .image_store
+        .download(&script_path)
+        .await
+        .map_err(|e| Error::InternalServerError(format!("Failed to download script: {}", e)))?;
+
+    let template = String::from_utf8(script_bytes)
+        .map_err(|e| Error::InternalServerError(format!("Script is not valid UTF-8: {}", e)))?;
+
+    // Get device network info
+    let network_info = get_device_network_info(&state, &uuid).await?;
+
+    // Get device attributes
+    let attributes = device.get("attributes")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let hostname = attributes
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let device_info = crate::templates::DeviceInfo {
+        uuid: uuid.clone(),
+        hostname,
+    };
+
+    // Render template with device context
+    let rendered = crate::templates::render_install_script(&template, &device_info, &role, &os, &network_info)
+        .map_err(|e| Error::InternalServerError(format!("Template rendering failed: {}", e)))?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(rendered)
+        .expect("response building should never error"))
+}
+
+async fn get_device_network_info(
+    state: &Arc<AppState>,
+    uuid: &str,
+) -> Result<crate::templates::NetworkInfo, Error> {
+    // Try to find device's lease
+    let lease = state
+        .dhcp_store
+        .find_lease_by_device_uuid(uuid)
+        .map_err(|e| Error::InternalServerError(e.to_string()))?;
+
+    if let Some(lease) = lease {
+        // Get DHCP config for gateway and DNS
+        let config = state
+            .dhcp_store
+            .get_config()
+            .map_err(|e| Error::InternalServerError(e.to_string()))?;
+
+        let dns_servers: Vec<String> = serde_json::from_str(&config.dns_servers)
+            .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
+
+        Ok(crate::templates::NetworkInfo {
+            mac_address: lease.mac_address,
+            ip_address: lease.ip_address,
+            gateway: config.gateway,
+            dns_servers,
+            netmask: "255.255.255.0".to_string(), // TODO: Calculate from subnet
+        })
+    } else {
+        Err(Error::NotFound(
+            "Device has no DHCP lease".to_string(),
+        ))
+    }
 }
 
 fn generate_uuid_script(root_url: &str) -> String {
