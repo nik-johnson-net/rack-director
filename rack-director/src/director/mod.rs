@@ -9,7 +9,10 @@ use tokio::sync::Mutex;
 
 use crate::director::store::DirectorStore;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, LifecycleTransition};
+use crate::operating_systems::{Architecture, OperatingSystemsStore};
 use crate::plans::{Plan, PlanStatus, PlansStore};
+use crate::roles::RolesStore;
+use crate::storage::ImageStore;
 use crate::tftp::Handler;
 use crate::tftp::Reader;
 
@@ -29,6 +32,9 @@ pub struct Director {
     store: DirectorStore,
     plans_store: PlansStore,
     lifecycle_store: LifecycleStore,
+    os_store: Option<OperatingSystemsStore>,
+    roles_store: Option<RolesStore>,
+    image_store: Option<Arc<dyn ImageStore>>,
 }
 
 impl Director {
@@ -40,11 +46,26 @@ impl Director {
             store,
             plans_store,
             lifecycle_store,
+            os_store: None,
+            roles_store: None,
+            image_store: None,
         }
     }
 
-    pub async fn register_device(&self, uuid: &str) -> anyhow::Result<()> {
-        self.store.register_device(uuid).await?;
+    /// Set the OS store, roles store, and image store for boot target generation
+    pub fn set_stores(
+        &mut self,
+        os_store: OperatingSystemsStore,
+        roles_store: RolesStore,
+        image_store: Arc<dyn ImageStore>,
+    ) {
+        self.os_store = Some(os_store);
+        self.roles_store = Some(roles_store);
+        self.image_store = Some(image_store);
+    }
+
+    pub async fn register_device(&self, uuid: &str, architecture: Architecture) -> anyhow::Result<()> {
+        self.store.register_device(uuid, architecture).await?;
 
         Ok(())
     }
@@ -65,32 +86,71 @@ impl Director {
             && let Some(current_action) = plan.get_current_action()
         {
             // Return appropriate boot target based on the current action
-            return Ok(self.get_boot_target_for_action(current_action));
+            return self.get_boot_target_for_action(uuid, current_action).await;
         }
 
         // Default to local disk if no active plan
         Ok(BootTarget::LocalDisk)
     }
 
-    fn get_boot_target_for_action(&self, action: &crate::plans::Action) -> BootTarget {
+    async fn get_boot_target_for_action(
+        &self,
+        uuid: &str,
+        action: &crate::plans::Action,
+    ) -> anyhow::Result<BootTarget> {
         match action.action_type.as_str() {
-            "install_os" => BootTarget::NetBoot {
-                ramdisk: "install-initrd.img".to_string(),
-                kernel: "install-vmlinuz".to_string(),
-                cmdline: "install".to_string(),
-            },
-            "configure_network" => BootTarget::NetBoot {
+            "install_os" => {
+                // Get device role and OS configuration
+                if let (Some(roles_store), Some(os_store), Some(image_store)) =
+                    (&self.roles_store, &self.os_store, &self.image_store)
+                {
+                    // Get device
+                    let device = self.get_device(uuid).await?;
+
+                    // Get device architecture
+                    let arch_str = device
+                        .get("architecture")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("x86-64");
+                    let arch = Architecture::from_str(arch_str)?;
+
+                    // Get device role
+                    if let Some(role) = roles_store.get_device_role(uuid)? {
+                        // Get OS architecture configuration
+                        let os_arch = os_store.get_architecture(role.os_id, arch)?;
+
+                        // Generate URLs from image store
+                        let kernel_url = image_store.get_url(&os_arch.kernel_path);
+                        let initramfs_url = image_store.get_url(&os_arch.initramfs_path);
+                        let cmdline = os_arch.cmdline_args.unwrap_or_else(|| "".to_string());
+
+                        return Ok(BootTarget::NetBoot {
+                            ramdisk: initramfs_url,
+                            kernel: kernel_url,
+                            cmdline,
+                        });
+                    }
+                }
+
+                // Fallback to default images if role/OS not configured
+                Ok(BootTarget::NetBoot {
+                    ramdisk: "install-initrd.img".to_string(),
+                    kernel: "install-vmlinuz".to_string(),
+                    cmdline: "install".to_string(),
+                })
+            }
+            "configure_network" => Ok(BootTarget::NetBoot {
                 ramdisk: "config-initrd.img".to_string(),
                 kernel: "config-vmlinuz".to_string(),
                 cmdline: "configure".to_string(),
-            },
-            "run_diagnostics" => BootTarget::NetBoot {
+            }),
+            "run_diagnostics" => Ok(BootTarget::NetBoot {
                 ramdisk: "diag-initrd.img".to_string(),
                 kernel: "diag-vmlinuz".to_string(),
                 cmdline: "diagnostics".to_string(),
-            },
+            }),
             // Default to local boot for unknown actions
-            _ => BootTarget::LocalDisk,
+            _ => Ok(BootTarget::LocalDisk),
         }
     }
 

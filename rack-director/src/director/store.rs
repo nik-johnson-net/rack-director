@@ -5,6 +5,8 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use tokio::sync::Mutex;
 
+use crate::operating_systems::Architecture;
+
 #[derive(Clone)]
 pub struct DirectorStore {
     pub conn: Arc<Mutex<rusqlite::Connection>>,
@@ -15,11 +17,11 @@ impl DirectorStore {
         Self { conn }
     }
 
-    pub async fn register_device(&self, uuid: &str) -> Result<()> {
+    pub async fn register_device(&self, uuid: &str, architecture: Architecture) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO devices (uuid, lifecycle) VALUES (?1, 'new')",
-            [uuid],
+            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', ?2)",
+            params![uuid, architecture.as_str()],
         )?;
         Ok(())
     }

@@ -59,12 +59,6 @@ pub struct Args {
     #[arg(long, default_value = "us-east-1", help = "S3 region (when storage-type=s3)")]
     s3_region: String,
 
-    #[arg(long, help = "S3 access key (when storage-type=s3)")]
-    s3_access_key: Option<String>,
-
-    #[arg(long, help = "S3 secret key (when storage-type=s3)")]
-    s3_secret_key: Option<String>,
-
     #[arg(long, help = "Base URL for serving images over HTTP")]
     storage_base_url: Option<String>,
 }
@@ -93,7 +87,7 @@ impl RackDirectorHandle {
 
 pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle, anyhow::Error> {
     let db = Arc::new(Mutex::new(database::open(&args.db_path).unwrap()));
-    let director: Director = Director::new(db.clone());
+    let mut director: Director = Director::new(db.clone());
     let tftp_handler = director::DirectorTftpHandler::new(args.tftp_path);
 
     // Initialize DHCP server and store
@@ -109,6 +103,9 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Initialize OS and Roles stores
     let os_store = operating_systems::OperatingSystemsStore::new(db.clone());
     let roles_store = roles::RolesStore::new(db.clone());
+
+    // Set stores in director for boot target generation
+    director.set_stores(os_store.clone(), roles_store.clone(), image_store.clone());
 
     let mut tftp_server = tftp::Server::new(tftp_handler);
     tftp_server.address(args.tftp_address);
@@ -151,10 +148,14 @@ fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow
                 .ok_or_else(|| anyhow::anyhow!("--s3-endpoint required when storage-type=s3"))?;
             let bucket = args.s3_bucket.clone()
                 .ok_or_else(|| anyhow::anyhow!("--s3-bucket required when storage-type=s3"))?;
-            let access_key = args.s3_access_key.clone()
-                .ok_or_else(|| anyhow::anyhow!("--s3-access-key required when storage-type=s3"))?;
-            let secret_key = args.s3_secret_key.clone()
-                .ok_or_else(|| anyhow::anyhow!("--s3-secret-key required when storage-type=s3"))?;
+
+            // Read credentials from environment variables
+            let access_key = std::env::var("S3_ACCESS_KEY")
+                .or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
+                .map_err(|_| anyhow::anyhow!("S3_ACCESS_KEY or AWS_ACCESS_KEY_ID environment variable required when storage-type=s3"))?;
+            let secret_key = std::env::var("S3_SECRET_KEY")
+                .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
+                .map_err(|_| anyhow::anyhow!("S3_SECRET_KEY or AWS_SECRET_ACCESS_KEY environment variable required when storage-type=s3"))?;
 
             Ok(storage::ImageStoreConfig::S3 {
                 endpoint,

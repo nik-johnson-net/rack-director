@@ -48,7 +48,7 @@ async fn ipxe_handler(
 
     // Non-fatal, continue anyways.
     if !state.director.device_exists(&uuid).await?
-        && let Err(e) = state.director.register_device(&uuid).await
+        && let Err(e) = state.director.register_device(&uuid, crate::operating_systems::Architecture::X86_64).await
     {
         warn!("Couldn't register device {uuid}: {e}");
     };
@@ -321,9 +321,20 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
         let db = Arc::new(Mutex::new(db));
+
+        // Create image store for testing
+        let storage_path = temp_dir.path().join("images");
+        let image_store = crate::storage::LocalImageStore::new(
+            storage_path,
+            "http://localhost:8080/images".to_string(),
+        ).unwrap();
+
         let state = Arc::new(AppState {
             director: Director::new(db.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db),
+            dhcp_store: crate::dhcp::DhcpStore::new(db.clone()),
+            image_store: Arc::new(image_store),
+            os_store: crate::operating_systems::OperatingSystemsStore::new(db.clone()),
+            roles_store: crate::roles::RolesStore::new(db),
         });
         (state, temp_dir)
     }
@@ -356,7 +367,7 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440001";
 
         {
-            state.director.register_device(test_uuid).await.unwrap();
+            state.director.register_device(test_uuid, crate::operating_systems::Architecture::X86_64).await.unwrap();
         }
 
         let app = routes(state);
@@ -430,7 +441,7 @@ mod tests {
         let plan = crate::plans::Plan::new(test_uuid.to_string(), actions);
 
         // Register device and create plan
-        state.director.register_device(test_uuid).await.unwrap();
+        state.director.register_device(test_uuid, crate::operating_systems::Architecture::X86_64).await.unwrap();
         state.director.create_plan(&plan).await.unwrap();
 
         let app = routes(state);
@@ -463,7 +474,7 @@ mod tests {
         let plan = crate::plans::Plan::new(test_uuid.to_string(), actions);
 
         // Register device and create plan
-        state.director.register_device(test_uuid).await.unwrap();
+        state.director.register_device(test_uuid, crate::operating_systems::Architecture::X86_64).await.unwrap();
         state.director.create_plan(&plan).await.unwrap();
 
         let app = routes(state);
@@ -490,7 +501,7 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440005";
 
         // Register device but don't create a plan
-        state.director.register_device(test_uuid).await.unwrap();
+        state.director.register_device(test_uuid, crate::operating_systems::Architecture::X86_64).await.unwrap();
 
         let app = routes(state);
 
