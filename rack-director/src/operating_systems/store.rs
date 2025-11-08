@@ -1,8 +1,18 @@
-use super::{Architecture, OperatingSystem, OsArchitecture, OperatingSystemWithArchitectures};
-use anyhow::{anyhow, Context, Result};
+use super::{Architecture, OperatingSystem, OsArchitecture};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use rusqlite::{params, Connection};
-use std::sync::{Arc, Mutex};
+use rusqlite::{Connection, params};
+use serde::Serialize;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Complete operating system with all architecture configurations
+#[derive(Debug, Serialize)]
+pub struct OperatingSystemWithArchitectures {
+    #[serde(flatten)]
+    pub os: OperatingSystem,
+    pub architectures: Vec<OsArchitecture>,
+}
 
 #[derive(Clone)]
 pub struct OperatingSystemsStore {
@@ -15,8 +25,13 @@ impl OperatingSystemsStore {
     }
 
     /// Create a new operating system
-    pub fn create(&self, name: &str, version: &str, description: Option<&str>) -> Result<OperatingSystem> {
-        let conn = self.db.lock().unwrap();
+    pub async fn create(
+        &self,
+        name: &str,
+        version: &str,
+        description: Option<&str>,
+    ) -> Result<OperatingSystem> {
+        let conn = self.db.lock().await;
         let now = Utc::now();
 
         conn.execute(
@@ -39,8 +54,8 @@ impl OperatingSystemsStore {
     }
 
     /// Get an operating system by ID
-    pub fn get(&self, id: i64) -> Result<OperatingSystem> {
-        let conn = self.db.lock().unwrap();
+    pub async fn get(&self, id: i64) -> Result<OperatingSystem> {
+        let conn = self.db.lock().await;
 
         let mut stmt = conn.prepare(
             "SELECT id, name, version, description, created_at, updated_at
@@ -64,16 +79,19 @@ impl OperatingSystemsStore {
     }
 
     /// Get an operating system with all its architecture configurations
-    pub fn get_with_architectures(&self, id: i64) -> Result<OperatingSystemWithArchitectures> {
-        let os = self.get(id)?;
-        let architectures = self.list_architectures(id)?;
+    pub async fn get_with_architectures(
+        &self,
+        id: i64,
+    ) -> Result<OperatingSystemWithArchitectures> {
+        let os = self.get(id).await?;
+        let architectures = self.list_architectures(id).await?;
 
         Ok(OperatingSystemWithArchitectures { os, architectures })
     }
 
     /// List all operating systems
-    pub fn list(&self) -> Result<Vec<OperatingSystem>> {
-        let conn = self.db.lock().unwrap();
+    pub async fn list(&self) -> Result<Vec<OperatingSystem>> {
+        let conn = self.db.lock().await;
 
         let mut stmt = conn.prepare(
             "SELECT id, name, version, description, created_at, updated_at
@@ -100,54 +118,61 @@ impl OperatingSystemsStore {
     }
 
     /// Update an operating system
-    pub fn update(
+    pub async fn update(
         &self,
         id: i64,
         name: Option<&str>,
         version: Option<&str>,
         description: Option<&str>,
     ) -> Result<OperatingSystem> {
-        let conn = self.db.lock().unwrap();
-        let now = Utc::now();
+        let needs_update = {
+            let conn = self.db.lock().await;
+            let now = Utc::now();
 
-        // Build dynamic update query
-        let mut updates = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            // Build dynamic update query
+            let mut updates = Vec::new();
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if let Some(name) = name {
-            updates.push("name = ?");
-            params.push(Box::new(name.to_string()));
+            if let Some(name) = name {
+                updates.push("name = ?");
+                params.push(Box::new(name.to_string()));
+            }
+            if let Some(version) = version {
+                updates.push("version = ?");
+                params.push(Box::new(version.to_string()));
+            }
+            if let Some(description) = description {
+                updates.push("description = ?");
+                params.push(Box::new(description.to_string()));
+            }
+
+            if updates.is_empty() {
+                false
+            } else {
+                updates.push("updated_at = ?");
+                params.push(Box::new(now));
+                params.push(Box::new(id));
+
+                let query = format!(
+                    "UPDATE operating_systems SET {} WHERE id = ?",
+                    updates.join(", ")
+                );
+
+                conn.execute(&query, rusqlite::params_from_iter(params.iter()))?;
+                true
+            }
+        };
+
+        if !needs_update {
+            return self.get(id).await;
         }
-        if let Some(version) = version {
-            updates.push("version = ?");
-            params.push(Box::new(version.to_string()));
-        }
-        if let Some(description) = description {
-            updates.push("description = ?");
-            params.push(Box::new(description.to_string()));
-        }
 
-        if updates.is_empty() {
-            return self.get(id);
-        }
-
-        updates.push("updated_at = ?");
-        params.push(Box::new(now));
-        params.push(Box::new(id));
-
-        let query = format!(
-            "UPDATE operating_systems SET {} WHERE id = ?",
-            updates.join(", ")
-        );
-
-        conn.execute(&query, rusqlite::params_from_iter(params.iter()))?;
-
-        self.get(id)
+        self.get(id).await
     }
 
     /// Delete an operating system (and all its architectures due to CASCADE)
-    pub fn delete(&self, id: i64) -> Result<()> {
-        let conn = self.db.lock().unwrap();
+    pub async fn delete(&self, id: i64) -> Result<()> {
+        let conn = self.db.lock().await;
 
         let rows_affected = conn
             .execute("DELETE FROM operating_systems WHERE id = ?1", params![id])
@@ -161,7 +186,8 @@ impl OperatingSystemsStore {
     }
 
     /// Create or update an architecture configuration for an OS
-    pub fn upsert_architecture(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_architecture(
         &self,
         os_id: i64,
         architecture: Architecture,
@@ -171,42 +197,49 @@ impl OperatingSystemsStore {
         cmdline_args: Option<&str>,
         install_script_path: Option<&str>,
     ) -> Result<OsArchitecture> {
-        let conn = self.db.lock().unwrap();
-        let now = Utc::now();
-        let modules_json = serde_json::to_string(&modules)?;
-        let arch_str = architecture.as_str();
+        {
+            let conn = self.db.lock().await;
+            let now = Utc::now();
+            let modules_json = serde_json::to_string(&modules)?;
+            let arch_str = architecture.as_str();
 
-        conn.execute(
-            "INSERT INTO os_architectures
-             (os_id, architecture, kernel_path, initramfs_path, modules, cmdline_args, install_script_path, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(os_id, architecture) DO UPDATE SET
-             kernel_path = ?3,
-             initramfs_path = ?4,
-             modules = ?5,
-             cmdline_args = ?6,
-             install_script_path = ?7,
-             updated_at = ?9",
-            params![
-                os_id,
-                arch_str,
-                kernel_path,
-                initramfs_path,
-                modules_json,
-                cmdline_args,
-                install_script_path,
-                now,
-                now
-            ],
-        )
-        .context("Failed to upsert OS architecture")?;
+            conn.execute(
+                "INSERT INTO os_architectures
+                 (os_id, architecture, kernel_path, initramfs_path, modules, cmdline_args, install_script_path, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(os_id, architecture) DO UPDATE SET
+                 kernel_path = ?3,
+                 initramfs_path = ?4,
+                 modules = ?5,
+                 cmdline_args = ?6,
+                 install_script_path = ?7,
+                 updated_at = ?9",
+                params![
+                    os_id,
+                    arch_str,
+                    kernel_path,
+                    initramfs_path,
+                    modules_json,
+                    cmdline_args,
+                    install_script_path,
+                    now,
+                    now
+                ],
+            )
+            .context("Failed to upsert OS architecture")?;
+            // Lock is automatically dropped here
+        }
 
-        self.get_architecture(os_id, architecture)
+        self.get_architecture(os_id, architecture).await
     }
 
     /// Get a specific architecture configuration
-    pub fn get_architecture(&self, os_id: i64, architecture: Architecture) -> Result<OsArchitecture> {
-        let conn = self.db.lock().unwrap();
+    pub async fn get_architecture(
+        &self,
+        os_id: i64,
+        architecture: Architecture,
+    ) -> Result<OsArchitecture> {
+        let conn = self.db.lock().await;
         let arch_str = architecture.as_str();
 
         let mut stmt = conn.prepare(
@@ -238,8 +271,8 @@ impl OperatingSystemsStore {
     }
 
     /// List all architecture configurations for an OS
-    pub fn list_architectures(&self, os_id: i64) -> Result<Vec<OsArchitecture>> {
-        let conn = self.db.lock().unwrap();
+    pub async fn list_architectures(&self, os_id: i64) -> Result<Vec<OsArchitecture>> {
+        let conn = self.db.lock().await;
 
         let mut stmt = conn.prepare(
             "SELECT id, os_id, architecture, kernel_path, initramfs_path, modules, cmdline_args, install_script_path, created_at, updated_at
@@ -275,14 +308,14 @@ impl OperatingSystemsStore {
     }
 
     /// Update specific fields of an OS architecture
-    pub fn update_architecture_field(
+    pub async fn update_architecture_field(
         &self,
         os_id: i64,
         architecture: Architecture,
         field: &str,
         value: &str,
     ) -> Result<OsArchitecture> {
-        let conn = self.db.lock().unwrap();
+        let conn = self.db.lock().await;
         let now = Utc::now();
         let arch_str = architecture.as_str();
 
@@ -294,12 +327,13 @@ impl OperatingSystemsStore {
         conn.execute(&query, params![value, now, os_id, arch_str])
             .context("Failed to update OS architecture")?;
 
-        self.get_architecture(os_id, architecture)
+        drop(conn);
+        self.get_architecture(os_id, architecture).await
     }
 
     /// Delete an architecture configuration
-    pub fn delete_architecture(&self, os_id: i64, architecture: Architecture) -> Result<()> {
-        let conn = self.db.lock().unwrap();
+    pub async fn delete_architecture(&self, os_id: i64, architecture: Architecture) -> Result<()> {
+        let conn = self.db.lock().await;
         let arch_str = architecture.as_str();
 
         let rows_affected = conn
@@ -328,65 +362,67 @@ mod tests {
         Arc::new(Mutex::new(conn))
     }
 
-    #[test]
-    fn test_create_and_get_os() {
+    #[tokio::test]
+    async fn test_create_and_get_os() {
         let db = setup_db();
         let store = OperatingSystemsStore::new(db);
 
         let os = store
             .create("Ubuntu Server", "24.04", Some("Ubuntu 24.04 LTS"))
+            .await
             .unwrap();
 
         assert!(os.id.is_some());
         assert_eq!(os.name, "Ubuntu Server");
         assert_eq!(os.version, "24.04");
 
-        let retrieved = store.get(os.id.unwrap()).unwrap();
+        let retrieved = store.get(os.id.unwrap()).await.unwrap();
         assert_eq!(retrieved.name, os.name);
     }
 
-    #[test]
-    fn test_list_os() {
+    #[tokio::test]
+    async fn test_list_os() {
         let db = setup_db();
         let store = OperatingSystemsStore::new(db);
 
-        store.create("Ubuntu", "24.04", None).unwrap();
-        store.create("Debian", "12", None).unwrap();
+        store.create("Ubuntu", "24.04", None).await.unwrap();
+        store.create("Debian", "12", None).await.unwrap();
 
-        let list = store.list().unwrap();
+        let list = store.list().await.unwrap();
         assert_eq!(list.len(), 2);
     }
 
-    #[test]
-    fn test_update_os() {
+    #[tokio::test]
+    async fn test_update_os() {
         let db = setup_db();
         let store = OperatingSystemsStore::new(db);
 
-        let os = store.create("Ubuntu", "24.04", None).unwrap();
+        let os = store.create("Ubuntu", "24.04", None).await.unwrap();
         let updated = store
             .update(os.id.unwrap(), None, None, Some("New description"))
+            .await
             .unwrap();
 
         assert_eq!(updated.description, Some("New description".to_string()));
     }
 
-    #[test]
-    fn test_delete_os() {
+    #[tokio::test]
+    async fn test_delete_os() {
         let db = setup_db();
         let store = OperatingSystemsStore::new(db);
 
-        let os = store.create("Ubuntu", "24.04", None).unwrap();
-        store.delete(os.id.unwrap()).unwrap();
+        let os = store.create("Ubuntu", "24.04", None).await.unwrap();
+        store.delete(os.id.unwrap()).await.unwrap();
 
-        assert!(store.get(os.id.unwrap()).is_err());
+        assert!(store.get(os.id.unwrap()).await.is_err());
     }
 
-    #[test]
-    fn test_upsert_architecture() {
+    #[tokio::test]
+    async fn test_upsert_architecture() {
         let db = setup_db();
         let store = OperatingSystemsStore::new(db);
 
-        let os = store.create("Ubuntu", "24.04", None).unwrap();
+        let os = store.create("Ubuntu", "24.04", None).await.unwrap();
         let arch = store
             .upsert_architecture(
                 os.id.unwrap(),
@@ -397,6 +433,7 @@ mod tests {
                 Some("console=ttyS0"),
                 None,
             )
+            .await
             .unwrap();
 
         assert_eq!(arch.architecture, Architecture::X86_64);
@@ -413,6 +450,7 @@ mod tests {
                 Some("console=ttyS0"),
                 None,
             )
+            .await
             .unwrap();
 
         assert_eq!(updated.kernel_path, "os/1/kernel-new");
@@ -421,12 +459,12 @@ mod tests {
         assert_eq!(arch.id, updated.id);
     }
 
-    #[test]
-    fn test_list_architectures() {
+    #[tokio::test]
+    async fn test_list_architectures() {
         let db = setup_db();
         let store = OperatingSystemsStore::new(db);
 
-        let os = store.create("Ubuntu", "24.04", None).unwrap();
+        let os = store.create("Ubuntu", "24.04", None).await.unwrap();
         store
             .upsert_architecture(
                 os.id.unwrap(),
@@ -437,9 +475,10 @@ mod tests {
                 None,
                 None,
             )
+            .await
             .unwrap();
 
-        let archs = store.list_architectures(os.id.unwrap()).unwrap();
+        let archs = store.list_architectures(os.id.unwrap()).await.unwrap();
         assert_eq!(archs.len(), 1);
     }
 }

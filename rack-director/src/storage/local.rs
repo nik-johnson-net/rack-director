@@ -14,8 +14,7 @@ pub struct LocalImageStore {
 impl LocalImageStore {
     pub fn new(root_path: PathBuf, base_url: String) -> Result<Self> {
         // Create root directory if it doesn't exist
-        std::fs::create_dir_all(&root_path)
-            .context("Failed to create image storage directory")?;
+        std::fs::create_dir_all(&root_path).context("Failed to create image storage directory")?;
 
         Ok(Self {
             root_path,
@@ -65,7 +64,10 @@ impl ImageStore for LocalImageStore {
             .await
             .context(format!("Failed to read file: {}", file_path.display()))?;
 
-        log::debug!("Downloaded file from local storage: {}", file_path.display());
+        log::debug!(
+            "Downloaded file from local storage: {}",
+            file_path.display()
+        );
         Ok(data)
     }
 
@@ -94,7 +96,9 @@ impl ImageStore for LocalImageStore {
             let mut stack = vec![prefix_path.clone()];
 
             while let Some(dir) = stack.pop() {
-                let mut entries = fs::read_dir(&dir).await.context("Failed to read directory")?;
+                let mut entries = fs::read_dir(&dir)
+                    .await
+                    .context("Failed to read directory")?;
 
                 while let Some(entry) = entries
                     .next_entry()

@@ -193,17 +193,28 @@ mod tests {
     };
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
     use tower::util::ServiceExt;
 
     async fn setup_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
-        let db = Arc::new(Mutex::new(db));
+        let db_tokio = Arc::new(tokio::sync::Mutex::new(db));
+
+        // Create image store for testing
+        let storage_path = temp_dir.path().join("images");
+        let image_store = crate::storage::LocalImageStore::new(
+            storage_path,
+            "http://localhost:8080/images".to_string(),
+        )
+        .unwrap();
+
         let state = Arc::new(AppState {
-            director: Director::new(db.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db),
+            director: Director::new(db_tokio.clone()),
+            dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
+            image_store: Arc::new(image_store),
+            os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
+            roles_store: crate::roles::RolesStore::new(db_tokio),
         });
         (state, temp_dir)
     }
@@ -214,7 +225,11 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440010";
 
         // Register device
-        state.director.register_device(test_uuid).await.unwrap();
+        state
+            .director
+            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
 
         let app = routes(state);
 
@@ -233,7 +248,11 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440011";
 
         // Register device
-        state.director.register_device(test_uuid).await.unwrap();
+        state
+            .director
+            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
 
         let app = routes(state);
 
@@ -258,7 +277,11 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440012";
 
         // Register device
-        state.director.register_device(test_uuid).await.unwrap();
+        state
+            .director
+            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
 
         let app = routes(state);
 

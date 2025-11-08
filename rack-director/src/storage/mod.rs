@@ -35,13 +35,16 @@ pub trait ImageStore: Send + Sync {
     /// Download data from the store at the given path
     async fn download(&self, path: &str) -> Result<Vec<u8>>;
 
-    /// Delete data at the given path
+    /// Delete data at the given path (currently only used in tests)
+    #[allow(dead_code)]
     async fn delete(&self, path: &str) -> Result<()>;
 
-    /// Check if a file exists at the given path
+    /// Check if a file exists at the given path (currently only used in tests)
+    #[allow(dead_code)]
     async fn exists(&self, path: &str) -> Result<bool>;
 
-    /// List all files with the given prefix
+    /// List all files with the given prefix (currently only used in tests)
+    #[allow(dead_code)]
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
 
     /// Get the HTTP URL for a file (for iPXE to download)

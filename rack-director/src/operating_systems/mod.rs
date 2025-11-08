@@ -1,8 +1,8 @@
-mod store;
+pub mod store;
 
 pub use store::OperatingSystemsStore;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -62,49 +62,4 @@ impl std::fmt::Display for Architecture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
-}
-
-/// Request to create a new operating system
-#[derive(Debug, Deserialize)]
-pub struct CreateOperatingSystemRequest {
-    pub name: String,
-    pub version: String,
-    pub description: Option<String>,
-}
-
-/// Request to update an operating system
-#[derive(Debug, Deserialize)]
-pub struct UpdateOperatingSystemRequest {
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub description: Option<String>,
-}
-
-/// Request to create or update an OS architecture configuration
-#[derive(Debug, Deserialize)]
-pub struct CreateOsArchitectureRequest {
-    pub architecture: Architecture,
-    pub kernel_path: Option<String>,
-    pub initramfs_path: Option<String>,
-    pub modules: Option<Vec<String>>,
-    pub cmdline_args: Option<String>,
-    pub install_script_path: Option<String>,
-}
-
-/// Request to update an OS architecture configuration
-#[derive(Debug, Deserialize)]
-pub struct UpdateOsArchitectureRequest {
-    pub kernel_path: Option<String>,
-    pub initramfs_path: Option<String>,
-    pub modules: Option<Vec<String>>,
-    pub cmdline_args: Option<String>,
-    pub install_script_path: Option<String>,
-}
-
-/// Complete operating system with all architecture configurations
-#[derive(Debug, Serialize)]
-pub struct OperatingSystemWithArchitectures {
-    #[serde(flatten)]
-    pub os: OperatingSystem,
-    pub architectures: Vec<OsArchitecture>,
 }

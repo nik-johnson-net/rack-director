@@ -255,7 +255,9 @@ impl DhcpStore {
     /// Find lease by device UUID (synchronous for use in non-async contexts)
     pub fn find_lease_by_device_uuid(&self, device_uuid: &str) -> Result<Option<Lease>> {
         // Get the db without using async
-        let db = self.db.try_lock()
+        let db = self
+            .db
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("Could not lock database"))?;
 
         let mut stmt = db.prepare(
@@ -283,7 +285,9 @@ impl DhcpStore {
 
     /// Get DHCP config (synchronous for use in non-async contexts)
     pub fn get_config(&self) -> Result<DhcpConfig> {
-        let db = self.db.try_lock()
+        let db = self
+            .db
+            .try_lock()
             .map_err(|_| anyhow::anyhow!("Could not lock database"))?;
 
         let mut stmt = db.prepare("SELECT subnet, range_start, range_end, gateway, dns_servers, lease_duration, tftp_server, http_server FROM dhcp_config WHERE id = 1")?;

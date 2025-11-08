@@ -18,6 +18,8 @@ use crate::tftp::Reader;
 
 mod store;
 
+pub use store::Device;
+
 pub enum BootTarget {
     LocalDisk,
     NetBoot {
@@ -64,7 +66,11 @@ impl Director {
         self.image_store = Some(image_store);
     }
 
-    pub async fn register_device(&self, uuid: &str, architecture: Architecture) -> anyhow::Result<()> {
+    pub async fn register_device(
+        &self,
+        uuid: &str,
+        architecture: Architecture,
+    ) -> anyhow::Result<()> {
         self.store.register_device(uuid, architecture).await?;
 
         Ok(())
@@ -108,16 +114,12 @@ impl Director {
                     let device = self.get_device(uuid).await?;
 
                     // Get device architecture
-                    let arch_str = device
-                        .get("architecture")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("x86-64");
-                    let arch = Architecture::from_str(arch_str)?;
+                    let arch = device.architecture;
 
                     // Get device role
-                    if let Some(role) = roles_store.get_device_role(uuid)? {
+                    if let Some(role) = roles_store.get_device_role(uuid).await? {
                         // Get OS architecture configuration
-                        let os_arch = os_store.get_architecture(role.os_id, arch)?;
+                        let os_arch = os_store.get_architecture(role.os_id, arch).await?;
 
                         // Generate URLs from image store
                         let kernel_url = image_store.get_url(&os_arch.kernel_path);
@@ -386,9 +388,11 @@ impl Director {
         Ok(())
     }
 
-    pub async fn get_all_devices(
-        &self,
-    ) -> anyhow::Result<Vec<(String, Option<serde_json::Map<String, serde_json::Value>>)>> {
+    pub async fn get_device(&self, uuid: &str) -> anyhow::Result<Device> {
+        self.store.get_device(uuid).await
+    }
+
+    pub async fn get_all_devices(&self) -> anyhow::Result<Vec<Device>> {
         self.store.get_all_devices().await
     }
 
@@ -469,7 +473,10 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440006";
 
         // Register device
-        director.register_device(test_uuid).await.unwrap();
+        director
+            .register_device(test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
 
         // Create first plan
         let first_actions = vec![crate::plans::Action::new(
@@ -528,19 +535,24 @@ mod tests {
 
         // Register a device
         let test_uuid1 = "550e8400-e29b-41d4-a716-446655440001";
-        director.register_device(test_uuid1).await.unwrap();
+        director
+            .register_device(test_uuid1, Architecture::X86_64)
+            .await
+            .unwrap();
 
         // Should now return one device
         let devices = director.get_all_devices().await.unwrap();
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].0, test_uuid1);
+        assert_eq!(devices[0].uuid, test_uuid1);
         // Default attributes should be empty JSON object
-        let attrs = devices[0].1.as_ref().unwrap();
-        assert!(attrs.is_empty());
+        assert!(devices[0].attributes.is_empty());
 
         // Register another device with attributes
         let test_uuid2 = "550e8400-e29b-41d4-a716-446655440002";
-        director.register_device(test_uuid2).await.unwrap();
+        director
+            .register_device(test_uuid2, Architecture::X86_64)
+            .await
+            .unwrap();
 
         let mut attributes = serde_json::Map::new();
         attributes.insert(
@@ -557,11 +569,15 @@ mod tests {
         assert_eq!(devices.len(), 2);
 
         // Find the device with attributes
-        let device_with_attrs = devices.iter().find(|(uuid, _)| uuid == test_uuid2).unwrap();
-        assert!(device_with_attrs.1.is_some());
-        let attrs = device_with_attrs.1.as_ref().unwrap();
+        let device_with_attrs = devices.iter().find(|d| d.uuid == test_uuid2).unwrap();
+        assert!(!device_with_attrs.attributes.is_empty());
         assert_eq!(
-            attrs.get("hostname").unwrap().as_str().unwrap(),
+            device_with_attrs
+                .attributes
+                .get("hostname")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "test-server"
         );
     }

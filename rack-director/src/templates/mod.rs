@@ -76,7 +76,7 @@ pub fn render_install_script(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::roles::{DiskLayout, Partition};
+    use crate::roles::DiskLayout;
 
     #[test]
     fn test_render_simple_template() {

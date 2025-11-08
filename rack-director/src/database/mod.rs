@@ -3,12 +3,13 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-const LATEST_VERSION: i32 = 4;
+const LATEST_VERSION: i32 = 5;
 const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
     include_str!("migrations/3.sql"),
     include_str!("migrations/4.sql"),
+    include_str!("migrations/5.sql"),
 ];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
@@ -16,6 +17,13 @@ pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
     let current_version = get_or_init_current_migration(&conn)?;
     perform_migrations(&conn, current_version)?;
     Ok(conn)
+}
+
+#[cfg(test)]
+pub fn run_migrations(conn: &Connection) -> Result<()> {
+    let current_version = get_or_init_current_migration(conn)?;
+    perform_migrations(conn, current_version)?;
+    Ok(())
 }
 
 fn get_or_init_current_migration(conn: &Connection) -> Result<i32> {

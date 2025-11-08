@@ -7,6 +7,13 @@ use tokio::sync::Mutex;
 
 use crate::operating_systems::Architecture;
 
+#[derive(Debug, Clone)]
+pub struct Device {
+    pub uuid: String,
+    pub architecture: Architecture,
+    pub attributes: serde_json::Map<String, serde_json::Value>,
+}
+
 #[derive(Clone)]
 pub struct DirectorStore {
     pub conn: Arc<Mutex<rusqlite::Connection>>,
@@ -61,23 +68,62 @@ impl DirectorStore {
         Ok(())
     }
 
-    pub async fn get_all_devices(
-        &self,
-    ) -> Result<Vec<(String, Option<serde_json::Map<String, serde_json::Value>>)>> {
+    pub async fn get_device(&self, uuid: &str) -> Result<Device> {
         let conn = self.conn.lock().await;
 
-        let mut stmt = conn.prepare("SELECT uuid, attributes FROM devices")?;
-        let rows = stmt.query_map([], |row| {
+        let mut stmt =
+            conn.prepare("SELECT uuid, attributes, architecture FROM devices WHERE uuid = ?1")?;
+        let device = stmt.query_row(params![uuid], |row| {
             let uuid: String = row.get(0)?;
             let attributes_json: Option<String> = row.get(1)?;
+            let architecture_str: String = row.get(2)?;
+
             let attributes = match attributes_json {
                 Some(json_str) => {
                     serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
-                        .ok()
+                        .unwrap_or_else(|_| serde_json::Map::new())
                 }
-                None => None,
+                None => serde_json::Map::new(),
             };
-            Ok((uuid, attributes))
+
+            let architecture =
+                Architecture::from_str(&architecture_str).unwrap_or(Architecture::X86_64);
+
+            Ok(Device {
+                uuid,
+                architecture,
+                attributes,
+            })
+        })?;
+
+        Ok(device)
+    }
+
+    pub async fn get_all_devices(&self) -> Result<Vec<Device>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare("SELECT uuid, attributes, architecture FROM devices")?;
+        let rows = stmt.query_map([], |row| {
+            let uuid: String = row.get(0)?;
+            let attributes_json: Option<String> = row.get(1)?;
+            let architecture_str: String = row.get(2)?;
+
+            let attributes = match attributes_json {
+                Some(json_str) => {
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
+                        .unwrap_or_else(|_| serde_json::Map::new())
+                }
+                None => serde_json::Map::new(),
+            };
+
+            let architecture =
+                Architecture::from_str(&architecture_str).unwrap_or(Architecture::X86_64);
+
+            Ok(Device {
+                uuid,
+                architecture,
+                attributes,
+            })
         })?;
 
         let mut devices = Vec::new();

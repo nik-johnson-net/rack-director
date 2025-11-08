@@ -1,9 +1,9 @@
 use super::ImageStore;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::Client;
 
 /// S3-compatible image storage (works with Ceph RGW, MinIO, AWS S3, etc.)
 pub struct S3ImageStore {
@@ -22,9 +22,7 @@ impl S3ImageStore {
         base_url: String,
     ) -> Result<Self> {
         let credentials = Credentials::new(
-            access_key,
-            secret_key,
-            None, // session token
+            access_key, secret_key, None, // session token
             None, // expiration
             "static",
         );
@@ -143,6 +141,10 @@ impl ImageStore for S3ImageStore {
 
             let response = request.send().await.context("Failed to list S3 objects")?;
 
+            // Check if truncated and get next token before consuming contents
+            let is_truncated = response.is_truncated() == Some(true);
+            let next_token = response.next_continuation_token.clone();
+
             if let Some(contents) = response.contents {
                 for object in contents {
                     if let Some(key) = object.key {
@@ -151,8 +153,8 @@ impl ImageStore for S3ImageStore {
                 }
             }
 
-            if response.is_truncated() == Some(true) {
-                continuation_token = response.next_continuation_token;
+            if is_truncated {
+                continuation_token = next_token;
             } else {
                 break;
             }
@@ -227,7 +229,7 @@ mod tests {
     #[test]
     fn test_s3_get_url() {
         // We can test URL generation without a real S3 connection
-        let bucket = "test-bucket".to_string();
+        let _bucket = "test-bucket".to_string();
         let base_url = "https://s3.example.com/test-bucket".to_string();
 
         // Create a mock S3ImageStore (we'd need to refactor slightly to allow this)

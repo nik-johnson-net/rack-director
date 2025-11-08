@@ -44,10 +44,18 @@ pub struct Args {
     tftp_address: String,
 
     // Storage configuration
-    #[arg(long, default_value = "local", help = "Image storage type: local or s3")]
+    #[arg(
+        long,
+        default_value = "local",
+        help = "Image storage type: local or s3"
+    )]
     storage_type: String,
 
-    #[arg(long, default_value = "/var/lib/rack-director/images", help = "Local storage path (when storage-type=local)")]
+    #[arg(
+        long,
+        default_value = "/var/lib/rack-director/images",
+        help = "Local storage path (when storage-type=local)"
+    )]
     storage_path: String,
 
     #[arg(long, help = "S3 endpoint URL (when storage-type=s3)")]
@@ -56,7 +64,11 @@ pub struct Args {
     #[arg(long, help = "S3 bucket name (when storage-type=s3)")]
     s3_bucket: Option<String>,
 
-    #[arg(long, default_value = "us-east-1", help = "S3 region (when storage-type=s3)")]
+    #[arg(
+        long,
+        default_value = "us-east-1",
+        help = "S3 region (when storage-type=s3)"
+    )]
     s3_region: String,
 
     #[arg(long, help = "Base URL for serving images over HTTP")]
@@ -88,13 +100,17 @@ impl RackDirectorHandle {
 pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle, anyhow::Error> {
     let db = Arc::new(Mutex::new(database::open(&args.db_path).unwrap()));
     let mut director: Director = Director::new(db.clone());
-    let tftp_handler = director::DirectorTftpHandler::new(args.tftp_path);
+    let tftp_handler = director::DirectorTftpHandler::new(args.tftp_path.clone());
 
     // Initialize DHCP server and store
     let dhcp_store = dhcp::DhcpStore::new(db.clone());
-    let dhcp_server = dhcp::DhcpServer::new(db.clone(), director.clone(), Some(args.dhcp_address))
-        .await
-        .unwrap();
+    let dhcp_server = dhcp::DhcpServer::new(
+        db.clone(),
+        director.clone(),
+        Some(args.dhcp_address.clone()),
+    )
+    .await
+    .unwrap();
 
     // Initialize storage
     let storage_config = build_storage_config(&args)?;
@@ -116,8 +132,9 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         image_store,
         os_store,
         roles_store,
-        args.http_address
-    ).await?;
+        args.http_address,
+    )
+    .await?;
     let tftp_start_result = tftp_server.serve().await?;
     let dhcp_start_result = dhcp_server.serve().await?;
 
@@ -134,9 +151,10 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
 }
 
 fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow::Error> {
-    let base_url = args.storage_base_url.clone().unwrap_or_else(|| {
-        format!("http://{}/images", args.http_address)
-    });
+    let base_url = args
+        .storage_base_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}/images", args.http_address));
 
     match args.storage_type.as_str() {
         "local" => Ok(storage::ImageStoreConfig::Local {
@@ -144,9 +162,13 @@ fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow
             base_url,
         }),
         "s3" => {
-            let endpoint = args.s3_endpoint.clone()
+            let endpoint = args
+                .s3_endpoint
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("--s3-endpoint required when storage-type=s3"))?;
-            let bucket = args.s3_bucket.clone()
+            let bucket = args
+                .s3_bucket
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("--s3-bucket required when storage-type=s3"))?;
 
             // Read credentials from environment variables
@@ -166,6 +188,9 @@ fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow
                 base_url,
             })
         }
-        _ => Err(anyhow::anyhow!("Invalid storage-type: {}. Must be 'local' or 's3'", args.storage_type)),
+        _ => Err(anyhow::anyhow!(
+            "Invalid storage-type: {}. Must be 'local' or 's3'",
+            args.storage_type
+        )),
     }
 }

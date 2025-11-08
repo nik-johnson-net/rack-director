@@ -76,15 +76,19 @@ async fn devices_index(
         Ok(devices_data) => {
             let mut devices = Vec::new();
 
-            for (uuid, attributes) in devices_data {
-                let hostname = attributes
-                    .as_ref()
-                    .and_then(|attrs| attrs.get("hostname"))
+            for device in devices_data {
+                let hostname = device
+                    .attributes
+                    .get("hostname")
                     .and_then(|h| h.as_str())
-                    .unwrap_or(&uuid)
+                    .unwrap_or(&device.uuid)
                     .to_string();
 
-                let plan = match state.director.get_active_plan_for_device(&uuid).await {
+                let plan = match state
+                    .director
+                    .get_active_plan_for_device(&device.uuid)
+                    .await
+                {
                     Ok(Some(plan)) => Some(Plan {
                         id: plan.id.unwrap_or(0) as u64,
                         status: format!("{:?}", plan.status),
@@ -97,7 +101,7 @@ async fn devices_index(
                 };
 
                 devices.push(Device {
-                    uuid,
+                    uuid: device.uuid,
                     hostname,
                     plan,
                 });
