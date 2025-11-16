@@ -1,4 +1,4 @@
-use super::{AppState, error::Error as HttpError};
+use super::super::{AppState, error::Error as HttpError};
 use crate::roles::*;
 use axum::{
     Json, Router,
@@ -10,14 +10,14 @@ use std::sync::Arc;
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/roles", post(create_role))
-        .route("/api/roles", get(list_roles))
-        .route("/api/roles/{id}", get(get_role))
-        .route("/api/roles/{id}", put(update_role))
-        .route("/api/roles/{id}", delete(delete_role))
-        .route("/api/roles/{id}/devices", get(list_role_devices))
-        .route("/api/devices/{uuid}/role", post(assign_role))
-        .route("/api/devices/{uuid}/role", get(get_device_role))
+        .route("/ui/roles", post(create_role))
+        .route("/ui/roles", get(list_roles))
+        .route("/ui/roles/{id}", get(get_role))
+        .route("/ui/roles/{id}", put(update_role))
+        .route("/ui/roles/{id}", delete(delete_role))
+        .route("/ui/roles/{id}/devices", get(list_role_devices))
+        .route("/ui/devices/{uuid}/role", post(assign_role))
+        .route("/ui/devices/{uuid}/role", get(get_device_role))
         .with_state(state)
 }
 

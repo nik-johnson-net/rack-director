@@ -1,8 +1,6 @@
 mod api;
 mod cnc;
 mod error;
-mod operating_systems_api;
-mod roles_api;
 mod ui;
 
 use std::sync::Arc;
@@ -49,9 +47,7 @@ pub async fn start<T: AsRef<str>>(
     let app = Router::new()
         .merge(ui::routes(state.clone()))
         .merge(cnc::routes(state.clone()))
-        .merge(api::routes(state.clone()))
-        .merge(operating_systems_api::routes(state.clone()))
-        .merge(roles_api::routes(state.clone()));
+        .merge(api::routes(state));
 
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind(bind.as_ref()).await?;

@@ -2,7 +2,7 @@ use crate::operating_systems::{
     Architecture, OperatingSystem, OsArchitecture, store::OperatingSystemWithArchitectures,
 };
 
-use super::{AppState, error::Error as HttpError};
+use super::super::{AppState, error::Error as HttpError};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -55,41 +55,41 @@ pub struct UpdateOsArchitectureRequest {
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/operating_systems", post(create_os))
-        .route("/api/operating_systems", get(list_os))
-        .route("/api/operating_systems/{id}", get(get_os))
-        .route("/api/operating_systems/{id}", put(update_os))
-        .route("/api/operating_systems/{id}", delete(delete_os))
+        .route("/ui/operating_systems", post(create_os))
+        .route("/ui/operating_systems", get(list_os))
+        .route("/ui/operating_systems/{id}", get(get_os))
+        .route("/ui/operating_systems/{id}", put(update_os))
+        .route("/ui/operating_systems/{id}", delete(delete_os))
         .route(
-            "/api/operating_systems/{id}/architectures",
+            "/ui/operating_systems/{id}/architectures",
             post(create_os_architecture),
         )
         .route(
-            "/api/operating_systems/{id}/architectures/{arch}",
+            "/ui/operating_systems/{id}/architectures/{arch}",
             get(get_os_architecture),
         )
         .route(
-            "/api/operating_systems/{id}/architectures/{arch}",
+            "/ui/operating_systems/{id}/architectures/{arch}",
             delete(delete_os_architecture),
         )
         .route(
-            "/api/operating_systems/{id}/architectures/{arch}/kernel",
+            "/ui/operating_systems/{id}/architectures/{arch}/kernel",
             post(upload_kernel),
         )
         .route(
-            "/api/operating_systems/{id}/architectures/{arch}/initramfs",
+            "/ui/operating_systems/{id}/architectures/{arch}/initramfs",
             post(upload_initramfs),
         )
         .route(
-            "/api/operating_systems/{id}/architectures/{arch}/modules",
+            "/ui/operating_systems/{id}/architectures/{arch}/modules",
             post(upload_module),
         )
         .route(
-            "/api/operating_systems/{id}/architectures/{arch}/install_script",
+            "/ui/operating_systems/{id}/architectures/{arch}/install_script",
             post(upload_install_script),
         )
         .route(
-            "/api/operating_systems/{id}/architectures/{arch}/download/{component}",
+            "/ui/operating_systems/{id}/architectures/{arch}/download/{component}",
             get(download_component),
         )
         .with_state(state)
@@ -208,16 +208,25 @@ async fn delete_os_architecture(
 async fn upload_kernel(
     State(state): State<Arc<AppState>>,
     Path((os_id, arch_str)): Path<(i64, String)>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
     let path = format!("os/{}/arch/{}/kernel", os_id, arch.as_str());
+    let filename = params.get("filename").map(|s| s.as_str());
 
     state.image_store.upload(&path, body.to_vec()).await?;
     state
         .os_store
         .update_architecture_field(os_id, arch, "kernel_path", &path)
         .await?;
+
+    if let Some(filename) = filename {
+        state
+            .os_store
+            .update_architecture_field(os_id, arch, "kernel_filename", filename)
+            .await?;
+    }
 
     let os_arch = state.os_store.get_architecture(os_id, arch).await?;
     Ok(Json(os_arch))
@@ -227,16 +236,25 @@ async fn upload_kernel(
 async fn upload_initramfs(
     State(state): State<Arc<AppState>>,
     Path((os_id, arch_str)): Path<(i64, String)>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
     let path = format!("os/{}/arch/{}/initramfs", os_id, arch.as_str());
+    let filename = params.get("filename").map(|s| s.as_str());
 
     state.image_store.upload(&path, body.to_vec()).await?;
     state
         .os_store
         .update_architecture_field(os_id, arch, "initramfs_path", &path)
         .await?;
+
+    if let Some(filename) = filename {
+        state
+            .os_store
+            .update_architecture_field(os_id, arch, "initramfs_filename", filename)
+            .await?;
+    }
 
     let os_arch = state.os_store.get_architecture(os_id, arch).await?;
     Ok(Json(os_arch))
@@ -282,16 +300,25 @@ async fn upload_module(
 async fn upload_install_script(
     State(state): State<Arc<AppState>>,
     Path((os_id, arch_str)): Path<(i64, String)>,
+    Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
     let path = format!("os/{}/arch/{}/install_script", os_id, arch.as_str());
+    let filename = params.get("filename").map(|s| s.as_str());
 
     state.image_store.upload(&path, body.to_vec()).await?;
     state
         .os_store
         .update_architecture_field(os_id, arch, "install_script_path", &path)
         .await?;
+
+    if let Some(filename) = filename {
+        state
+            .os_store
+            .update_architecture_field(os_id, arch, "install_script_filename", filename)
+            .await?;
+    }
 
     let os_arch = state.os_store.get_architecture(os_id, arch).await?;
     Ok(Json(os_arch))

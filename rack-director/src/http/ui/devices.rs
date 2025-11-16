@@ -44,22 +44,20 @@ struct ErrorResponse {
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/devices/{uuid}/lifecycle", get(get_device_lifecycle))
+        .route("/ui/devices/{uuid}/lifecycle", get(get_device_lifecycle))
         .route(
-            "/api/devices/{uuid}/lifecycle/transition",
+            "/ui/devices/{uuid}/lifecycle/transition",
             post(start_lifecycle_transition),
         )
         .route(
-            "/api/devices/{uuid}/transitions",
+            "/ui/devices/{uuid}/transitions",
             get(get_device_transitions),
         )
         .route(
-            "/api/devices/{uuid}/transitions/active",
+            "/ui/devices/{uuid}/transitions/active",
             get(get_active_transition),
         )
-        .route("/api/devices/{uuid}/status", get(get_device_status))
-        .route("/api/dhcp/leases", get(get_all_dhcp_leases))
-        .route("/api/dhcp/leases/{mac}", get(get_dhcp_lease_by_mac))
+        .route("/ui/devices/{uuid}/status", get(get_device_status))
         .with_state(state)
 }
 
@@ -162,29 +160,9 @@ async fn get_device_status(
     }))
 }
 
-async fn get_all_dhcp_leases(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<crate::dhcp::Lease>>, StatusCode> {
-    match state.dhcp_store.get_all_leases().await {
-        Ok(leases) => Ok(Json(leases)),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn get_dhcp_lease_by_mac(
-    State(state): State<Arc<AppState>>,
-    Path(mac): Path<String>,
-) -> Result<Json<crate::dhcp::Lease>, StatusCode> {
-    match state.dhcp_store.get_lease_by_mac(&mac).await {
-        Ok(Some(lease)) => Ok(Json(lease)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{database, director::Director};
+    use crate::{database, director::Director, storage::MemoryImageStore};
 
     use super::*;
     use axum::{
@@ -210,7 +188,11 @@ mod tests {
         .unwrap();
 
         let state = Arc::new(AppState {
-            director: Director::new(db_tokio.clone()),
+            director: Director::new(
+                db_tokio.clone(),
+                Arc::new(MemoryImageStore::new()),
+                "http://localhost:8080",
+            ),
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
@@ -234,7 +216,7 @@ mod tests {
         let app = routes(state);
 
         let request = Request::builder()
-            .uri(format!("/api/devices/{}/lifecycle", test_uuid))
+            .uri(format!("/ui/devices/{}/lifecycle", test_uuid))
             .body(Body::empty())
             .unwrap();
 
@@ -262,7 +244,7 @@ mod tests {
 
         let request = Request::builder()
             .method("POST")
-            .uri(format!("/api/devices/{}/lifecycle/transition", test_uuid))
+            .uri(format!("/ui/devices/{}/lifecycle/transition", test_uuid))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
@@ -286,7 +268,7 @@ mod tests {
         let app = routes(state);
 
         let request = Request::builder()
-            .uri(format!("/api/devices/{}/status", test_uuid))
+            .uri(format!("/ui/devices/{}/status", test_uuid))
             .body(Body::empty())
             .unwrap();
 

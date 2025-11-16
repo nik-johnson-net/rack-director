@@ -1,3 +1,8 @@
+mod devices;
+mod dhcp;
+mod operating_systems;
+mod roles;
+
 use std::sync::Arc;
 
 use axum::{
@@ -13,11 +18,18 @@ use crate::http::AppState;
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
+        // Static asset serving
         .route("/assets/{asset}", get(http_assets))
-        .route("/ui/devices", get(devices_index))
         .route("/", get(http_index))
         .route("/{*wildcard}", get(http_index))
-        .with_state(state)
+        // UI data endpoint
+        .route("/ui/devices", get(devices_index))
+        .with_state(state.clone())
+        // Merge all UI API routes
+        .merge(devices::routes(state.clone()))
+        .merge(dhcp::routes(state.clone()))
+        .merge(operating_systems::routes(state.clone()))
+        .merge(roles::routes(state))
 }
 
 async fn http_index() -> Result<Html<Vec<u8>>, StatusCode> {

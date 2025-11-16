@@ -1,8 +1,14 @@
 mod local;
 mod s3;
 
+#[cfg(test)]
+mod memory;
+
 pub use local::LocalImageStore;
 pub use s3::S3ImageStore;
+
+#[cfg(test)]
+pub use memory::MemoryImageStore;
 
 use anyhow::Result;
 use async_trait::async_trait;

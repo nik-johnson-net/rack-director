@@ -27,6 +27,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import FileUpload from "@/components/operating-systems/file-upload";
+import TemplateDocs from "@/components/operating-systems/template-docs";
 import {
   type OperatingSystemWithArchitectures,
   type Architecture,
@@ -61,15 +62,20 @@ function OperatingSystemEdit() {
   const [newArchitecture, setNewArchitecture] = useState<Architecture>("x86-64");
   const [moduleDialogOpen, setModuleDialogOpen] = useState<string | null>(null);
   const [moduleName, setModuleName] = useState("");
+  const [cmdlineArgs, setCmdlineArgs] = useState<Record<string, string>>({});
+  const [savingCmdline, setSavingCmdline] = useState<string | null>(null);
 
   useEffect(() => {
-    // Expand all architectures by default
+    // Expand all architectures by default and initialize cmdline args
     const expanded: Record<string, boolean> = {};
+    const cmdline: Record<string, string> = {};
     data.architectures.forEach(arch => {
       expanded[arch.architecture] = true;
+      cmdline[arch.architecture] = arch.cmdline_args || "";
     });
     setExpandedArchs(expanded);
-  }, []);
+    setCmdlineArgs(cmdline);
+  }, [data.architectures]);
 
   const refreshData = async () => {
     const updated = await getOperatingSystem(osId);
@@ -141,6 +147,31 @@ function OperatingSystemEdit() {
 
   const toggleArchExpanded = (arch: string) => {
     setExpandedArchs(prev => ({ ...prev, [arch]: !prev[arch] }));
+  };
+
+  const handleSaveCmdlineArgs = async (arch: Architecture) => {
+    setSavingCmdline(arch);
+    setError(null);
+    try {
+      // Find the current architecture data
+      const archData = data.architectures.find(a => a.architecture === arch);
+      if (!archData) return;
+
+      // Use createOsArchitecture which does an upsert
+      await createOsArchitecture(osId, {
+        architecture: arch,
+        kernel_path: archData.kernel_path,
+        initramfs_path: archData.initramfs_path,
+        modules: archData.modules,
+        cmdline_args: cmdlineArgs[arch] || undefined,
+        install_script_path: archData.install_script_path || undefined,
+      });
+      await refreshData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save kernel arguments");
+    } finally {
+      setSavingCmdline(null);
+    }
   };
 
   return (
@@ -350,6 +381,7 @@ function OperatingSystemEdit() {
                     <FileUpload
                       label="Kernel"
                       currentFile={archData.kernel_path}
+                      filename={archData.kernel_filename}
                       onUpload={async (file) => {
                         await uploadKernel(osId, archData.architecture, file);
                         await refreshData();
@@ -363,6 +395,7 @@ function OperatingSystemEdit() {
                     <FileUpload
                       label="Initramfs"
                       currentFile={archData.initramfs_path}
+                      filename={archData.initramfs_filename}
                       onUpload={async (file) => {
                         await uploadInitramfs(osId, archData.architecture, file);
                         await refreshData();
@@ -432,32 +465,45 @@ function OperatingSystemEdit() {
                     </div>
 
                     {/* Install Script Upload */}
-                    <FileUpload
-                      label="Install Script"
-                      currentFile={archData.install_script_path}
-                      onUpload={async (file) => {
-                        await uploadInstallScript(osId, archData.architecture, file);
-                        await refreshData();
-                      }}
-                      onDownload={() => {
-                        window.location.href = getDownloadUrl(osId, archData.architecture, "install_script");
-                      }}
-                    />
+                    <div className="space-y-3">
+                      <FileUpload
+                        label="Install Script"
+                        currentFile={archData.install_script_path}
+                        filename={archData.install_script_filename}
+                        onUpload={async (file) => {
+                          await uploadInstallScript(osId, archData.architecture, file);
+                          await refreshData();
+                        }}
+                        onDownload={() => {
+                          window.location.href = getDownloadUrl(osId, archData.architecture, "install_script");
+                        }}
+                      />
+                      <TemplateDocs type="install-script" />
+                    </div>
 
                     {/* Cmdline Args */}
-                    <div className="space-y-2">
-                      <Label htmlFor={`cmdline-${archData.architecture}`}>
-                        Kernel Command Line Arguments
-                      </Label>
-                      <Textarea
-                        id={`cmdline-${archData.architecture}`}
-                        defaultValue={archData.cmdline_args || ""}
-                        placeholder="Additional kernel boot parameters"
-                        rows={2}
-                      />
-                      <Button variant="outline" size="sm">
-                        Save Arguments
-                      </Button>
+                    <div className="space-y-3">
+                      <div className="space-y-2">
+                        <Label htmlFor={`cmdline-${archData.architecture}`}>
+                          Kernel Command Line Arguments
+                        </Label>
+                        <Textarea
+                          id={`cmdline-${archData.architecture}`}
+                          value={cmdlineArgs[archData.architecture] || ""}
+                          onChange={(e) => setCmdlineArgs(prev => ({ ...prev, [archData.architecture]: e.target.value }))}
+                          placeholder="Additional kernel boot parameters"
+                          rows={2}
+                        />
+                        <Button
+                          size="sm"
+                          onClick={() => handleSaveCmdlineArgs(archData.architecture)}
+                          disabled={savingCmdline === archData.architecture}
+                          className="bg-green-600 hover:bg-green-700 text-white"
+                        >
+                          {savingCmdline === archData.architecture ? "Saving..." : "Save"}
+                        </Button>
+                      </div>
+                      <TemplateDocs type="cmdline" />
                     </div>
                   </CardContent>
                 )}

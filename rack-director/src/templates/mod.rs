@@ -73,6 +73,17 @@ pub fn render_install_script(
     Ok(handlebars.render_template(template, &context)?)
 }
 
+pub fn render_cmdline_args(template: &str, root_url: &str) -> Result<String> {
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(handlebars::no_escape);
+
+    let context = json!({
+        "install_script_url": format!("{}/cnc/install_script", root_url),
+    });
+
+    Ok(handlebars.render_template(template, &context)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

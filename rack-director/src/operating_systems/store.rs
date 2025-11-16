@@ -243,7 +243,7 @@ impl OperatingSystemsStore {
         let arch_str = architecture.as_str();
 
         let mut stmt = conn.prepare(
-            "SELECT id, os_id, architecture, kernel_path, initramfs_path, modules, cmdline_args, install_script_path, created_at, updated_at
+            "SELECT id, os_id, architecture, kernel_path, initramfs_path, modules, cmdline_args, install_script_path, kernel_filename, initramfs_filename, install_script_filename, created_at, updated_at
              FROM os_architectures WHERE os_id = ?1 AND architecture = ?2",
         )?;
 
@@ -261,8 +261,11 @@ impl OperatingSystemsStore {
                     modules,
                     cmdline_args: row.get(6)?,
                     install_script_path: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    kernel_filename: row.get(8)?,
+                    initramfs_filename: row.get(9)?,
+                    install_script_filename: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             })
             .context("OS architecture not found")?;
@@ -275,7 +278,7 @@ impl OperatingSystemsStore {
         let conn = self.db.lock().await;
 
         let mut stmt = conn.prepare(
-            "SELECT id, os_id, architecture, kernel_path, initramfs_path, modules, cmdline_args, install_script_path, created_at, updated_at
+            "SELECT id, os_id, architecture, kernel_path, initramfs_path, modules, cmdline_args, install_script_path, kernel_filename, initramfs_filename, install_script_filename, created_at, updated_at
              FROM os_architectures WHERE os_id = ?1 ORDER BY architecture",
         )?;
 
@@ -294,8 +297,11 @@ impl OperatingSystemsStore {
                 modules,
                 cmdline_args: row.get(6)?,
                 install_script_path: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                kernel_filename: row.get(8)?,
+                initramfs_filename: row.get(9)?,
+                install_script_filename: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })?;
 

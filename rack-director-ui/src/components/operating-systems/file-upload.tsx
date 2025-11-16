@@ -1,10 +1,12 @@
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Upload, Download, Trash2, Check, X } from "lucide-react";
 
 interface FileUploadProps {
   label: string;
   currentFile?: string;
+  filename?: string;
   onUpload: (file: File) => Promise<void>;
   onDownload?: () => void;
   onDelete?: () => Promise<void>;
@@ -14,6 +16,7 @@ interface FileUploadProps {
 export default function FileUpload({
   label,
   currentFile,
+  filename,
   onUpload,
   onDownload,
   onDelete,
@@ -64,7 +67,7 @@ export default function FileUpload({
     }
   };
 
-  const hasFile = !!currentFile;
+  const hasFile = !!currentFile && currentFile.length > 0;
 
   return (
     <div className="space-y-2">
@@ -72,10 +75,16 @@ export default function FileUpload({
         <div className="flex items-center gap-2">
           <span className="font-medium">{label}:</span>
           {hasFile ? (
-            <span className="flex items-center gap-1 text-green-600 text-sm">
-              <Check className="h-4 w-4" />
-              Uploaded
-            </span>
+            <div className="flex items-center gap-1.5">
+              <Check className="h-4 w-4 text-green-600 flex-shrink-0" />
+              {filename ? (
+                <Badge variant="secondary" className="font-mono text-xs">
+                  {filename}
+                </Badge>
+              ) : (
+                <span className="text-green-600 text-sm">Uploaded</span>
+              )}
+            </div>
           ) : (
             <span className="flex items-center gap-1 text-gray-400 text-sm">
               <X className="h-4 w-4" />

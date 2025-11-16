@@ -31,6 +31,12 @@ pub struct OsArchitecture {
     pub cmdline_args: Option<String>,
     pub install_script_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initramfs_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_script_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,

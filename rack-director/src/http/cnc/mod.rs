@@ -309,7 +309,7 @@ async fn action_failed(
 
 #[cfg(test)]
 mod tests {
-    use crate::{database, director::Director};
+    use crate::{database, director::Director, storage::MemoryImageStore};
 
     use super::*;
     use axum::{
@@ -335,7 +335,11 @@ mod tests {
         .unwrap();
 
         let state = Arc::new(AppState {
-            director: Director::new(db_tokio.clone()),
+            director: Director::new(
+                db_tokio.clone(),
+                Arc::new(MemoryImageStore::new()),
+                "http://localhost:8080",
+            ),
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),

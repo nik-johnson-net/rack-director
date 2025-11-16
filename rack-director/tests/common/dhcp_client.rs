@@ -243,7 +243,7 @@ impl DhcpClient {
 // We need rand for generating transaction IDs
 use std::cell::Cell;
 thread_local! {
-    static RNG_SEED: Cell<u32> = Cell::new(0);
+    static RNG_SEED: Cell<u32> = const { Cell::new(0) };
 }
 
 mod rand {

@@ -13,8 +13,10 @@ use crate::operating_systems::{Architecture, OperatingSystemsStore};
 use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::roles::RolesStore;
 use crate::storage::ImageStore;
+use crate::templates;
 use crate::tftp::Handler;
 use crate::tftp::Reader;
+use anyhow::anyhow;
 
 mod store;
 
@@ -34,36 +36,32 @@ pub struct Director {
     store: DirectorStore,
     plans_store: PlansStore,
     lifecycle_store: LifecycleStore,
-    os_store: Option<OperatingSystemsStore>,
-    roles_store: Option<RolesStore>,
-    image_store: Option<Arc<dyn ImageStore>>,
+    os_store: OperatingSystemsStore,
+    roles_store: RolesStore,
+    image_store: Arc<dyn ImageStore>,
+    root_url: String,
 }
 
 impl Director {
-    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
+    pub fn new<T: Into<String>>(
+        conn: Arc<Mutex<rusqlite::Connection>>,
+        image_store: Arc<dyn ImageStore>,
+        root_url: T,
+    ) -> Self {
         let store = DirectorStore::new(conn.clone());
         let plans_store = PlansStore::new(conn.clone());
-        let lifecycle_store = LifecycleStore::new(conn);
+        let lifecycle_store = LifecycleStore::new(conn.clone());
+        let os_store = OperatingSystemsStore::new(conn.clone());
+        let roles_store = RolesStore::new(conn);
         Director {
             store,
             plans_store,
             lifecycle_store,
-            os_store: None,
-            roles_store: None,
-            image_store: None,
+            os_store,
+            roles_store,
+            image_store,
+            root_url: root_url.into(),
         }
-    }
-
-    /// Set the OS store, roles store, and image store for boot target generation
-    pub fn set_stores(
-        &mut self,
-        os_store: OperatingSystemsStore,
-        roles_store: RolesStore,
-        image_store: Arc<dyn ImageStore>,
-    ) {
-        self.os_store = Some(os_store);
-        self.roles_store = Some(roles_store);
-        self.image_store = Some(image_store);
     }
 
     pub async fn register_device(
@@ -106,51 +104,39 @@ impl Director {
     ) -> anyhow::Result<BootTarget> {
         match action.action_type.as_str() {
             "install_os" => {
-                // Get device role and OS configuration
-                if let (Some(roles_store), Some(os_store), Some(image_store)) =
-                    (&self.roles_store, &self.os_store, &self.image_store)
-                {
-                    // Get device
-                    let device = self.get_device(uuid).await?;
+                // Get device
+                let device = self.get_device(uuid).await?;
 
-                    // Get device architecture
-                    let arch = device.architecture;
+                // Get device architecture
+                let arch = device.architecture;
 
-                    // Get device role
-                    if let Some(role) = roles_store.get_device_role(uuid).await? {
-                        // Get OS architecture configuration
-                        let os_arch = os_store.get_architecture(role.os_id, arch).await?;
+                // Get device role
+                if let Some(role) = self.roles_store.get_device_role(uuid).await? {
+                    // Get OS architecture configuration
+                    let os_arch = self.os_store.get_architecture(role.os_id, arch).await?;
 
-                        // Generate URLs from image store
-                        let kernel_url = image_store.get_url(&os_arch.kernel_path);
-                        let initramfs_url = image_store.get_url(&os_arch.initramfs_path);
-                        let cmdline = os_arch.cmdline_args.unwrap_or_else(|| "".to_string());
+                    // Generate URLs from image store
+                    let kernel_url = self.image_store.get_url(&os_arch.kernel_path);
+                    let initramfs_url = self.image_store.get_url(&os_arch.initramfs_path);
 
-                        return Ok(BootTarget::NetBoot {
-                            ramdisk: initramfs_url,
-                            kernel: kernel_url,
-                            cmdline,
-                        });
-                    }
+                    let cmdline = os_arch
+                        .cmdline_args
+                        .map(|template| templates::render_cmdline_args(&template, &self.root_url))
+                        .unwrap_or_else(|| Ok("".to_string()))?;
+
+                    return Ok(BootTarget::NetBoot {
+                        ramdisk: initramfs_url,
+                        kernel: kernel_url,
+                        cmdline,
+                    });
                 }
 
-                // Fallback to default images if role/OS not configured
-                Ok(BootTarget::NetBoot {
-                    ramdisk: "install-initrd.img".to_string(),
-                    kernel: "install-vmlinuz".to_string(),
-                    cmdline: "install".to_string(),
-                })
+                log::warn!(
+                    "Role not found for {} while determining boot target for os_install",
+                    uuid
+                );
+                Err(anyhow!("role not found for {}", uuid))
             }
-            "configure_network" => Ok(BootTarget::NetBoot {
-                ramdisk: "config-initrd.img".to_string(),
-                kernel: "config-vmlinuz".to_string(),
-                cmdline: "configure".to_string(),
-            }),
-            "run_diagnostics" => Ok(BootTarget::NetBoot {
-                ramdisk: "diag-initrd.img".to_string(),
-                kernel: "diag-vmlinuz".to_string(),
-                cmdline: "diagnostics".to_string(),
-            }),
             // Default to local boot for unknown actions
             _ => Ok(BootTarget::LocalDisk),
         }
@@ -454,7 +440,7 @@ impl Reader for DirectorTftpReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{database, plans::PlanStatus};
+    use crate::{database, plans::PlanStatus, storage::MemoryImageStore};
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -463,7 +449,11 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
-        let director = Director::new(Arc::new(Mutex::new(db)));
+        let director = Director::new(
+            Arc::new(Mutex::new(db)),
+            Arc::new(MemoryImageStore::new()),
+            "http://localhost:0",
+        );
         (director, temp_dir)
     }
 

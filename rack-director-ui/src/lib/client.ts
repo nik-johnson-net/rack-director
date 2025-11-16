@@ -80,6 +80,9 @@ export type OsArchitecture = {
   modules: string[];
   cmdline_args?: string;
   install_script_path?: string;
+  kernel_filename?: string;
+  initramfs_filename?: string;
+  install_script_filename?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -134,7 +137,7 @@ export async function getAllDevices(): Promise<Device[]> {
 // Operating Systems API
 
 export async function getOperatingSystems(): Promise<OperatingSystem[]> {
-  return fetch('/api/operating_systems').then((response) => {
+  return fetch('/ui/operating_systems').then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -145,7 +148,7 @@ export async function getOperatingSystems(): Promise<OperatingSystem[]> {
 }
 
 export async function getOperatingSystem(id: number): Promise<OperatingSystemWithArchitectures> {
-  return fetch(`/api/operating_systems/${id}`).then((response) => {
+  return fetch(`/ui/operating_systems/${id}`).then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -156,7 +159,7 @@ export async function getOperatingSystem(id: number): Promise<OperatingSystemWit
 }
 
 export async function createOperatingSystem(data: CreateOperatingSystemRequest): Promise<OperatingSystem> {
-  return fetch('/api/operating_systems', {
+  return fetch('/ui/operating_systems', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -171,7 +174,7 @@ export async function createOperatingSystem(data: CreateOperatingSystemRequest):
 }
 
 export async function updateOperatingSystem(id: number, data: UpdateOperatingSystemRequest): Promise<OperatingSystem> {
-  return fetch(`/api/operating_systems/${id}`, {
+  return fetch(`/ui/operating_systems/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -186,7 +189,7 @@ export async function updateOperatingSystem(id: number, data: UpdateOperatingSys
 }
 
 export async function deleteOperatingSystem(id: number): Promise<void> {
-  return fetch(`/api/operating_systems/${id}`, {
+  return fetch(`/ui/operating_systems/${id}`, {
     method: 'DELETE'
   }).then((response) => {
     if (!response.ok) {
@@ -197,7 +200,7 @@ export async function deleteOperatingSystem(id: number): Promise<void> {
 }
 
 export async function createOsArchitecture(osId: number, data: CreateOsArchitectureRequest): Promise<OsArchitecture> {
-  return fetch(`/api/operating_systems/${osId}/architectures`, {
+  return fetch(`/ui/operating_systems/${osId}/architectures`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -212,7 +215,7 @@ export async function createOsArchitecture(osId: number, data: CreateOsArchitect
 }
 
 export async function deleteOsArchitecture(osId: number, arch: Architecture): Promise<void> {
-  return fetch(`/api/operating_systems/${osId}/architectures/${arch}`, {
+  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}`, {
     method: 'DELETE'
   }).then((response) => {
     if (!response.ok) {
@@ -224,7 +227,7 @@ export async function deleteOsArchitecture(osId: number, arch: Architecture): Pr
 
 export async function uploadKernel(osId: number, arch: Architecture, file: File): Promise<OsArchitecture> {
   const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/api/operating_systems/${osId}/architectures/${arch}/kernel`, {
+  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/kernel?filename=${encodeURIComponent(file.name)}`, {
     method: 'POST',
     body: arrayBuffer
   }).then((response) => {
@@ -239,7 +242,7 @@ export async function uploadKernel(osId: number, arch: Architecture, file: File)
 
 export async function uploadInitramfs(osId: number, arch: Architecture, file: File): Promise<OsArchitecture> {
   const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/api/operating_systems/${osId}/architectures/${arch}/initramfs`, {
+  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/initramfs?filename=${encodeURIComponent(file.name)}`, {
     method: 'POST',
     body: arrayBuffer
   }).then((response) => {
@@ -254,7 +257,7 @@ export async function uploadInitramfs(osId: number, arch: Architecture, file: Fi
 
 export async function uploadModule(osId: number, arch: Architecture, file: File, moduleName: string): Promise<OsArchitecture> {
   const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/api/operating_systems/${osId}/architectures/${arch}/modules?name=${encodeURIComponent(moduleName)}`, {
+  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/modules?name=${encodeURIComponent(moduleName)}`, {
     method: 'POST',
     body: arrayBuffer
   }).then((response) => {
@@ -269,7 +272,7 @@ export async function uploadModule(osId: number, arch: Architecture, file: File,
 
 export async function uploadInstallScript(osId: number, arch: Architecture, file: File): Promise<OsArchitecture> {
   const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/api/operating_systems/${osId}/architectures/${arch}/install_script`, {
+  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/install_script?filename=${encodeURIComponent(file.name)}`, {
     method: 'POST',
     body: arrayBuffer
   }).then((response) => {
@@ -283,7 +286,7 @@ export async function uploadInstallScript(osId: number, arch: Architecture, file
 }
 
 export function getDownloadUrl(osId: number, arch: Architecture, component: string): string {
-  return `/api/operating_systems/${osId}/architectures/${arch}/download/${component}`;
+  return `/ui/operating_systems/${osId}/architectures/${arch}/download/${component}`;
 }
 
 // Roles Types
@@ -339,7 +342,7 @@ export type AssignRoleRequest = {
 // Roles API
 
 export async function getRoles(): Promise<RoleWithOs[]> {
-  return fetch('/api/roles').then((response) => {
+  return fetch('/ui/roles').then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -350,7 +353,7 @@ export async function getRoles(): Promise<RoleWithOs[]> {
 }
 
 export async function getRole(id: number): Promise<RoleWithOs> {
-  return fetch(`/api/roles/${id}`).then((response) => {
+  return fetch(`/ui/roles/${id}`).then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -361,7 +364,7 @@ export async function getRole(id: number): Promise<RoleWithOs> {
 }
 
 export async function createRole(data: CreateRoleRequest): Promise<Role> {
-  return fetch('/api/roles', {
+  return fetch('/ui/roles', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -376,7 +379,7 @@ export async function createRole(data: CreateRoleRequest): Promise<Role> {
 }
 
 export async function updateRole(id: number, data: UpdateRoleRequest): Promise<Role> {
-  return fetch(`/api/roles/${id}`, {
+  return fetch(`/ui/roles/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
@@ -391,7 +394,7 @@ export async function updateRole(id: number, data: UpdateRoleRequest): Promise<R
 }
 
 export async function deleteRole(id: number): Promise<void> {
-  return fetch(`/api/roles/${id}`, {
+  return fetch(`/ui/roles/${id}`, {
     method: 'DELETE'
   }).then((response) => {
     if (!response.ok) {
@@ -402,7 +405,7 @@ export async function deleteRole(id: number): Promise<void> {
 }
 
 export async function getRoleDevices(id: number): Promise<string[]> {
-  return fetch(`/api/roles/${id}/devices`).then((response) => {
+  return fetch(`/ui/roles/${id}/devices`).then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -413,7 +416,7 @@ export async function getRoleDevices(id: number): Promise<string[]> {
 }
 
 export async function assignRoleToDevice(deviceUuid: string, roleId: number): Promise<void> {
-  return fetch(`/api/devices/${deviceUuid}/role`, {
+  return fetch(`/ui/devices/${deviceUuid}/role`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ role_id: roleId })
@@ -426,7 +429,7 @@ export async function assignRoleToDevice(deviceUuid: string, roleId: number): Pr
 }
 
 export async function getDeviceRole(deviceUuid: string): Promise<Role | null> {
-  return fetch(`/api/devices/${deviceUuid}/role`).then((response) => {
+  return fetch(`/ui/devices/${deviceUuid}/role`).then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -439,7 +442,7 @@ export async function getDeviceRole(deviceUuid: string): Promise<Role | null> {
 // Devices API
 
 export async function getDevice(uuid: string): Promise<Device> {
-  return fetch(`/api/devices/${uuid}`).then((response) => {
+  return fetch(`/ui/devices/${uuid}`).then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -450,7 +453,7 @@ export async function getDevice(uuid: string): Promise<Device> {
 }
 
 export async function getDeviceStatus(uuid: string): Promise<DeviceStatus> {
-  return fetch(`/api/devices/${uuid}/status`).then((response) => {
+  return fetch(`/ui/devices/${uuid}/status`).then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -461,7 +464,7 @@ export async function getDeviceStatus(uuid: string): Promise<DeviceStatus> {
 }
 
 export async function getDeviceLifecycle(uuid: string): Promise<DeviceLifecycle | null> {
-  return fetch(`/api/devices/${uuid}/lifecycle`).then((response) => {
+  return fetch(`/ui/devices/${uuid}/lifecycle`).then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -472,7 +475,7 @@ export async function getDeviceLifecycle(uuid: string): Promise<DeviceLifecycle 
 }
 
 export async function transitionDeviceLifecycle(uuid: string, toState: DeviceLifecycle): Promise<{ transition_id: number; message: string }> {
-  return fetch(`/api/devices/${uuid}/lifecycle/transition`, {
+  return fetch(`/ui/devices/${uuid}/lifecycle/transition`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ to_state: toState })
@@ -491,7 +494,7 @@ export async function getDeviceTransitions(uuid: string, includeCompleted: boole
   if (includeCompleted) {
     params.append('include_completed', 'true');
   }
-  const url = `/api/devices/${uuid}/transitions${params.toString() ? '?' + params.toString() : ''}`;
+  const url = `/ui/devices/${uuid}/transitions${params.toString() ? '?' + params.toString() : ''}`;
 
   return fetch(url).then((response) => {
     if (response.ok) {
@@ -504,7 +507,7 @@ export async function getDeviceTransitions(uuid: string, includeCompleted: boole
 }
 
 export async function getDhcpLeases(): Promise<DhcpLease[]> {
-  return fetch('/api/dhcp/leases').then((response) => {
+  return fetch('/ui/dhcp/leases').then((response) => {
     if (response.ok) {
       return response.json();
     } else {
@@ -515,7 +518,7 @@ export async function getDhcpLeases(): Promise<DhcpLease[]> {
 }
 
 export async function getDhcpLeaseByMac(mac: string): Promise<DhcpLease | null> {
-  return fetch(`/api/dhcp/leases/${mac}`).then((response) => {
+  return fetch(`/ui/dhcp/leases/${mac}`).then((response) => {
     if (response.ok) {
       return response.json();
     } else if (response.status === 404) {

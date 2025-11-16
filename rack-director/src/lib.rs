@@ -33,15 +33,21 @@ pub struct Args {
     #[arg(long, default_value = "/usr/lib/rack-director/tftp")]
     tftp_path: String,
 
-    // DHCP server port (optional, defaults to 67)
+    // DHCP server address (optional, defaults to 67)
     #[arg(long, default_value = "0.0.0.0:67")]
     dhcp_address: String,
 
+    // HTTP server address
     #[arg(long, default_value = "0.0.0.0:3000")]
     http_address: String,
 
+    // TFTP server address
     #[arg(long, default_value = "0.0.0.0:69")]
     tftp_address: String,
+
+    // HTTP server public url
+    #[arg(long)]
+    http_public_url: Option<String>,
 
     // Storage configuration
     #[arg(
@@ -98,9 +104,20 @@ impl RackDirectorHandle {
 }
 
 pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle, anyhow::Error> {
+    // Initialize database connection
     let db = Arc::new(Mutex::new(database::open(&args.db_path).unwrap()));
-    let mut director: Director = Director::new(db.clone());
-    let tftp_handler = director::DirectorTftpHandler::new(args.tftp_path.clone());
+
+    // Initialize individual stores
+    let os_store = operating_systems::OperatingSystemsStore::new(db.clone());
+    let roles_store = roles::RolesStore::new(db.clone());
+
+    // Initialize storage
+    let storage_config = build_storage_config(&args)?;
+    let image_store = storage::create_image_store(storage_config).await?;
+
+    // Initialize Director
+    let public_url = args.http_public_url.to_owned().unwrap_or_default();
+    let director: Director = Director::new(db.clone(), image_store.clone(), &public_url);
 
     // Initialize DHCP server and store
     let dhcp_store = dhcp::DhcpStore::new(db.clone());
@@ -112,20 +129,12 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     .await
     .unwrap();
 
-    // Initialize storage
-    let storage_config = build_storage_config(&args)?;
-    let image_store = storage::create_image_store(storage_config).await?;
-
-    // Initialize OS and Roles stores
-    let os_store = operating_systems::OperatingSystemsStore::new(db.clone());
-    let roles_store = roles::RolesStore::new(db.clone());
-
-    // Set stores in director for boot target generation
-    director.set_stores(os_store.clone(), roles_store.clone(), image_store.clone());
-
+    // Initialize TFTP Handler
+    let tftp_handler = director::DirectorTftpHandler::new(args.tftp_path.clone());
     let mut tftp_server = tftp::Server::new(tftp_handler);
     tftp_server.address(args.tftp_address);
 
+    // Start HTTP Service
     let http_start_result = http::start(
         director.clone(),
         dhcp_store,
@@ -135,7 +144,11 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         args.http_address,
     )
     .await?;
+
+    // Start TFTP Service
     let tftp_start_result = tftp_server.serve().await?;
+
+    // Start DHCP Service
     let dhcp_start_result = dhcp_server.serve().await?;
 
     Ok(RackDirectorHandle {
