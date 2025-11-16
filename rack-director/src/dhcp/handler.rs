@@ -365,6 +365,8 @@ impl DhcpHandler {
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::MemoryImageStore;
+
     use super::*;
 
     #[test]
@@ -406,7 +408,11 @@ mod tests {
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
-        let director = Director::new(db);
+        let director = Director::new(
+            db,
+            Arc::new(MemoryImageStore::new()),
+            "http://localhost:8080",
+        );
 
         // Use tokio runtime for async operation
         let rt = tokio::runtime::Runtime::new().unwrap();

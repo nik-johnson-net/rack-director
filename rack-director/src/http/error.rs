@@ -2,7 +2,9 @@ use axum::{body::Body, response::IntoResponse};
 
 pub enum Error {
     BadRequest(String),
-    ServerError(anyhow::Error),
+    NotFound(String),
+    #[allow(clippy::enum_variant_names)] // ServerInternalError is the HTTP response code name
+    ServerInternalError(anyhow::Error),
 }
 
 impl IntoResponse for Error {
@@ -12,7 +14,11 @@ impl IntoResponse for Error {
                 .status(400)
                 .body(Body::from(reason))
                 .expect("building body"),
-            Error::ServerError(error) => {
+            Error::NotFound(reason) => axum::response::Response::builder()
+                .status(404)
+                .body(Body::from(reason))
+                .expect("building body"),
+            Error::ServerInternalError(error) => {
                 log::error!("Error: {:#}", error);
                 axum::response::Response::builder()
                     .status(500)
@@ -25,6 +31,12 @@ impl IntoResponse for Error {
 
 impl From<anyhow::Error> for Error {
     fn from(value: anyhow::Error) -> Self {
-        Self::ServerError(value)
+        Self::ServerInternalError(value)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(value: serde_json::Error) -> Self {
+        Self::ServerInternalError(value.into())
     }
 }

@@ -1,3 +1,8 @@
+mod devices;
+mod dhcp;
+mod operating_systems;
+mod roles;
+
 use std::sync::Arc;
 
 use axum::{
@@ -13,11 +18,18 @@ use crate::http::AppState;
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
+        // Static asset serving
         .route("/assets/{asset}", get(http_assets))
-        .route("/ui/devices", get(devices_index))
         .route("/", get(http_index))
         .route("/{*wildcard}", get(http_index))
-        .with_state(state)
+        // UI data endpoint
+        .route("/ui/devices", get(devices_index))
+        .with_state(state.clone())
+        // Merge all UI API routes
+        .merge(devices::routes(state.clone()))
+        .merge(dhcp::routes(state.clone()))
+        .merge(operating_systems::routes(state.clone()))
+        .merge(roles::routes(state))
 }
 
 async fn http_index() -> Result<Html<Vec<u8>>, StatusCode> {
@@ -76,15 +88,19 @@ async fn devices_index(
         Ok(devices_data) => {
             let mut devices = Vec::new();
 
-            for (uuid, attributes) in devices_data {
-                let hostname = attributes
-                    .as_ref()
-                    .and_then(|attrs| attrs.get("hostname"))
+            for device in devices_data {
+                let hostname = device
+                    .attributes
+                    .get("hostname")
                     .and_then(|h| h.as_str())
-                    .unwrap_or(&uuid)
+                    .unwrap_or(&device.uuid)
                     .to_string();
 
-                let plan = match state.director.get_active_plan_for_device(&uuid).await {
+                let plan = match state
+                    .director
+                    .get_active_plan_for_device(&device.uuid)
+                    .await
+                {
                     Ok(Some(plan)) => Some(Plan {
                         id: plan.id.unwrap_or(0) as u64,
                         status: format!("{:?}", plan.status),
@@ -97,7 +113,7 @@ async fn devices_index(
                 };
 
                 devices.push(Device {
-                    uuid,
+                    uuid: device.uuid,
                     hostname,
                     plan,
                 });

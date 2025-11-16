@@ -9,11 +9,18 @@ use tokio::sync::Mutex;
 
 use crate::director::store::DirectorStore;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, LifecycleTransition};
+use crate::operating_systems::{Architecture, OperatingSystemsStore};
 use crate::plans::{Plan, PlanStatus, PlansStore};
+use crate::roles::RolesStore;
+use crate::storage::ImageStore;
+use crate::templates;
 use crate::tftp::Handler;
 use crate::tftp::Reader;
+use anyhow::anyhow;
 
 mod store;
+
+pub use store::Device;
 
 pub enum BootTarget {
     LocalDisk,
@@ -29,22 +36,40 @@ pub struct Director {
     store: DirectorStore,
     plans_store: PlansStore,
     lifecycle_store: LifecycleStore,
+    os_store: OperatingSystemsStore,
+    roles_store: RolesStore,
+    image_store: Arc<dyn ImageStore>,
+    root_url: String,
 }
 
 impl Director {
-    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
+    pub fn new<T: Into<String>>(
+        conn: Arc<Mutex<rusqlite::Connection>>,
+        image_store: Arc<dyn ImageStore>,
+        root_url: T,
+    ) -> Self {
         let store = DirectorStore::new(conn.clone());
         let plans_store = PlansStore::new(conn.clone());
-        let lifecycle_store = LifecycleStore::new(conn);
+        let lifecycle_store = LifecycleStore::new(conn.clone());
+        let os_store = OperatingSystemsStore::new(conn.clone());
+        let roles_store = RolesStore::new(conn);
         Director {
             store,
             plans_store,
             lifecycle_store,
+            os_store,
+            roles_store,
+            image_store,
+            root_url: root_url.into(),
         }
     }
 
-    pub async fn register_device(&self, uuid: &str) -> anyhow::Result<()> {
-        self.store.register_device(uuid).await?;
+    pub async fn register_device(
+        &self,
+        uuid: &str,
+        architecture: Architecture,
+    ) -> anyhow::Result<()> {
+        self.store.register_device(uuid, architecture).await?;
 
         Ok(())
     }
@@ -65,32 +90,55 @@ impl Director {
             && let Some(current_action) = plan.get_current_action()
         {
             // Return appropriate boot target based on the current action
-            return Ok(self.get_boot_target_for_action(current_action));
+            return self.get_boot_target_for_action(uuid, current_action).await;
         }
 
         // Default to local disk if no active plan
         Ok(BootTarget::LocalDisk)
     }
 
-    fn get_boot_target_for_action(&self, action: &crate::plans::Action) -> BootTarget {
+    async fn get_boot_target_for_action(
+        &self,
+        uuid: &str,
+        action: &crate::plans::Action,
+    ) -> anyhow::Result<BootTarget> {
         match action.action_type.as_str() {
-            "install_os" => BootTarget::NetBoot {
-                ramdisk: "install-initrd.img".to_string(),
-                kernel: "install-vmlinuz".to_string(),
-                cmdline: "install".to_string(),
-            },
-            "configure_network" => BootTarget::NetBoot {
-                ramdisk: "config-initrd.img".to_string(),
-                kernel: "config-vmlinuz".to_string(),
-                cmdline: "configure".to_string(),
-            },
-            "run_diagnostics" => BootTarget::NetBoot {
-                ramdisk: "diag-initrd.img".to_string(),
-                kernel: "diag-vmlinuz".to_string(),
-                cmdline: "diagnostics".to_string(),
-            },
+            "install_os" => {
+                // Get device
+                let device = self.get_device(uuid).await?;
+
+                // Get device architecture
+                let arch = device.architecture;
+
+                // Get device role
+                if let Some(role) = self.roles_store.get_device_role(uuid).await? {
+                    // Get OS architecture configuration
+                    let os_arch = self.os_store.get_architecture(role.os_id, arch).await?;
+
+                    // Generate URLs from image store
+                    let kernel_url = self.image_store.get_url(&os_arch.kernel_path);
+                    let initramfs_url = self.image_store.get_url(&os_arch.initramfs_path);
+
+                    let cmdline = os_arch
+                        .cmdline_args
+                        .map(|template| templates::render_cmdline_args(&template, &self.root_url))
+                        .unwrap_or_else(|| Ok("".to_string()))?;
+
+                    return Ok(BootTarget::NetBoot {
+                        ramdisk: initramfs_url,
+                        kernel: kernel_url,
+                        cmdline,
+                    });
+                }
+
+                log::warn!(
+                    "Role not found for {} while determining boot target for os_install",
+                    uuid
+                );
+                Err(anyhow!("role not found for {}", uuid))
+            }
             // Default to local boot for unknown actions
-            _ => BootTarget::LocalDisk,
+            _ => Ok(BootTarget::LocalDisk),
         }
     }
 
@@ -326,9 +374,11 @@ impl Director {
         Ok(())
     }
 
-    pub async fn get_all_devices(
-        &self,
-    ) -> anyhow::Result<Vec<(String, Option<serde_json::Map<String, serde_json::Value>>)>> {
+    pub async fn get_device(&self, uuid: &str) -> anyhow::Result<Device> {
+        self.store.get_device(uuid).await
+    }
+
+    pub async fn get_all_devices(&self) -> anyhow::Result<Vec<Device>> {
         self.store.get_all_devices().await
     }
 
@@ -390,7 +440,7 @@ impl Reader for DirectorTftpReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{database, plans::PlanStatus};
+    use crate::{database, plans::PlanStatus, storage::MemoryImageStore};
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -399,7 +449,11 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
-        let director = Director::new(Arc::new(Mutex::new(db)));
+        let director = Director::new(
+            Arc::new(Mutex::new(db)),
+            Arc::new(MemoryImageStore::new()),
+            "http://localhost:0",
+        );
         (director, temp_dir)
     }
 
@@ -409,7 +463,10 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440006";
 
         // Register device
-        director.register_device(test_uuid).await.unwrap();
+        director
+            .register_device(test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
 
         // Create first plan
         let first_actions = vec![crate::plans::Action::new(
@@ -468,19 +525,24 @@ mod tests {
 
         // Register a device
         let test_uuid1 = "550e8400-e29b-41d4-a716-446655440001";
-        director.register_device(test_uuid1).await.unwrap();
+        director
+            .register_device(test_uuid1, Architecture::X86_64)
+            .await
+            .unwrap();
 
         // Should now return one device
         let devices = director.get_all_devices().await.unwrap();
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].0, test_uuid1);
+        assert_eq!(devices[0].uuid, test_uuid1);
         // Default attributes should be empty JSON object
-        let attrs = devices[0].1.as_ref().unwrap();
-        assert!(attrs.is_empty());
+        assert!(devices[0].attributes.is_empty());
 
         // Register another device with attributes
         let test_uuid2 = "550e8400-e29b-41d4-a716-446655440002";
-        director.register_device(test_uuid2).await.unwrap();
+        director
+            .register_device(test_uuid2, Architecture::X86_64)
+            .await
+            .unwrap();
 
         let mut attributes = serde_json::Map::new();
         attributes.insert(
@@ -497,11 +559,15 @@ mod tests {
         assert_eq!(devices.len(), 2);
 
         // Find the device with attributes
-        let device_with_attrs = devices.iter().find(|(uuid, _)| uuid == test_uuid2).unwrap();
-        assert!(device_with_attrs.1.is_some());
-        let attrs = device_with_attrs.1.as_ref().unwrap();
+        let device_with_attrs = devices.iter().find(|d| d.uuid == test_uuid2).unwrap();
+        assert!(!device_with_attrs.attributes.is_empty());
         assert_eq!(
-            attrs.get("hostname").unwrap().as_str().unwrap(),
+            device_with_attrs
+                .attributes
+                .get("hostname")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "test-server"
         );
     }

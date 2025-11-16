@@ -11,10 +11,16 @@ use tokio::task::JoinHandle;
 
 use crate::dhcp::DhcpStore;
 use crate::director::Director;
+use crate::operating_systems::OperatingSystemsStore;
+use crate::roles::RolesStore;
+use crate::storage::ImageStore;
 
-struct AppState {
-    director: Director,
-    dhcp_store: DhcpStore,
+pub struct AppState {
+    pub director: Director,
+    pub dhcp_store: DhcpStore,
+    pub image_store: Arc<dyn ImageStore>,
+    pub os_store: OperatingSystemsStore,
+    pub roles_store: RolesStore,
 }
 
 pub struct StartResult {
@@ -25,17 +31,23 @@ pub struct StartResult {
 pub async fn start<T: AsRef<str>>(
     director: Director,
     dhcp_store: DhcpStore,
+    image_store: Arc<dyn ImageStore>,
+    os_store: OperatingSystemsStore,
+    roles_store: RolesStore,
     bind: T,
 ) -> Result<StartResult> {
     let state = Arc::new(AppState {
         director,
         dhcp_store,
+        image_store,
+        os_store,
+        roles_store,
     });
 
     let app = Router::new()
         .merge(ui::routes(state.clone()))
         .merge(cnc::routes(state.clone()))
-        .merge(api::routes(state.clone()));
+        .merge(api::routes(state));
 
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind(bind.as_ref()).await?;

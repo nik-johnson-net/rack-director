@@ -251,6 +251,66 @@ impl DhcpStore {
 
         Ok(leases)
     }
+
+    /// Find lease by device UUID (synchronous for use in non-async contexts)
+    pub fn find_lease_by_device_uuid(&self, device_uuid: &str) -> Result<Option<Lease>> {
+        // Get the db without using async
+        let db = self
+            .db
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("Could not lock database"))?;
+
+        let mut stmt = db.prepare(
+            "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname
+             FROM dhcp_leases WHERE device_uuid = ? AND state = 'active' ORDER BY lease_end DESC LIMIT 1",
+        )?;
+
+        let lease = stmt
+            .query_row(params![device_uuid], |row| {
+                Ok(Lease {
+                    id: row.get(0)?,
+                    mac_address: row.get(1)?,
+                    ip_address: row.get(2)?,
+                    device_uuid: row.get(3)?,
+                    lease_start: row.get::<_, String>(4)?.parse().unwrap(),
+                    lease_end: row.get::<_, String>(5)?.parse().unwrap(),
+                    state: row.get::<_, String>(6)?.parse().unwrap(),
+                    hostname: row.get(7)?,
+                })
+            })
+            .optional()?;
+
+        Ok(lease)
+    }
+
+    /// Get DHCP config (synchronous for use in non-async contexts)
+    pub fn get_config(&self) -> Result<DhcpConfig> {
+        let db = self
+            .db
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("Could not lock database"))?;
+
+        let mut stmt = db.prepare("SELECT subnet, range_start, range_end, gateway, dns_servers, lease_duration, tftp_server, http_server FROM dhcp_config WHERE id = 1")?;
+
+        let config = stmt.query_row([], |row| {
+            let dns_servers_json: String = row.get(4)?;
+            let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
+                .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
+
+            Ok(DhcpConfig {
+                subnet: row.get(0)?,
+                range_start: row.get(1)?,
+                range_end: row.get(2)?,
+                gateway: row.get(3)?,
+                dns_servers,
+                lease_duration: row.get(5)?,
+                tftp_server: row.get(6)?,
+                http_server: row.get(7)?,
+            })
+        })?;
+
+        Ok(config)
+    }
 }
 
 pub fn format_mac(mac: &[u8]) -> String {

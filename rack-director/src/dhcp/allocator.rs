@@ -108,6 +108,7 @@ mod tests {
     use crate::database;
     use crate::dhcp::store::LeaseState;
     use crate::director::Director;
+    use crate::storage::MemoryImageStore;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -118,7 +119,11 @@ mod tests {
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
-        let director = Director::new(db);
+        let director = Director::new(
+            db,
+            Arc::new(MemoryImageStore::new()),
+            "http://localhost:8080",
+        );
         let config = store.load_config().await.unwrap();
         (IpAllocator::new(store, director, config), temp_dir)
     }

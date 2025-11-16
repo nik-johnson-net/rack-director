@@ -26,6 +26,7 @@ struct IpxeQuery {
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/cnc/ipxe", get(ipxe_handler))
+        .route("/cnc/install_script", get(install_script_handler))
         .route("/cnc/update_attributes", post(update_attributes))
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
@@ -47,7 +48,10 @@ async fn ipxe_handler(
 
     // Non-fatal, continue anyways.
     if !state.director.device_exists(&uuid).await?
-        && let Err(e) = state.director.register_device(&uuid).await
+        && let Err(e) = state
+            .director
+            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
+            .await
     {
         warn!("Couldn't register device {uuid}: {e}");
     };
@@ -90,6 +94,128 @@ initrd {root_url}/cnc/images/{ramdisk}
 boot
 "#
     )
+}
+
+async fn install_script_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<IpxeQuery>,
+) -> Result<Response<String>, Error> {
+    let uuid = params
+        .uuid
+        .ok_or_else(|| Error::BadRequest("Missing uuid parameter".to_string()))?;
+
+    if uuid.is_empty() {
+        return Err(Error::BadRequest("Empty uuid parameter".to_string()));
+    }
+
+    // Get device
+    let device = state
+        .director
+        .get_device(&uuid)
+        .await
+        .map_err(Error::ServerInternalError)?;
+
+    // Get device role
+    let role = state
+        .roles_store
+        .get_device_role(&uuid)
+        .await
+        .map_err(Error::ServerInternalError)?
+        .ok_or_else(|| Error::NotFound("Device has no role assigned".to_string()))?;
+
+    // Get device architecture
+    let arch = device.architecture;
+
+    // Get OS architecture configuration
+    let os_arch = state
+        .os_store
+        .get_architecture(role.os_id, arch)
+        .await
+        .map_err(|e| Error::NotFound(format!("OS architecture not found: {}", e)))?;
+
+    // Get OS
+    let os = state
+        .os_store
+        .get(role.os_id)
+        .await
+        .map_err(Error::ServerInternalError)?;
+
+    // Check if install script exists
+    let script_path = os_arch
+        .install_script_path
+        .ok_or_else(|| Error::NotFound("No install script for this OS architecture".to_string()))?;
+
+    // Download install script template from storage
+    let script_bytes = state
+        .image_store
+        .download(&script_path)
+        .await
+        .map_err(|e| {
+            Error::ServerInternalError(anyhow::anyhow!("Failed to download script: {}", e))
+        })?;
+
+    let template = String::from_utf8(script_bytes).map_err(|e| {
+        Error::ServerInternalError(anyhow::anyhow!("Script is not valid UTF-8: {}", e))
+    })?;
+
+    // Get device network info
+    let network_info = get_device_network_info(&state, &uuid).await?;
+
+    // Get device attributes
+    let hostname = device
+        .attributes
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let device_info = crate::templates::DeviceInfo {
+        uuid: uuid.clone(),
+        hostname,
+    };
+
+    // Render template with device context
+    let rendered =
+        crate::templates::render_install_script(&template, &device_info, &role, &os, &network_info)
+            .map_err(|e| {
+                Error::ServerInternalError(anyhow::anyhow!("Template rendering failed: {}", e))
+            })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(rendered)
+        .expect("response building should never error"))
+}
+
+async fn get_device_network_info(
+    state: &Arc<AppState>,
+    uuid: &str,
+) -> Result<crate::templates::NetworkInfo, Error> {
+    // Try to find device's lease
+    let lease = state
+        .dhcp_store
+        .find_lease_by_device_uuid(uuid)
+        .map_err(Error::ServerInternalError)?;
+
+    if let Some(lease) = lease {
+        // Get DHCP config for gateway and DNS
+        let config = state
+            .dhcp_store
+            .get_config()
+            .map_err(Error::ServerInternalError)?;
+
+        let dns_servers = config.dns_servers;
+
+        Ok(crate::templates::NetworkInfo {
+            mac_address: lease.mac_address,
+            ip_address: lease.ip_address,
+            gateway: config.gateway,
+            dns_servers,
+            netmask: "255.255.255.0".to_string(), // TODO: Calculate from subnet
+        })
+    } else {
+        Err(Error::NotFound("Device has no DHCP lease".to_string()))
+    }
 }
 
 fn generate_uuid_script(root_url: &str) -> String {
@@ -183,7 +309,7 @@ async fn action_failed(
 
 #[cfg(test)]
 mod tests {
-    use crate::{database, director::Director};
+    use crate::{database, director::Director, storage::MemoryImageStore};
 
     use super::*;
     use axum::{
@@ -192,17 +318,32 @@ mod tests {
     };
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
     use tower::util::ServiceExt;
 
     async fn setup_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
-        let db = Arc::new(Mutex::new(db));
+        let db_tokio = Arc::new(tokio::sync::Mutex::new(db));
+
+        // Create image store for testing
+        let storage_path = temp_dir.path().join("images");
+        let image_store = crate::storage::LocalImageStore::new(
+            storage_path,
+            "http://localhost:8080/images".to_string(),
+        )
+        .unwrap();
+
         let state = Arc::new(AppState {
-            director: Director::new(db.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db),
+            director: Director::new(
+                db_tokio.clone(),
+                Arc::new(MemoryImageStore::new()),
+                "http://localhost:8080",
+            ),
+            dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
+            image_store: Arc::new(image_store),
+            os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
+            roles_store: crate::roles::RolesStore::new(db_tokio),
         });
         (state, temp_dir)
     }
@@ -235,7 +376,11 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440001";
 
         {
-            state.director.register_device(test_uuid).await.unwrap();
+            state
+                .director
+                .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
         }
 
         let app = routes(state);
@@ -309,7 +454,11 @@ mod tests {
         let plan = crate::plans::Plan::new(test_uuid.to_string(), actions);
 
         // Register device and create plan
-        state.director.register_device(test_uuid).await.unwrap();
+        state
+            .director
+            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
         state.director.create_plan(&plan).await.unwrap();
 
         let app = routes(state);
@@ -342,7 +491,11 @@ mod tests {
         let plan = crate::plans::Plan::new(test_uuid.to_string(), actions);
 
         // Register device and create plan
-        state.director.register_device(test_uuid).await.unwrap();
+        state
+            .director
+            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
         state.director.create_plan(&plan).await.unwrap();
 
         let app = routes(state);
@@ -369,7 +522,11 @@ mod tests {
         let test_uuid = "550e8400-e29b-41d4-a716-446655440005";
 
         // Register device but don't create a plan
-        state.director.register_device(test_uuid).await.unwrap();
+        state
+            .director
+            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
 
         let app = routes(state);
 
