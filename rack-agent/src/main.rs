@@ -108,3 +108,31 @@ async fn resolve_action(arg_action: Option<String>) -> Result<String> {
             .to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_resolve_director_url_with_arg() {
+        let result = resolve_director_url(Some("http://test:3000".to_string())).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "http://test:3000");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_action_with_arg() {
+        let result = resolve_action(Some("device-scan".to_string())).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "device-scan");
+    }
+
+    #[test]
+    fn test_device_scan_args_new() {
+        let args = scan::DeviceScanArgs::new(true);
+        assert!(args.no_upload);
+
+        let args = scan::DeviceScanArgs::new(false);
+        assert!(!args.no_upload);
+    }
+}

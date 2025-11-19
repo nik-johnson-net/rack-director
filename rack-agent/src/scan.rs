@@ -39,13 +39,13 @@ struct ProcessorInfo {
     manufacturer: Option<String>,
     version: Option<String>,
     max_speed: Option<u16>,
-    core_count: Option<u8>,
-    thread_count: Option<u8>,
+    core_count: Option<u16>,
+    thread_count: Option<u16>,
 }
 
 #[derive(Debug)]
 struct MemoryInfo {
-    size: Option<u64>,
+    size: Option<u16>,
     speed: Option<u16>,
     manufacturer: Option<String>,
     part_number: Option<String>,
@@ -142,7 +142,7 @@ async fn perform_scan_and_upload(
         let total_memory_mb: u64 = hardware_info
             .memory_devices
             .iter()
-            .filter_map(|m| m.size)
+            .filter_map(|m| m.size.map(|s| s as u64))
             .sum();
         attributes.insert("total_memory_mb".to_string(), json!(total_memory_mb));
     }
@@ -226,22 +226,23 @@ fn parse_dmi(bytes: &[u8]) -> Result<HardwareInfo> {
             dmidecode::Structure::Processor(processor) => {
                 let proc_info = ProcessorInfo {
                     designation: Some(processor.socket_designation.to_string()),
-                    manufacturer: None,
-                    version: None,
-                    max_speed: None,
-                    core_count: None,
-                    thread_count: None,
+                    manufacturer: None, // Not exposed by dmidecode library
+                    version: None,      // Not exposed by dmidecode library
+                    max_speed: Some(processor.max_speed),
+                    core_count: processor.core_count,
+                    thread_count: processor.thread_count,
                 };
                 debug!("Processor: {:?}", proc_info);
                 hardware_info.processors.push(proc_info);
             }
-            dmidecode::Structure::MemoryDevice(_memory) => {
+            dmidecode::Structure::MemoryDevice(memory) => {
                 let mem_info = MemoryInfo {
-                    size: None,
-                    speed: None,
-                    manufacturer: None,
-                    part_number: None,
+                    size: memory.size,
+                    speed: memory.speed,
+                    manufacturer: Some(memory.manufacturer.to_string()),
+                    part_number: Some(memory.part_number.to_string()),
                 };
+                debug!("Memory: {:?}", mem_info);
                 hardware_info.memory_devices.push(mem_info);
             }
             // Ignore other structures for now

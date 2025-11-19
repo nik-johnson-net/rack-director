@@ -43,7 +43,7 @@ async fn ipxe_handler(
 
     let uuid = match params.uuid {
         Some(uuid) if !uuid.is_empty() => uuid,
-        Some(_) => return Err(Error::BadRequest("foo".to_string())),
+        Some(_) => return Err(Error::BadRequest("UUID cannot be empty".to_string())),
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
