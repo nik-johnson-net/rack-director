@@ -50,7 +50,7 @@ impl ImageStore for MemoryImageStore {
         unimplemented!()
     }
 
-    fn get_url(&self, _path: &str) -> String {
-        unimplemented!()
+    fn get_url(&self, path: &str) -> String {
+        format!("http://localhost:0/images/{}", path)
     }
 }

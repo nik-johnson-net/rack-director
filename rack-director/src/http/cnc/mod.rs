@@ -27,6 +27,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/cnc/ipxe", get(ipxe_handler))
         .route("/cnc/install_script", get(install_script_handler))
+        .route("/cnc/agent-images/{filename}", get(agent_images_handler))
         .route("/cnc/update_attributes", post(update_attributes))
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
@@ -42,19 +43,29 @@ async fn ipxe_handler(
 
     let uuid = match params.uuid {
         Some(uuid) if !uuid.is_empty() => uuid,
-        Some(_) => return Err(Error::BadRequest("foo".to_string())),
+        Some(_) => return Err(Error::BadRequest("UUID cannot be empty".to_string())),
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
-    // Non-fatal, continue anyways.
-    if !state.director.device_exists(&uuid).await?
-        && let Err(e) = state
+    // Register device if it doesn't exist and automatically start discovery
+    if !state.director.device_exists(&uuid).await? {
+        if let Err(e) = state
             .director
             .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
-    {
-        warn!("Couldn't register device {uuid}: {e}");
-    };
+        {
+            warn!("Couldn't register device {uuid}: {e}");
+        } else {
+            // Automatically start discovery transition for newly registered devices
+            if let Err(e) = state
+                .director
+                .start_lifecycle_transition(&uuid, crate::lifecycle::DeviceLifecycle::Unprovisioned)
+                .await
+            {
+                warn!("Couldn't start discovery transition for {uuid}: {e}");
+            }
+        }
+    }
 
     // Non-fatal. If the boot target can't be found, redirect loop back here to try again
     let boot_target = match state.director.next_boot_target(&uuid).await {
@@ -187,6 +198,53 @@ async fn install_script_handler(
         .expect("response building should never error"))
 }
 
+async fn agent_images_handler(
+    State(state): State<Arc<AppState>>,
+    extract::Path(filename): extract::Path<String>,
+) -> Result<(StatusCode, [(header::HeaderName, &'static str); 1], Vec<u8>), Error> {
+    // Construct the full file path
+    let file_path = state.agent_images_path.join(&filename);
+
+    // Canonicalize both paths to prevent directory traversal attacks
+    // This resolves all symlinks, .., ., etc.
+    let canonical_file = tokio::fs::canonicalize(&file_path).await.map_err(|e| {
+        warn!("Failed to canonicalize path for {}: {}", filename, e);
+        Error::NotFound(format!("Agent image not found: {}", filename))
+    })?;
+
+    let canonical_base = tokio::fs::canonicalize(&state.agent_images_path)
+        .await
+        .map_err(|e| {
+            warn!("Failed to canonicalize base path: {}", e);
+            Error::NotFound(format!("Agent image not found: {}", filename))
+        })?;
+
+    // Verify the resolved file path is within the base directory
+    // Return NotFound for security violations to avoid leaking information
+    if !canonical_file.starts_with(&canonical_base) {
+        warn!(
+            "Directory traversal attempt blocked: {} resolves outside base directory",
+            filename
+        );
+        return Err(Error::NotFound(format!(
+            "Agent image not found: {}",
+            filename
+        )));
+    }
+
+    // Read and serve the file
+    let data = tokio::fs::read(&canonical_file).await.map_err(|e| {
+        warn!("Failed to read agent image {}: {}", filename, e);
+        Error::NotFound(format!("Agent image not found: {}", filename))
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        data,
+    ))
+}
+
 async fn get_device_network_info(
     state: &Arc<AppState>,
     uuid: &str,
@@ -239,7 +297,7 @@ fn build_response(script: String) -> Response<String> {
         .expect("response building should never error")
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct UpdateAttributesQuery {
     uuid: String,
     attributes: serde_json::Map<String, serde_json::Value>,
@@ -334,6 +392,18 @@ mod tests {
         )
         .unwrap();
 
+        // Create agent-image directory with mock files for testing
+        let agent_images_path = temp_dir.path().join("agent-image");
+        std::fs::create_dir_all(&agent_images_path).unwrap();
+
+        // Create mock agent image files
+        std::fs::write(agent_images_path.join("vmlinuz"), b"mock kernel data").unwrap();
+        std::fs::write(
+            agent_images_path.join("initramfs.img"),
+            b"mock initramfs data",
+        )
+        .unwrap();
+
         let state = Arc::new(AppState {
             director: Director::new(
                 db_tokio.clone(),
@@ -344,6 +414,7 @@ mod tests {
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
             roles_store: crate::roles::RolesStore::new(db_tokio),
+            agent_images_path,
         });
         (state, temp_dir)
     }
@@ -367,7 +438,10 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
-        assert!(body_str.contains("sanboot --no-describe --drive 0x80"));
+        // New devices now automatically start discovery, so they boot the agent image
+        assert!(body_str.contains("kernel"));
+        assert!(body_str.contains("/cnc/agent-images/vmlinuz"));
+        assert!(body_str.contains("/cnc/agent-images/initramfs.img"));
     }
 
     #[tokio::test]
@@ -543,5 +617,200 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_automatic_discovery_on_new_device() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = "550e8400-e29b-41d4-a716-446655440099";
+
+        // Verify device doesn't exist yet
+        assert!(!state.director.device_exists(test_uuid).await.unwrap());
+
+        let app = routes(state.clone());
+
+        // First boot - device registers and discovery starts
+        let request = Request::builder()
+            .header("Host", "localhost")
+            .uri(format!("/cnc/ipxe?uuid={}", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Device should now exist
+        assert!(state.director.device_exists(test_uuid).await.unwrap());
+
+        // Device should be in "new" state
+        let lifecycle = state
+            .director
+            .get_device_lifecycle(test_uuid)
+            .await
+            .unwrap();
+        assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
+
+        // Device should have an active discovery plan
+        let active_plan = state
+            .director
+            .get_active_plan_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions[0].action_type, "discover_hardware");
+
+        // iPXE response should contain agent kernel boot
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains("#!ipxe"));
+        assert!(body_str.contains("kernel"));
+        assert!(body_str.contains("/cnc/agent-images/vmlinuz"));
+        assert!(body_str.contains("/cnc/agent-images/initramfs.img"));
+        assert!(body_str.contains("rackdirector.url="));
+    }
+
+    #[tokio::test]
+    async fn test_discovery_completion_flow() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = "550e8400-e29b-41d4-a716-446655440098";
+
+        // Register device and start discovery transition
+        state
+            .director
+            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        state
+            .director
+            .start_lifecycle_transition(test_uuid, crate::lifecycle::DeviceLifecycle::Unprovisioned)
+            .await
+            .unwrap();
+
+        // Simulate agent updating attributes
+        let update_payload = UpdateAttributesQuery {
+            uuid: test_uuid.to_string(),
+            attributes: {
+                let mut attrs = serde_json::Map::new();
+                attrs.insert(
+                    "manufacturer".to_string(),
+                    serde_json::Value::String("Dell Inc.".to_string()),
+                );
+                attrs.insert(
+                    "product_name".to_string(),
+                    serde_json::Value::String("PowerEdge R640".to_string()),
+                );
+                attrs
+            },
+        };
+
+        let app = routes(state.clone());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/cnc/update_attributes")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&update_payload).unwrap()))
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify attributes were updated
+        let device = state.director.get_device(test_uuid).await.unwrap();
+        assert_eq!(
+            device.attributes.get("manufacturer").unwrap().as_str(),
+            Some("Dell Inc.")
+        );
+
+        // Simulate agent reporting success
+        let success_payload = ActionStatusQuery {
+            uuid: test_uuid.to_string(),
+        };
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/cnc/action_success")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&success_payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify device transitioned to Unprovisioned
+        let lifecycle = state
+            .director
+            .get_device_lifecycle(test_uuid)
+            .await
+            .unwrap();
+        assert_eq!(
+            lifecycle,
+            Some(crate::lifecycle::DeviceLifecycle::Unprovisioned)
+        );
+
+        // Verify no active plan
+        let active_plan = state
+            .director
+            .get_active_plan_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_agent_images_endpoint() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let app = routes(state.clone());
+
+        // Test fetching vmlinuz
+        let request = Request::builder()
+            .uri("/cnc/agent-images/vmlinuz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"mock kernel data");
+
+        // Test fetching initramfs.img
+        let request = Request::builder()
+            .uri("/cnc/agent-images/initramfs.img")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"mock initramfs data");
+
+        // Test directory traversal protection - returns 404 to avoid leaking info
+        let request = Request::builder()
+            .uri("/cnc/agent-images/..%2F..%2Fetc%2Fpasswd")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Test non-existent file
+        let request = Request::builder()
+            .uri("/cnc/agent-images/nonexistent")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

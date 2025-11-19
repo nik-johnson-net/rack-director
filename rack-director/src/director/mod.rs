@@ -103,6 +103,24 @@ impl Director {
         action: &crate::plans::Action,
     ) -> anyhow::Result<BootTarget> {
         match action.action_type.as_str() {
+            "discover_hardware" => {
+                // Boot the agent image for hardware discovery
+                // Agent images are served via /cnc/agent-images/ endpoint (bundled with rack-director)
+                let kernel_url = format!("{}/cnc/agent-images/vmlinuz", &self.root_url);
+                let initramfs_url = format!("{}/cnc/agent-images/initramfs.img", &self.root_url);
+
+                // Pass the rack-director URL and action via kernel cmdline so agent can phone home
+                let cmdline = format!(
+                    "rackdirector.url={}/cnc rackdirector.action=device-scan quiet",
+                    &self.root_url
+                );
+
+                Ok(BootTarget::NetBoot {
+                    ramdisk: initramfs_url,
+                    kernel: kernel_url,
+                    cmdline,
+                })
+            }
             "install_os" => {
                 // Get device
                 let device = self.get_device(uuid).await?;
@@ -570,5 +588,92 @@ mod tests {
                 .unwrap(),
             "test-server"
         );
+    }
+
+    #[tokio::test]
+    async fn test_discovery_transition() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = "550e8400-e29b-41d4-a716-446655440007";
+
+        // Register device - it should start in "new" state
+        director
+            .register_device(test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let lifecycle = director.get_device_lifecycle(test_uuid).await.unwrap();
+        assert_eq!(lifecycle, Some(DeviceLifecycle::New));
+
+        // Start discovery transition (New -> Unprovisioned)
+        let transition_id = director
+            .start_lifecycle_transition(test_uuid, DeviceLifecycle::Unprovisioned)
+            .await
+            .unwrap();
+
+        assert!(transition_id > 0);
+
+        // Verify the transition was created
+        let active_transition = director
+            .get_active_transition_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_transition.is_some());
+        let transition = active_transition.unwrap();
+        assert_eq!(transition.from_state, DeviceLifecycle::New);
+        assert_eq!(transition.to_state, DeviceLifecycle::Unprovisioned);
+
+        // Verify a discovery plan was created
+        let active_plan = director
+            .get_active_plan_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions[0].action_type, "discover_hardware");
+
+        // Verify the device gets the right boot target for discovery
+        let boot_target = director.next_boot_target(test_uuid).await.unwrap();
+        match boot_target {
+            BootTarget::NetBoot {
+                ramdisk,
+                kernel,
+                cmdline,
+            } => {
+                assert!(kernel.contains("/cnc/agent-images/vmlinuz"));
+                assert!(ramdisk.contains("/cnc/agent-images/initramfs.img"));
+                assert!(cmdline.contains("rackdirector.url="));
+            }
+            BootTarget::LocalDisk => panic!("Expected NetBoot, got LocalDisk"),
+        }
+
+        // Simulate discovery completion
+        director.mark_action_success(test_uuid).await.unwrap();
+
+        // Verify plan is now complete
+        let active_plan = director
+            .get_active_plan_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_none(), "Plan should be complete");
+
+        // Verify device transitioned to Unprovisioned
+        let lifecycle = director.get_device_lifecycle(test_uuid).await.unwrap();
+        assert_eq!(lifecycle, Some(DeviceLifecycle::Unprovisioned));
+
+        // Verify transition is marked as successful
+        let transitions = director
+            .get_device_transitions(test_uuid, true)
+            .await
+            .unwrap();
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].success, Some(true));
+
+        // After discovery, device should boot to local disk
+        let boot_target = director.next_boot_target(test_uuid).await.unwrap();
+        match boot_target {
+            BootTarget::LocalDisk => {} // Expected
+            _ => panic!("Expected LocalDisk after discovery completion"),
+        }
     }
 }

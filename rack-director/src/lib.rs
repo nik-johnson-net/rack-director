@@ -17,11 +17,11 @@ use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::director::Director;
 
-#[cfg(debug_assertions)]
-const DEFAULT_DATABASE_PATH: &str = ".db.sqlite";
+const DEFAULT_DATABASE_PATH: &str = env!("RACK_DIRECTOR_DATABASE_PATH");
 
-#[cfg(not(debug_assertions))]
-const DEFAULT_DATABASE_PATH: &str = "/var/lib/rack-director/db.sqlite";
+fn default_agent_images_path() -> String {
+    format!("{}/agent-image", env!("RACK_DIRECTOR_INSTALL_PREFIX"))
+}
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -79,6 +79,14 @@ pub struct Args {
 
     #[arg(long, help = "Base URL for serving images over HTTP")]
     storage_base_url: Option<String>,
+
+    // Agent images path (bundled with installation)
+    #[arg(
+        long,
+        default_value_t = default_agent_images_path(),
+        help = "Path to agent image files (vmlinuz, initramfs.img)"
+    )]
+    agent_images_path: String,
 }
 
 pub struct RackDirectorHandle {
@@ -105,7 +113,8 @@ impl RackDirectorHandle {
 
 pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle, anyhow::Error> {
     // Initialize database connection
-    let db = Arc::new(Mutex::new(database::open(&args.db_path).unwrap()));
+    let db_file = format!("{}/db.sqlite", args.db_path);
+    let db = Arc::new(Mutex::new(database::open(&db_file).unwrap()));
 
     // Initialize individual stores
     let os_store = operating_systems::OperatingSystemsStore::new(db.clone());
@@ -142,6 +151,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         os_store,
         roles_store,
         args.http_address,
+        args.agent_images_path,
     )
     .await?;
 

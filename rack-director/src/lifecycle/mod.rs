@@ -41,6 +41,7 @@ impl From<DeviceLifecycle> for String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TransitionType {
+    Discover,
     Provision,
     Deprovision,
     Remove,
@@ -50,6 +51,7 @@ pub enum TransitionType {
 impl From<String> for TransitionType {
     fn from(s: String) -> Self {
         match s.as_str() {
+            "discover" => TransitionType::Discover,
             "provision" => TransitionType::Provision,
             "deprovision" => TransitionType::Deprovision,
             "remove" => TransitionType::Remove,
@@ -62,6 +64,7 @@ impl From<String> for TransitionType {
 impl From<TransitionType> for String {
     fn from(transition: TransitionType) -> Self {
         match transition {
+            TransitionType::Discover => "discover".to_string(),
             TransitionType::Provision => "provision".to_string(),
             TransitionType::Deprovision => "deprovision".to_string(),
             TransitionType::Remove => "remove".to_string(),
@@ -137,7 +140,7 @@ impl LifecycleManager {
         use DeviceLifecycle::*;
 
         match (from, to) {
-            (New, Unprovisioned) => Some(TransitionType::Provision),
+            (New, Unprovisioned) => Some(TransitionType::Discover),
             (Unprovisioned, Provisioned) => Some(TransitionType::Provision),
             (Provisioned, Unprovisioned) => Some(TransitionType::Deprovision),
             (Unprovisioned, Removed) => Some(TransitionType::Remove),
@@ -153,6 +156,9 @@ impl LifecycleManager {
         use crate::plans::Action;
 
         match transition_type {
+            TransitionType::Discover => {
+                vec![Action::new("discover_hardware".to_string(), HashMap::new())]
+            }
             TransitionType::Provision => vec![
                 Action::new("install_os".to_string(), HashMap::new()),
                 Action::new("configure_network".to_string(), HashMap::new()),
@@ -246,6 +252,10 @@ mod tests {
 
         assert_eq!(
             LifecycleManager::get_transition_type(&New, &Unprovisioned),
+            Some(TransitionType::Discover)
+        );
+        assert_eq!(
+            LifecycleManager::get_transition_type(&Unprovisioned, &Provisioned),
             Some(TransitionType::Provision)
         );
         assert_eq!(
@@ -264,6 +274,11 @@ mod tests {
 
     #[test]
     fn test_plan_stubs() {
+        let discover_actions =
+            LifecycleManager::get_plan_stub_for_transition(&TransitionType::Discover);
+        assert_eq!(discover_actions.len(), 1);
+        assert_eq!(discover_actions[0].action_type, "discover_hardware");
+
         let provision_actions =
             LifecycleManager::get_plan_stub_for_transition(&TransitionType::Provision);
         assert_eq!(provision_actions.len(), 3);
