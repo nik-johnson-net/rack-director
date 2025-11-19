@@ -2,26 +2,29 @@ use anyhow::Result;
 use anyhow::anyhow;
 use clap::Subcommand;
 use clap::{Parser, arg};
-use log::error;
-use log::info;
+use log::{error, info, warn};
 
 mod client;
 mod scan;
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    // Scans the device and uploads metadata to Rack Director.
+    /// Scans the device and uploads metadata to Rack Director.
     DeviceScan(scan::DeviceScanArgs),
 }
 
 #[derive(Parser, Debug)]
 struct Args {
-    // URL to the Rack Director API. Uses /proc/cmdline if not provided.
+    /// URL to the Rack Director API. Uses /proc/cmdline if not provided.
     #[arg(long, help = "URL to the Rack Director API")]
     director_url: Option<String>,
 
+    /// Action to perform. Uses /proc/cmdline if not provided.
+    #[arg(long, help = "Action to perform (device-scan)")]
+    action: Option<String>,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[tokio::main]
@@ -40,8 +43,30 @@ async fn main() {
 
     let client = client::RackDirector::new(&director_url);
 
-    let result = match args.command {
-        Command::DeviceScan(device_args) => scan::device_scan(&client, &device_args).await,
+    // Determine which action to run: from CLI, from args.action, or from /proc/cmdline
+    let result = if let Some(command) = args.command {
+        // CLI subcommand takes precedence
+        match command {
+            Command::DeviceScan(device_args) => scan::device_scan(&client, &device_args).await,
+        }
+    } else {
+        // Read action from --action flag or /proc/cmdline
+        let action = resolve_action(args.action).await.unwrap_or_else(|e| {
+            warn!("Failed to resolve action: {e}, defaulting to device-scan");
+            "device-scan".to_string()
+        });
+
+        info!("Running action: {}", action);
+        match action.as_str() {
+            "device-scan" => {
+                let device_args = scan::DeviceScanArgs::new(false);
+                scan::device_scan(&client, &device_args).await
+            }
+            _ => {
+                error!("Unknown action: {}", action);
+                std::process::exit(1);
+            }
+        }
     };
 
     if let Err(e) = result {
@@ -63,6 +88,23 @@ async fn resolve_director_url(arg_director_url: Option<String>) -> Result<String
             .and_then(|s| s.strip_prefix("rackdirector.url="));
         Ok(url
             .ok_or(anyhow!("Failed to find rackdirector.url in /proc/cmdline. Try giving it as flag --director-url"))?
+            .to_string())
+    }
+}
+
+// Locate the action to perform
+async fn resolve_action(arg_action: Option<String>) -> Result<String> {
+    if let Some(action) = arg_action {
+        Ok(action)
+    } else {
+        // Fallback to /proc/cmdline
+        let cmdline = tokio::fs::read_to_string("/proc/cmdline").await?;
+        let action = cmdline
+            .split_whitespace()
+            .find(|s| s.starts_with("rackdirector.action="))
+            .and_then(|s| s.strip_prefix("rackdirector.action="));
+        Ok(action
+            .ok_or(anyhow!("Failed to find rackdirector.action in /proc/cmdline. Try giving it as flag --action"))?
             .to_string())
     }
 }

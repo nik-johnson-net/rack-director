@@ -187,6 +187,16 @@ mod tests {
         )
         .unwrap();
 
+        // Create agent-image directory with mock files for testing
+        let agent_images_path = temp_dir.path().join("agent-image");
+        std::fs::create_dir_all(&agent_images_path).unwrap();
+        std::fs::write(agent_images_path.join("vmlinuz"), b"mock kernel data").unwrap();
+        std::fs::write(
+            agent_images_path.join("initramfs.img"),
+            b"mock initramfs data",
+        )
+        .unwrap();
+
         let state = Arc::new(AppState {
             director: Director::new(
                 db_tokio.clone(),
@@ -197,6 +207,7 @@ mod tests {
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
             roles_store: crate::roles::RolesStore::new(db_tokio),
+            agent_images_path,
         });
         (state, temp_dir)
     }

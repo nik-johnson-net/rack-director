@@ -9,6 +9,9 @@ clap = { workspace = true, features = ["derive"] }
 common = { version = "0.1.0", path = "../common" }
 dmidecode = "1.0.0"
 log.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 std-logger.workspace = true
 tokio.workspace = true
 

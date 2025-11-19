@@ -29,7 +29,7 @@ cd $(git rev-parse --show-toplevel)
 
 echo "Starting backend server"
 cargo build --bin rack-director
-cargo run --bin rack-director -- --storage-path local --tftp-path local --dhcp-address 127.0.0.1:1067 --tftp-address 127.0.0.1:1069 &
+cargo run --bin rack-director -- --db-path . --storage-path local --tftp-path local --dhcp-address 127.0.0.1:1067 --tftp-address 127.0.0.1:1069 &
 
 echo "Starting frontend server"
 cd rack-director-ui

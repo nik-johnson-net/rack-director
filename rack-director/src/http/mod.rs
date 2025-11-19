@@ -3,6 +3,7 @@ mod cnc;
 mod error;
 mod ui;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -21,6 +22,7 @@ pub struct AppState {
     pub image_store: Arc<dyn ImageStore>,
     pub os_store: OperatingSystemsStore,
     pub roles_store: RolesStore,
+    pub agent_images_path: PathBuf,
 }
 
 pub struct StartResult {
@@ -28,13 +30,14 @@ pub struct StartResult {
     pub port: u16,
 }
 
-pub async fn start<T: AsRef<str>>(
+pub async fn start<T: AsRef<str>, P: Into<PathBuf>>(
     director: Director,
     dhcp_store: DhcpStore,
     image_store: Arc<dyn ImageStore>,
     os_store: OperatingSystemsStore,
     roles_store: RolesStore,
     bind: T,
+    agent_images_path: P,
 ) -> Result<StartResult> {
     let state = Arc::new(AppState {
         director,
@@ -42,6 +45,7 @@ pub async fn start<T: AsRef<str>>(
         image_store,
         os_store,
         roles_store,
+        agent_images_path: agent_images_path.into(),
     });
 
     let app = Router::new()
