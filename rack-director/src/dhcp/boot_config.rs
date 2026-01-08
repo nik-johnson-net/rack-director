@@ -9,7 +9,7 @@ pub enum BootMode {
 
 #[derive(Debug, Clone)]
 pub struct BootOptions {
-    pub next_server: String,
+    pub next_server: Option<String>,
     pub filename: String,
 }
 
@@ -32,19 +32,19 @@ impl BootConfigProvider {
             BootMode::BiosLegacy => Ok(BootOptions {
                 // BIOS: Use TFTP to download undionly.kpxe (iPXE for BIOS)
                 // Then iPXE will fetch the boot script via HTTP
-                next_server: self.tftp_server.clone(),
+                next_server: Some(self.tftp_server.clone()),
                 filename: "undionly.kpxe".to_string(),
             }),
             BootMode::UefiBoot => Ok(BootOptions {
                 // UEFI x86-64: Use TFTP to download ipxe.efi (iPXE for UEFI)
                 // Then iPXE will fetch the boot script via HTTP
-                next_server: self.tftp_server.clone(),
+                next_server: Some(self.tftp_server.clone()),
                 filename: "ipxe.efi".to_string(),
             }),
             BootMode::UefiArm64 => Ok(BootOptions {
                 // UEFI ARM64: Use TFTP to download ipxe.efi (iPXE for UEFI ARM64)
                 // Then iPXE will fetch the boot script via HTTP
-                next_server: self.tftp_server.clone(),
+                next_server: Some(self.tftp_server.clone()),
                 filename: "ipxe.efi".to_string(),
             }),
         }
@@ -54,8 +54,8 @@ impl BootConfigProvider {
         // iPXE second-stage: Return HTTP URL for boot script
         // This is called when iPXE makes a second DHCP request after booting
         Ok(BootOptions {
-            next_server: self.http_server.clone(),
-            filename: format!("http://{}/cnc/ipxe", self.http_server),
+            next_server: None,
+            filename: format!("{}/cnc/ipxe", self.http_server),
         })
     }
 }
@@ -66,33 +66,37 @@ mod tests {
 
     #[test]
     fn test_bios_boot_options() {
-        let provider = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
         let opts = provider.get_boot_options(BootMode::BiosLegacy).unwrap();
-        assert_eq!(opts.next_server, "10.0.0.1");
+        assert_eq!(opts.next_server, Some("10.0.0.1".to_owned()));
         assert_eq!(opts.filename, "undionly.kpxe");
     }
 
     #[test]
     fn test_uefi_boot_options() {
-        let provider = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
         let opts = provider.get_boot_options(BootMode::UefiBoot).unwrap();
-        assert_eq!(opts.next_server, "10.0.0.1");
+        assert_eq!(opts.next_server, Some("10.0.0.1".to_owned()));
         assert_eq!(opts.filename, "ipxe.efi");
     }
 
     #[test]
     fn test_uefi_arm64_boot_options() {
-        let provider = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
         let opts = provider.get_boot_options(BootMode::UefiArm64).unwrap();
-        assert_eq!(opts.next_server, "10.0.0.1");
+        assert_eq!(opts.next_server, Some("10.0.0.1".to_owned()));
         assert_eq!(opts.filename, "ipxe.efi");
     }
 
     #[test]
     fn test_ipxe_boot_script() {
-        let provider = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1:3000".to_string());
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
         let opts = provider.get_ipxe_boot_script().unwrap();
-        assert_eq!(opts.next_server, "10.0.0.1:3000");
+        assert_eq!(opts.next_server, None);
         assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
     }
 }

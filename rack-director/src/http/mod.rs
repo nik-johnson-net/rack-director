@@ -3,6 +3,7 @@ mod cnc;
 mod error;
 mod ui;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -58,7 +59,13 @@ pub async fn start<T: AsRef<str>, P: Into<PathBuf>>(
     let local_addr = listener.local_addr().expect("local_addr");
 
     log::info!("Starting http server on {}", local_addr);
-    let join_handle = tokio::spawn(axum::serve(listener, app).into_future());
+    let join_handle = tokio::spawn(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .into_future(),
+    );
     Ok(StartResult {
         join_handle,
         port: local_addr.port(),

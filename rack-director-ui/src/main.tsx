@@ -6,7 +6,7 @@ import { createBrowserRouter } from "react-router";
 import { RouterProvider } from "react-router/dom";
 import Layout from './Layout.tsx';
 import Index from './pages/Index.tsx';
-import DevicesEnhanced from './pages/DevicesEnhanced.tsx';
+import Devices from './pages/Devices.tsx';
 import DeviceDetail from './pages/DeviceDetail.tsx';
 import Plans from './pages/Plans.tsx';
 import Transitions from './pages/Transitions.tsx';
@@ -25,7 +25,7 @@ const router = createBrowserRouter([
     Component: Layout,
     children: [
       { index: true, Component: Index, HydrateFallback: Loading },
-      { path: "/devices", loader: getAllDevices, Component: DevicesEnhanced, HydrateFallback: Loading },
+      { path: "/devices", loader: getAllDevices, Component: Devices, HydrateFallback: Loading },
       { path: "/devices/:uuid", Component: DeviceDetail },
       { path: "/operating-systems", loader: getOperatingSystems, Component: OperatingSystems, HydrateFallback: Loading },
       { path: "/operating-systems/new", Component: OperatingSystemNew },

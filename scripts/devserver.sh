@@ -27,9 +27,15 @@ trap on_exit EXIT
 
 cd $(git rev-parse --show-toplevel)
 
+# Create fake files for testing
+echo "ipxe fake file" > ".local-storage/tftp/ipxe.efi"
+echo "undionly.kpxe fake file" > ".local-storage/tftp/undionly.kpxe"
+echo "vmlinuz" > ".local-storage/agent-image/vmlinuz"
+echo "initramfs" > ".local-storage/agent-image/initramfs.img"
+
 echo "Starting backend server"
 cargo build --bin rack-director
-cargo run --bin rack-director -- --db-path . --storage-path local --tftp-path local --dhcp-address 127.0.0.1:1067 --tftp-address 127.0.0.1:1069 &
+cargo run --bin rack-director -- --db-path . --storage-path ./.local-storage/data --tftp-path ./.local-storage/tftp --agent-images-path ./.local-storage/agent-image --dhcp-address 127.0.0.1:1067 --tftp-address 127.0.0.1:1069 --tftp-public-address 127.0.0.1 --http-public-url "http://127.0.0.1" &
 
 echo "Starting frontend server"
 cd rack-director-ui

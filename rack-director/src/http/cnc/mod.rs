@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{self, Query, State},
+    extract::{self, ConnectInfo, Query, State},
     http::{
         StatusCode,
         header::{self},
@@ -13,6 +13,7 @@ use axum::{
 use axum_extra::extract::Host;
 use log::warn;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 use crate::{director::BootTarget, http::AppState};
 
@@ -36,6 +37,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
 
 async fn ipxe_handler(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(params): Query<IpxeQuery>,
     Host(host): Host,
 ) -> Result<Response<String>, Error> {
@@ -64,6 +66,37 @@ async fn ipxe_handler(
             {
                 warn!("Couldn't start discovery transition for {uuid}: {e}");
             }
+        }
+    }
+
+    // Look up DHCP lease by client IP to get MAC address and store network info
+    let client_ip = addr.ip().to_string();
+    if let Ok(leases) = state.dhcp_store.get_all_leases().await {
+        if let Some(lease) = leases.iter().find(|l| l.ip_address == client_ip) {
+            log::info!(
+                "Found DHCP lease for device {}: MAC {} IP {}",
+                uuid,
+                lease.mac_address,
+                lease.ip_address
+            );
+            // Store MAC address in device attributes
+            if let Err(e) = state
+                .director
+                .set_device_mac_address(&uuid, &lease.mac_address)
+                .await
+            {
+                warn!("Couldn't store MAC address for device {uuid}: {e}");
+            }
+            // Store IP address in device attributes
+            if let Err(e) = state
+                .director
+                .set_device_ip_address(&uuid, &lease.ip_address)
+                .await
+            {
+                warn!("Couldn't store IP address for device {uuid}: {e}");
+            }
+        } else {
+            log::debug!("No DHCP lease found for IP {}", client_ip);
         }
     }
 
@@ -374,6 +407,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tower::util::ServiceExt;
@@ -422,7 +456,9 @@ mod tests {
     #[tokio::test]
     async fn test_ipxe_new_device() {
         let (state, _temp_dir) = setup_test_state().await;
-        let app = routes(state);
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let request = Request::builder()
             .header("Host", "localhost")
@@ -457,7 +493,9 @@ mod tests {
                 .unwrap();
         }
 
-        let app = routes(state);
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let request = Request::builder()
             .header("Host", "localhost")
@@ -479,7 +517,9 @@ mod tests {
     #[tokio::test]
     async fn test_ipxe_missing_uuid() {
         let (state, _temp_dir) = setup_test_state().await;
-        let app = routes(state);
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let request = Request::builder()
             .header("Host", "localhost")
@@ -500,7 +540,9 @@ mod tests {
     #[tokio::test]
     async fn test_ipxe_empty_uuid() {
         let (state, _temp_dir) = setup_test_state().await;
-        let app = routes(state);
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let request = Request::builder()
             .header("Host", "localhost")
@@ -535,7 +577,9 @@ mod tests {
             .unwrap();
         state.director.create_plan(&plan).await.unwrap();
 
-        let app = routes(state);
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let payload = ActionStatusQuery {
             uuid: test_uuid.to_string(),
@@ -572,7 +616,9 @@ mod tests {
             .unwrap();
         state.director.create_plan(&plan).await.unwrap();
 
-        let app = routes(state);
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let payload = ActionFailedQuery {
             uuid: test_uuid.to_string(),
@@ -602,7 +648,9 @@ mod tests {
             .await
             .unwrap();
 
-        let app = routes(state);
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let payload = ActionStatusQuery {
             uuid: test_uuid.to_string(),
@@ -627,7 +675,9 @@ mod tests {
         // Verify device doesn't exist yet
         assert!(!state.director.device_exists(test_uuid).await.unwrap());
 
-        let app = routes(state.clone());
+        let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         // First boot - device registers and discovery starts
         let request = Request::builder()
@@ -708,7 +758,9 @@ mod tests {
             },
         };
 
-        let app = routes(state.clone());
+        let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         let request = Request::builder()
             .method("POST")
@@ -765,7 +817,9 @@ mod tests {
     #[tokio::test]
     async fn test_agent_images_endpoint() {
         let (state, _temp_dir) = setup_test_state().await;
-        let app = routes(state.clone());
+        let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
 
         // Test fetching vmlinuz
         let request = Request::builder()

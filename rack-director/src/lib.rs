@@ -45,6 +45,10 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:69")]
     tftp_address: String,
 
+    // TFTP server public address (what DHCP advertises to clients)
+    #[arg(long)]
+    tftp_public_address: Option<String>,
+
     // HTTP server public url
     #[arg(long)]
     http_public_url: Option<String>,
@@ -130,9 +134,21 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
 
     // Initialize DHCP server and store
     let dhcp_store = dhcp::DhcpStore::new(db.clone());
+
+    // Determine TFTP public address - use explicit arg if provided, otherwise use gateway from config
+    let dhcp_config = dhcp_store.load_config().await.unwrap();
+    let tftp_public = args
+        .tftp_public_address
+        .clone()
+        .unwrap_or_else(|| dhcp_config.gateway.clone());
+
+    let http_server = public_url.clone();
+
     let dhcp_server = dhcp::DhcpServer::new(
         db.clone(),
         director.clone(),
+        tftp_public,
+        http_server,
         Some(args.dhcp_address.clone()),
     )
     .await

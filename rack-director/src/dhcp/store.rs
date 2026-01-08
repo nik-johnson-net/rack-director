@@ -71,8 +71,6 @@ pub struct DhcpConfig {
     pub gateway: String,
     pub dns_servers: Vec<String>,
     pub lease_duration: u32,
-    pub tftp_server: String,
-    pub http_server: String,
 }
 
 impl DhcpStore {
@@ -84,7 +82,7 @@ impl DhcpStore {
     pub async fn load_config(&self) -> Result<DhcpConfig> {
         let db = self.db.lock().await;
 
-        let mut stmt = db.prepare("SELECT subnet, range_start, range_end, gateway, dns_servers, lease_duration, tftp_server, http_server FROM dhcp_config WHERE id = 1")?;
+        let mut stmt = db.prepare("SELECT subnet, range_start, range_end, gateway, dns_servers, lease_duration FROM dhcp_config WHERE id = 1")?;
 
         let config = stmt.query_row([], |row| {
             let dns_servers_json: String = row.get(4)?;
@@ -98,8 +96,6 @@ impl DhcpStore {
                 gateway: row.get(3)?,
                 dns_servers,
                 lease_duration: row.get(5)?,
-                tftp_server: row.get(6)?,
-                http_server: row.get(7)?,
             })
         })?;
 
@@ -290,7 +286,7 @@ impl DhcpStore {
             .try_lock()
             .map_err(|_| anyhow::anyhow!("Could not lock database"))?;
 
-        let mut stmt = db.prepare("SELECT subnet, range_start, range_end, gateway, dns_servers, lease_duration, tftp_server, http_server FROM dhcp_config WHERE id = 1")?;
+        let mut stmt = db.prepare("SELECT subnet, range_start, range_end, gateway, dns_servers, lease_duration FROM dhcp_config WHERE id = 1")?;
 
         let config = stmt.query_row([], |row| {
             let dns_servers_json: String = row.get(4)?;
@@ -304,8 +300,6 @@ impl DhcpStore {
                 gateway: row.get(3)?,
                 dns_servers,
                 lease_duration: row.get(5)?,
-                tftp_server: row.get(6)?,
-                http_server: row.get(7)?,
             })
         })?;
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use clap::Parser;
 use clap::Subcommand;
-use clap::{Parser, arg};
 use log::{error, info, warn};
 
 mod client;

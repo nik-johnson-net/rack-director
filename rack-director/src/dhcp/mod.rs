@@ -31,6 +31,8 @@ impl DhcpServer {
     pub async fn new(
         db: Arc<Mutex<Connection>>,
         director: Director,
+        tftp_server: String,
+        http_server: String,
         address: Option<String>,
     ) -> Result<Self> {
         let store = DhcpStore::new(db);
@@ -42,12 +44,11 @@ impl DhcpServer {
         log::info!("  Gateway: {}", config.gateway);
         log::info!("  DNS Servers: {:?}", config.dns_servers);
         log::info!("  Lease Duration: {}s", config.lease_duration);
-        log::info!("  TFTP Server: {}", config.tftp_server);
-        log::info!("  HTTP Server: {}", config.http_server);
+        log::info!("  TFTP Server: {}", tftp_server);
+        log::info!("  HTTP Server: {}", http_server);
 
         let allocator = IpAllocator::new(store.clone(), director.clone(), config.clone());
-        let boot_config =
-            BootConfigProvider::new(config.tftp_server.clone(), config.http_server.clone());
+        let boot_config = BootConfigProvider::new(tftp_server, http_server);
         let handler = DhcpHandler::new(store, director, allocator, boot_config);
 
         Ok(Self {
@@ -112,9 +113,15 @@ mod tests {
             "http://localhost:8080",
         );
 
-        let server = DhcpServer::new(db, director, Some("0.0.0.0:6767".to_string()))
-            .await
-            .unwrap();
+        let server = DhcpServer::new(
+            db,
+            director,
+            "10.0.0.1:69".to_string(),
+            "http://10.0.0.1:3000".to_string(),
+            Some("0.0.0.0:6767".to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(server.address, "0.0.0.0:6767".to_string());
     }
 }

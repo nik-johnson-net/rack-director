@@ -6,13 +6,12 @@ mod roles;
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
-    extract::{Path, State},
+    Router,
+    extract::Path,
     http::{StatusCode, header},
     response::{Html, IntoResponse},
     routing::get,
 };
-use serde::Serialize;
 
 use crate::http::AppState;
 
@@ -22,8 +21,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/assets/{asset}", get(http_assets))
         .route("/", get(http_index))
         .route("/{*wildcard}", get(http_index))
-        // UI data endpoint
-        .route("/ui/devices", get(devices_index))
         .with_state(state.clone())
         // Merge all UI API routes
         .merge(devices::routes(state.clone()))
@@ -56,75 +53,6 @@ async fn http_assets(Path(asset): Path<String>) -> impl IntoResponse {
         Err(e) => {
             log::warn!("Asset not found: {}", e);
             Err(StatusCode::NOT_FOUND)
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct Plan {
-    id: u64,
-    status: String,
-    current_step: u32,
-    total_steps: u32,
-    error: String,
-}
-
-#[derive(Serialize)]
-struct Device {
-    uuid: String,
-    hostname: String,
-    plan: Option<Plan>,
-}
-
-#[derive(Serialize)]
-struct DevicesIndex {
-    devices: Vec<Device>,
-}
-
-async fn devices_index(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<DevicesIndex>, StatusCode> {
-    match state.director.get_all_devices().await {
-        Ok(devices_data) => {
-            let mut devices = Vec::new();
-
-            for device in devices_data {
-                let hostname = device
-                    .attributes
-                    .get("hostname")
-                    .and_then(|h| h.as_str())
-                    .unwrap_or(&device.uuid)
-                    .to_string();
-
-                let plan = match state
-                    .director
-                    .get_active_plan_for_device(&device.uuid)
-                    .await
-                {
-                    Ok(Some(plan)) => Some(Plan {
-                        id: plan.id.unwrap_or(0) as u64,
-                        status: format!("{:?}", plan.status),
-                        current_step: plan.current_step as u32,
-                        total_steps: plan.actions.len() as u32,
-                        error: plan.error_message.unwrap_or_default(),
-                    }),
-                    Ok(None) => None,
-                    Err(_) => None,
-                };
-
-                devices.push(Device {
-                    uuid: device.uuid,
-                    hostname,
-                    plan,
-                });
-            }
-
-            let data = DevicesIndex { devices };
-            Ok(Json(data))
-        }
-        Err(e) => {
-            log::error!("Failed to fetch devices: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }

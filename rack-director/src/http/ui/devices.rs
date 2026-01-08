@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     http::AppState,
     lifecycle::{DeviceLifecycle, LifecycleTransition},
+    operating_systems::Architecture,
 };
 
 #[derive(Deserialize, Serialize)]
@@ -42,8 +43,30 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Serialize)]
+struct DeviceResponse {
+    uuid: String,
+    architecture: Architecture,
+    lifecycle: Option<DeviceLifecycle>,
+    role_id: Option<i64>,
+    attributes: serde_json::Map<String, serde_json::Value>,
+    created_at: Option<String>,
+    first_seen_at: Option<String>,
+    last_seen_at: Option<String>,
+    ip_address: Option<String>,
+    mac_address: Option<String>,
+    hostname: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DevicesIndex {
+    devices: Vec<DeviceResponse>,
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/ui/devices", get(get_all_devices))
+        .route("/ui/devices/{uuid}", get(get_device_by_uuid))
         .route("/ui/devices/{uuid}/lifecycle", get(get_device_lifecycle))
         .route(
             "/ui/devices/{uuid}/lifecycle/transition",
@@ -59,6 +82,106 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route("/ui/devices/{uuid}/status", get(get_device_status))
         .with_state(state)
+}
+
+async fn get_all_devices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DevicesIndex>, StatusCode> {
+    // Fetch all devices from Director (single source of truth)
+    let devices = match state.director.get_all_devices().await {
+        Ok(devices) => devices,
+        Err(e) => {
+            log::error!("Failed to fetch devices: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Build responses from device attributes only
+    let device_responses: Vec<DeviceResponse> = devices
+        .into_iter()
+        .map(|device| {
+            // Extract all network info from device attributes
+            let hostname = device
+                .attributes
+                .get("hostname")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let mac_address = device
+                .attributes
+                .get("mac_address")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let ip_address = device
+                .attributes
+                .get("ip_address")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            DeviceResponse {
+                uuid: device.uuid,
+                architecture: device.architecture,
+                lifecycle: device.lifecycle,
+                role_id: device.role_id,
+                attributes: device.attributes,
+                created_at: device.created_at,
+                first_seen_at: device.first_seen_at,
+                last_seen_at: device.last_seen_at,
+                ip_address,
+                mac_address,
+                hostname,
+            }
+        })
+        .collect();
+
+    Ok(Json(DevicesIndex {
+        devices: device_responses,
+    }))
+}
+
+async fn get_device_by_uuid(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<String>,
+) -> Result<Json<DeviceResponse>, StatusCode> {
+    // Get device from Director (single source of truth)
+    let device = match state.director.get_device(&uuid).await {
+        Ok(device) => device,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
+
+    // Extract all info from device attributes
+    let hostname = device
+        .attributes
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mac_address = device
+        .attributes
+        .get("mac_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let ip_address = device
+        .attributes
+        .get("ip_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(Json(DeviceResponse {
+        uuid: device.uuid,
+        architecture: device.architecture,
+        lifecycle: device.lifecycle,
+        role_id: device.role_id,
+        attributes: device.attributes,
+        created_at: device.created_at,
+        first_seen_at: device.first_seen_at,
+        last_seen_at: device.last_seen_at,
+        ip_address,
+        mac_address,
+        hostname,
+    }))
 }
 
 async fn get_device_lifecycle(

@@ -162,6 +162,11 @@ impl DhcpHandler {
 
             // Update lease to 'active'
             self.store.activate_lease(&mac_str).await?;
+            if let Some(uuid) = self.director.find_device_by_mac(&mac_str).await? {
+                self.director
+                    .set_device_ip_address(&uuid, &lease_ip.to_string())
+                    .await?;
+            }
 
             // Build DHCP Ack with boot options
             let ack = self.build_ack(&msg, lease_ip)?;
@@ -210,9 +215,8 @@ impl DhcpHandler {
         // Standard DHCP options
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Offer));
-        msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(
-            config.tftp_server.parse()?,
-        ));
+        msg.opts_mut()
+            .insert(v4::DhcpOption::ServerIdentifier(config.gateway.parse()?));
         msg.opts_mut()
             .insert(v4::DhcpOption::AddressLeaseTime(config.lease_duration));
 
@@ -263,16 +267,18 @@ impl DhcpHandler {
             let boot_opts = self.boot_config.get_boot_options(boot_mode)?;
 
             log::debug!(
-                "Boot mode: {:?}, next_server: {}, filename: {}",
+                "Boot mode: {:?}, next_server: {:?}, filename: {}",
                 boot_mode,
                 boot_opts.next_server,
                 boot_opts.filename
             );
 
             // Option 66 (TFTP Server Name)
-            msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
-                boot_opts.next_server.clone().into_bytes(),
-            ));
+            if let Some(next_server) = &boot_opts.next_server {
+                msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
+                    next_server.clone().into_bytes(),
+                ));
+            }
 
             // Option 67 (Bootfile Name)
             msg.opts_mut().insert(v4::DhcpOption::BootfileName(
@@ -280,8 +286,11 @@ impl DhcpHandler {
             ));
 
             // siaddr field (next server IP)
-            let next_server_ip: Ipv4Addr = boot_opts.next_server.parse()?;
-            msg.set_siaddr(next_server_ip);
+            if let Some(next_server) = &boot_opts.next_server
+                && let Ok(next_ip) = next_server.parse::<Ipv4Addr>()
+            {
+                msg.set_siaddr(next_ip);
+            }
         }
 
         Ok(msg)
@@ -294,13 +303,13 @@ impl DhcpHandler {
         msg.set_chaddr(req.chaddr());
         msg.set_flags(req.flags());
 
+        let config = self.allocator.config();
+
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Nak));
 
-        let config = self.allocator.config();
-        msg.opts_mut().insert(v4::DhcpOption::ServerIdentifier(
-            config.tftp_server.parse()?,
-        ));
+        msg.opts_mut()
+            .insert(v4::DhcpOption::ServerIdentifier(config.gateway.parse()?));
 
         Ok(msg)
     }
@@ -409,7 +418,7 @@ mod tests {
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
         let director = Director::new(
-            db,
+            db.clone(),
             Arc::new(MemoryImageStore::new()),
             "http://localhost:8080",
         );
@@ -418,9 +427,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let config = rt.block_on(store.load_config()).unwrap();
 
-        let allocator = IpAllocator::new(store.clone(), director.clone(), config.clone());
-        let boot_config =
-            BootConfigProvider::new(config.tftp_server.clone(), config.http_server.clone());
+        let allocator = IpAllocator::new(store.clone(), director.clone(), config);
+        let boot_config = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
 
         DhcpHandler::new(store, director, allocator, boot_config)
     }

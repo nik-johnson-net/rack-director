@@ -8,6 +8,7 @@ use tokio::io::BufReader;
 use tokio::sync::Mutex;
 
 use crate::director::store::DirectorStore;
+use crate::director::store::generate_hostname_from_uuid;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, LifecycleTransition};
 use crate::operating_systems::{Architecture, OperatingSystemsStore};
 use crate::plans::{Plan, PlanStatus, PlansStore};
@@ -69,8 +70,11 @@ impl Director {
         uuid: &str,
         architecture: Architecture,
     ) -> anyhow::Result<()> {
+        log::info!("Registering device {uuid}");
         self.store.register_device(uuid, architecture).await?;
-
+        self.store
+            .set_hostname(uuid, &generate_hostname_from_uuid(uuid))
+            .await?;
         Ok(())
     }
 
@@ -173,6 +177,7 @@ impl Director {
         self.plans_store.create_plan(plan).await
     }
 
+    #[cfg(test)]
     pub async fn get_active_plan_for_device(
         &self,
         device_uuid: &str,
@@ -407,6 +412,14 @@ impl Director {
     pub async fn get_device_static_ip(&self, uuid: &str) -> anyhow::Result<Option<Ipv4Addr>> {
         self.store.get_device_static_ip(uuid).await
     }
+
+    pub async fn set_device_mac_address(&self, uuid: &str, mac: &str) -> anyhow::Result<()> {
+        self.store.set_mac_address(uuid, mac).await
+    }
+
+    pub async fn set_device_ip_address(&self, uuid: &str, ip: &str) -> anyhow::Result<()> {
+        self.store.set_ip_address(uuid, ip).await
+    }
 }
 
 pub struct DirectorTftpHandler {
@@ -459,6 +472,7 @@ impl Reader for DirectorTftpReader {
 mod tests {
     use super::*;
     use crate::{database, plans::PlanStatus, storage::MemoryImageStore};
+    use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -552,8 +566,12 @@ mod tests {
         let devices = director.get_all_devices().await.unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].uuid, test_uuid1);
-        // Default attributes should be empty JSON object
-        assert!(devices[0].attributes.is_empty());
+        assert_eq!(
+            devices[0].attributes,
+            *json!({"hostname": "node-446655440001"})
+                .as_object()
+                .unwrap()
+        );
 
         // Register another device with attributes
         let test_uuid2 = "550e8400-e29b-41d4-a716-446655440002";

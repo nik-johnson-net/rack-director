@@ -1,17 +1,16 @@
 use clap::Parser;
 use rack_director::RackDirectorHandle;
-use tempfile::NamedTempFile;
 
 pub mod dhcp_client;
 pub mod tftp_client;
 
 pub async fn start_rack_director() -> Result<RackDirectorHandle, anyhow::Error> {
-    // Create a temporary database file for this test run
-    let db_file = NamedTempFile::new()?;
-    let db_path = db_file.path().to_str().unwrap().to_string();
+    // Create a temporary directory for database
+    let db_dir = tempfile::tempdir()?;
+    let db_path = db_dir.path().to_str().unwrap().to_string();
 
-    // Keep the tempfile alive by leaking it (test will clean up on exit)
-    std::mem::forget(db_file);
+    // Keep the temp directory alive by leaking it (test will clean up on exit)
+    std::mem::forget(db_dir);
 
     // Create a temporary directory for image storage
     let storage_dir = tempfile::tempdir()?;
@@ -32,6 +31,8 @@ pub async fn start_rack_director() -> Result<RackDirectorHandle, anyhow::Error> 
         "--dhcp-address=127.0.0.1:0",
         "--http-address=127.0.0.1:0",
         "--tftp-address=127.0.0.1:0",
+        "--tftp-public-address=10.0.0.1",
+        "--http-public-url=http://10.0.0.1",
     ]);
     let handle = rack_director::rack_director_start(args).await?;
 

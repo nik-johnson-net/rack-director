@@ -48,10 +48,14 @@ async fn serve<H: Handler + Send + Sync + 'static>(socket: UdpSocket, handler: H
     let arc_socket = Arc::new(socket);
     let arc_handler = Arc::new(handler);
     let mut buf: [u8; 512] = [0; 512];
-
+    log::info!(
+        "Starting TFTP server on {}",
+        arc_socket.local_addr().unwrap()
+    );
     loop {
         let (size, addr) = arc_socket.recv_from(&mut buf).await?;
         let packet = Packet::parse(&buf[0..size])?;
+        log::info!("TFTP {:?}", packet);
         tokio::spawn(Connection::accept(arc_handler.clone(), addr, packet));
     }
 }
