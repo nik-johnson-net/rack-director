@@ -9,13 +9,106 @@ use crate::output::Output;
 use crate::server::ServerState;
 use crate::tftp;
 
+/// Represents the action to take based on the iPXE script
+enum BootAction {
+    /// Boot from local disk (sanboot command)
+    Sanboot,
+    /// Boot the rack-agent for hardware discovery
+    BootAgent,
+    /// Boot an OS for installation
+    BootOS,
+}
+
+/// Follows iPXE chain redirects and determines the boot action
+///
+/// This function fetches iPXE scripts from rack-director and automatically
+/// follows chain redirects (important for the UUID redirect flow). It resolves
+/// {uuid} placeholders in chain URLs and returns a BootAction indicating what
+/// to do next.
+///
+/// # Arguments
+///
+/// * `http` - The HTTP client for making requests
+/// * `state` - The current server state containing UUID and other info
+/// * `output` - Output handler for logging
+///
+/// # Returns
+///
+/// Returns a `BootAction` indicating whether to boot locally, run the agent, or install an OS.
+async fn follow_ipxe_chains(
+    http: &HttpClient,
+    state: &ServerState,
+    output: &Output,
+) -> Result<BootAction> {
+    const MAX_CHAIN_DEPTH: u32 = 10;
+    let mut chain_depth = 0;
+    let mut uuid_param: Option<&str> = None;
+
+    loop {
+        if chain_depth >= MAX_CHAIN_DEPTH {
+            return Err(anyhow!(
+                "Max chain depth ({}) exceeded - possible infinite loop",
+                MAX_CHAIN_DEPTH
+            ));
+        }
+
+        output.info(&format!(
+            "Fetching iPXE script (chain depth {})...",
+            chain_depth
+        ));
+
+        let script = http.get_ipxe_script(uuid_param, output).await?;
+        let parsed = parse_ipxe_script(&script);
+
+        // Check for chain command
+        if let Some(chain_url) = parsed.chain_url {
+            chain_depth += 1;
+
+            // Resolve {uuid} placeholder or follow uuid parameter
+            if chain_url.contains("{uuid}") || chain_url.contains("?uuid=") {
+                output.info(&format!(
+                    "Following chain to URL with UUID (depth {})...",
+                    chain_depth
+                ));
+                uuid_param = Some(&state.uuid);
+                continue;
+            } else {
+                return Err(anyhow!("Unexpected chain URL format: {}", chain_url));
+            }
+        }
+
+        // Check for local boot
+        if parsed.is_local_boot {
+            return Ok(BootAction::Sanboot);
+        }
+
+        // Check for kernel boot
+        if let Some(kernel_url) = parsed.kernel_url {
+            // Verify images are accessible
+            if kernel_url.contains("/cnc/agent-images/") {
+                output.info("Verifying agent images are accessible...");
+                let _kernel = http.get_agent_image("vmlinuz", output).await?;
+                let _initrd = http.get_agent_image("initramfs.img", output).await?;
+                output.success("Agent images verified");
+
+                return Ok(BootAction::BootAgent);
+            } else {
+                output.info("OS installation kernel detected");
+                return Ok(BootAction::BootOS);
+            }
+        }
+
+        return Err(anyhow!("Unknown iPXE script format"));
+    }
+}
+
 pub async fn full_boot(
     conn: &ConnectionConfig,
     server_config: &ResolvedServer,
     output: &Output,
 ) -> Result<()> {
     output.step(&format!(
-        "Starting full boot sequence for '{}'",
+        "Starting dynamic boot sequence for '{}'",
         server_config.name
     ));
     output.detail(
@@ -34,92 +127,80 @@ pub async fn full_boot(
     output.detail("Architecture", server_config.architecture.as_str());
 
     let mut state = ServerState::new(&server_config.name, server_config);
-
-    println!();
-    println!("=== Phase 1: Initial PXE Boot (Firmware) ===");
-    println!();
-
-    dhcp::discover(conn, &mut state, output)?;
-    dhcp::request(conn, &mut state, output)?;
-    tftp::download(conn, &mut state, output)?;
-
-    println!();
-    println!("=== Phase 2: iPXE Second-Stage Boot ===");
-    println!();
-
-    ipxe_boot(conn, &mut state, output).await?;
-
-    println!();
-    println!("=== Phase 3: Agent Discovery ===");
-    println!();
-
-    agent::run(conn, &state, output).await?;
-
-    println!();
-    println!("=== Phase 4: Post-Discovery Boot (Verify Local Boot) ===");
-    println!();
-
-    state.clear_state();
-
-    dhcp::discover(conn, &mut state, output)?;
-    dhcp::request(conn, &mut state, output)?;
-
-    let bootfile = state
-        .bootfile
-        .as_ref()
-        .ok_or_else(|| anyhow!("No bootfile after post-discovery DHCP"))?;
-
-    if bootfile.starts_with("http") {
-        tftp::download(conn, &mut state, output)?;
-    }
-
     let http = HttpClient::new(conn);
 
-    output.step("iPXE Boot Script (Post-Discovery)");
-    dhcp::request_as_ipxe(conn, &mut state, output)?;
+    let mut sanboot_count = 0;
+    let mut reboot_count = 0;
+    const MAX_REBOOTS: u32 = 10;
 
-    let script_url = state
-        .boot_script_url
-        .as_ref()
-        .ok_or_else(|| anyhow!("No boot script URL from iPXE DHCP"))?;
-
-    if script_url.contains("?uuid=") {
-        let script = http.get_ipxe_script(Some(&state.uuid), output).await?;
-        let parsed = parse_ipxe_script(&script);
-
-        if parsed.is_local_boot {
-            output.success("Verified: Server boots to local disk after discovery");
-        } else if parsed.kernel_url.is_some() {
-            output.error("Server still wants to netboot (expected local disk boot)");
-            return Err(anyhow!("Expected local disk boot, but got netboot script"));
-        } else if parsed.chain_url.is_some() {
-            output.info("Chain URL returned, following...");
+    loop {
+        if reboot_count >= MAX_REBOOTS {
+            return Err(anyhow!(
+                "Max reboots ({}) exceeded - possible infinite loop",
+                MAX_REBOOTS
+            ));
         }
-    } else {
-        let script = http.get_ipxe_script(None, output).await?;
-        let parsed = parse_ipxe_script(&script);
 
-        if let Some(chain_url) = parsed.chain_url
-            && (chain_url.contains("{uuid}") || chain_url.contains("?uuid="))
-        {
-            let script = http.get_ipxe_script(Some(&state.uuid), output).await?;
-            let parsed = parse_ipxe_script(&script);
+        println!();
+        println!("=== Boot Cycle #{} ===", reboot_count + 1);
+        println!();
 
-            if parsed.is_local_boot {
-                output.success("Verified: Server boots to local disk after discovery");
-            } else {
-                output.error("Server still wants to netboot after discovery");
+        // Phase 1: Firmware DHCP + TFTP
+        output.step("Phase 1: Firmware Boot (DHCP + TFTP)");
+        dhcp::discover(conn, &mut state, output)?;
+        dhcp::request(conn, &mut state, output)?;
+        tftp::download(conn, &mut state, output)?;
+
+        // Phase 2: iPXE boot script interpretation
+        output.step("Phase 2: iPXE Boot Script");
+        dhcp::request_as_ipxe(conn, &mut state, output)?;
+
+        let boot_action = follow_ipxe_chains(&http, &state, output).await?;
+
+        // Phase 3: Act on boot decision
+        match boot_action {
+            BootAction::Sanboot => {
+                sanboot_count += 1;
+                output.info(&format!(
+                    "Sanboot #{} detected (local disk boot)",
+                    sanboot_count
+                ));
+
+                if sanboot_count == 1 {
+                    output
+                        .info("First sanboot - simulating reboot to verify localboot persists...");
+                    state.clear_state();
+                    reboot_count += 1;
+                    continue;
+                } else {
+                    output.success("Second sanboot - localboot verified, boot sequence complete!");
+                    break;
+                }
+            }
+            BootAction::BootAgent => {
+                output.step("Phase 3: Agent Execution");
+                agent::run(conn, &state, output).await?;
+
+                output.info("Agent execution complete - simulating reboot...");
+                state.clear_state();
+                reboot_count += 1;
+                continue;
+            }
+            BootAction::BootOS => {
+                output.info("OS installation boot detected - stopping simulation");
+                output.info("(OS installation is not simulated by rack-simulator)");
+                break;
             }
         }
     }
 
+    state.save()?;
+
     println!();
     output.success(&format!(
-        "Full boot sequence complete for '{}'",
+        "Dynamic boot sequence complete for '{}'",
         server_config.name
     ));
-
-    state.save()?;
 
     Ok(())
 }

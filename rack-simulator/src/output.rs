@@ -23,6 +23,7 @@ impl Output {
         println!("[OK] {}", msg);
     }
 
+    #[allow(dead_code)]
     pub fn error(&self, msg: &str) {
         eprintln!("[ERROR] {}", msg);
     }
