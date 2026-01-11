@@ -170,7 +170,8 @@ async fn main() -> Result<()> {
             let config = Config::load(&config_path)?;
             let server_config = config.get_server(&server)?;
             let mut state = ServerState::load_or_create(&server, &server_config)?;
-            dhcp::discover(&conn, &mut state, &output)?;
+            // Use NIC 0 for individual command
+            dhcp::discover(&conn, &mut state, 0, &output)?;
             state.save()?;
         }
 
@@ -178,7 +179,8 @@ async fn main() -> Result<()> {
             let config = Config::load(&config_path)?;
             let server_config = config.get_server(&server)?;
             let mut state = ServerState::load_or_create(&server, &server_config)?;
-            dhcp::request(&conn, &mut state, &output)?;
+            // Use NIC 0 for individual command
+            dhcp::request(&conn, &mut state, 0, &output)?;
             state.save()?;
         }
 

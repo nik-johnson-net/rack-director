@@ -6,6 +6,13 @@ export type Plan = {
 
 export type DeviceLifecycle = "new" | "unprovisioned" | "provisioned" | "removed" | "broken";
 
+export type NetworkInterface = {
+  interface_name: string;
+  mac_address: string;
+  ip_address?: string;
+  is_primary: boolean;
+}
+
 export type Device = {
   uuid: string;
   architecture: Architecture;
@@ -13,6 +20,8 @@ export type Device = {
   role_id?: number;
   attributes: {
     hostname?: string;
+    network_interfaces?: NetworkInterface[];
+    // Legacy fields
     mac_address?: string;
     static_ip?: string;
     [key: string]: any;

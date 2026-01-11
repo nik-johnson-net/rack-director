@@ -10,9 +10,19 @@ use crate::ConnectionConfig;
 use crate::output::Output;
 use crate::server::ServerState;
 
-pub fn discover(conn: &ConnectionConfig, state: &mut ServerState, output: &Output) -> Result<()> {
-    output.step("DHCP DISCOVER");
-    output.detail("MAC", &state.mac_string());
+/// Discover an IP address for a specific NIC
+pub fn discover(
+    conn: &ConnectionConfig,
+    state: &mut ServerState,
+    nic_index: usize,
+    output: &Output,
+) -> Result<()> {
+    if nic_index >= state.mac_addresses.len() {
+        return Err(anyhow!("Invalid NIC index: {}", nic_index));
+    }
+
+    output.step(&format!("DHCP DISCOVER (NIC {})", nic_index));
+    output.detail("MAC", &state.mac_string(Some(nic_index)));
     output.detail("Architecture", &state.architecture);
 
     let socket = create_socket(conn.dhcp_port)?;
@@ -24,7 +34,7 @@ pub fn discover(conn: &ConnectionConfig, state: &mut ServerState, output: &Outpu
     let mut msg = Message::default();
     msg.set_xid(xid)
         .set_flags(Flags::default().set_broadcast())
-        .set_chaddr(&state.mac_address);
+        .set_chaddr(&state.mac_addresses[nic_index]);
 
     msg.opts_mut()
         .insert(DhcpOption::MessageType(MessageType::Discover));
@@ -69,38 +79,147 @@ pub fn discover(conn: &ConnectionConfig, state: &mut ServerState, output: &Outpu
     output.detail("Offered IP", &offered_ip.to_string());
     output.detail("Server IP", &server_ip.to_string());
 
-    state.allocated_ip = Some(offered_ip);
-    state.tftp_server = Some(server_ip);
+    // Store IP for this NIC
+    state.allocated_ips[nic_index] = Some(offered_ip);
 
-    output.success(&format!("DHCP DISCOVER complete: offered {}", offered_ip));
+    // Also store in legacy fields for backward compatibility (use first NIC)
+    if nic_index == 0 {
+        state.allocated_ip = Some(offered_ip);
+        state.tftp_server = Some(server_ip);
+    }
+
+    output.success(&format!(
+        "DHCP DISCOVER complete for NIC {}: offered {}",
+        nic_index, offered_ip
+    ));
 
     Ok(())
 }
 
-pub fn request(conn: &ConnectionConfig, state: &mut ServerState, output: &Output) -> Result<()> {
-    request_internal(conn, state, output, false)
+/// Request an IP address for a specific NIC (firmware mode)
+pub fn request(
+    conn: &ConnectionConfig,
+    state: &mut ServerState,
+    nic_index: usize,
+    output: &Output,
+) -> Result<()> {
+    request_internal(conn, state, nic_index, output, false)
 }
 
+/// Request an IP address as iPXE (for boot script - always uses NIC 0)
 pub fn request_as_ipxe(
     conn: &ConnectionConfig,
     state: &mut ServerState,
     output: &Output,
 ) -> Result<()> {
-    request_internal(conn, state, output, true)
+    request_internal(conn, state, 0, output, true)
+}
+
+/// Perform DHCP discovery and request for all NICs, trying one at a time
+/// with a 10-second timeout per interface
+pub fn discover_all_nics(
+    conn: &ConnectionConfig,
+    state: &mut ServerState,
+    output: &Output,
+) -> Result<()> {
+    output.step(&format!(
+        "DHCP Discovery for {} NICs (sequential with 10s timeout per NIC)",
+        state.mac_addresses.len()
+    ));
+
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for nic_index in 0..state.mac_addresses.len() {
+        output.info(&format!(
+            "Trying NIC {} (MAC {})",
+            nic_index,
+            state.mac_string(Some(nic_index))
+        ));
+
+        // Try this NIC with a timeout
+        match try_nic_with_timeout(conn, state, nic_index, output) {
+            Ok(()) => {
+                state.current_nic_index = nic_index;
+                output.success(&format!(
+                    "Successfully obtained lease on NIC {}",
+                    nic_index
+                ));
+                return Ok(());
+            }
+            Err(e) => {
+                output.info(&format!(
+                    "Failed to obtain lease on NIC {}: {}",
+                    nic_index, e
+                ));
+                last_error = Some(e);
+
+                // Continue to next NIC if available
+                if nic_index + 1 < state.mac_addresses.len() {
+                    output.info("Trying next interface...");
+                }
+            }
+        }
+    }
+
+    // If we get here, all NICs failed
+    Err(last_error.unwrap_or_else(|| anyhow!("All NICs failed to obtain DHCP lease")))
+}
+
+/// Try to obtain a DHCP lease on a specific NIC with a 10-second timeout
+fn try_nic_with_timeout(
+    conn: &ConnectionConfig,
+    state: &mut ServerState,
+    nic_index: usize,
+    output: &Output,
+) -> Result<()> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(10);
+
+    // Try discover - if it times out or fails, return error
+    discover(conn, state, nic_index, output)?;
+
+    // Check if we've exceeded our 10-second budget
+    if start.elapsed() >= timeout {
+        return Err(anyhow!("Timeout exceeded during discover phase"));
+    }
+
+    // Try request - if it times out or fails, return error
+    request(conn, state, nic_index, output)?;
+
+    // Check if we've exceeded our 10-second budget
+    if start.elapsed() >= timeout {
+        return Err(anyhow!("Timeout exceeded during request phase"));
+    }
+
+    Ok(())
 }
 
 fn request_internal(
     conn: &ConnectionConfig,
     state: &mut ServerState,
+    nic_index: usize,
     output: &Output,
     is_ipxe: bool,
 ) -> Result<()> {
+    if nic_index >= state.mac_addresses.len() {
+        return Err(anyhow!("Invalid NIC index: {}", nic_index));
+    }
+
     let mode = if is_ipxe { "iPXE" } else { "Firmware" };
-    output.step(&format!("DHCP REQUEST ({})", mode));
+    output.step(&format!("DHCP REQUEST ({}, NIC {})", mode, nic_index));
 
     let requested_ip = state
-        .allocated_ip
-        .ok_or_else(|| anyhow!("No IP allocated. Run dhcp-discover first."))?;
+        .allocated_ips
+        .get(nic_index)
+        .and_then(|ip| *ip)
+        .ok_or_else(|| {
+            anyhow!(
+                "No IP allocated for NIC {}. Run dhcp-discover first.",
+                nic_index
+            )
+        })?;
     let server_ip = state.tftp_server.unwrap_or(conn.host);
 
     output.detail("Requesting IP", &requested_ip.to_string());
@@ -113,7 +232,7 @@ fn request_internal(
     let mut msg = Message::default();
     msg.set_xid(xid)
         .set_flags(Flags::default().set_broadcast())
-        .set_chaddr(&state.mac_address);
+        .set_chaddr(&state.mac_addresses[nic_index]);
 
     msg.opts_mut()
         .insert(DhcpOption::MessageType(MessageType::Request));
@@ -174,17 +293,23 @@ fn request_internal(
     output.detail("Next Server", &next_server.to_string());
     output.detail("Bootfile", &bootfile);
 
-    state.allocated_ip = Some(leased_ip);
-    state.tftp_server = Some(next_server);
-    state.bootfile = Some(bootfile.clone());
+    // Store IP for this NIC
+    state.allocated_ips[nic_index] = Some(leased_ip);
 
-    if is_ipxe && bootfile.starts_with("http") {
-        state.boot_script_url = Some(bootfile.clone());
+    // Also store in legacy fields for backward compatibility (use first NIC)
+    if nic_index == 0 {
+        state.allocated_ip = Some(leased_ip);
+        state.tftp_server = Some(next_server);
+        state.bootfile = Some(bootfile.clone());
+
+        if is_ipxe && bootfile.starts_with("http") {
+            state.boot_script_url = Some(bootfile.clone());
+        }
     }
 
     output.success(&format!(
-        "DHCP REQUEST complete: {} -> {}",
-        leased_ip, bootfile
+        "DHCP REQUEST complete for NIC {}: {} -> {}",
+        nic_index, leased_ip, bootfile
     ));
 
     Ok(())

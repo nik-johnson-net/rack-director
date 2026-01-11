@@ -18,11 +18,15 @@ pub async fn run(conn: &ConnectionConfig, state: &ServerState, output: &Output) 
         "Product",
         state.hardware.product_name.as_deref().unwrap_or("Unknown"),
     );
+    output.info(&format!(
+        "Reporting {} network interfaces",
+        state.mac_addresses.len()
+    ));
 
     let http = HttpClient::new(conn);
 
     output.info("Building hardware attributes...");
-    let attributes = build_attributes(&state.hardware, &state.server_name);
+    let attributes = build_attributes(&state.hardware, &state.server_name, state);
 
     output.info(&format!("Uploading {} attributes...", attributes.len()));
     http.update_attributes(&state.uuid, attributes, output)
@@ -39,6 +43,7 @@ pub async fn run(conn: &ConnectionConfig, state: &ServerState, output: &Output) 
 fn build_attributes(
     hardware: &HardwareConfig,
     server_name: &str,
+    state: &ServerState,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut attrs = serde_json::Map::new();
 
@@ -103,6 +108,36 @@ fn build_attributes(
         .unwrap_or((dimm_count as u64) * (dimm_size as u64));
     attrs.insert("total_memory_mb".to_string(), json!(total_memory));
 
+    // Build network_interfaces array
+    let network_interfaces: Vec<_> = state
+        .mac_addresses
+        .iter()
+        .enumerate()
+        .map(|(idx, mac)| {
+            let mac_string = crate::server::format_mac(mac);
+            let ip_address = state
+                .allocated_ips
+                .get(idx)
+                .and_then(|ip| ip.as_ref().map(|i| i.to_string()));
+
+            json!({
+                "interface_name": format!("eth{}", idx),
+                "mac_address": mac_string,
+                "ip_address": ip_address,
+                "is_primary": idx == 0
+            })
+        })
+        .collect();
+    attrs.insert("network_interfaces".to_string(), json!(network_interfaces));
+
+    // Also set legacy mac_address field for backward compatibility
+    if let Some(primary_mac) = state.mac_addresses.first() {
+        attrs.insert(
+            "mac_address".to_string(),
+            json!(crate::server::format_mac(primary_mac)),
+        );
+    }
+
     attrs
 }
 
@@ -117,4 +152,105 @@ fn simple_hash(data: &[u8]) -> u32 {
         hash = hash.wrapping_mul(33).wrapping_add(*byte as u32);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Architecture, ResolvedServer};
+    use crate::hardware_profiles::HardwareConfig;
+
+    #[test]
+    fn test_build_attributes_single_nic() {
+        let config = ResolvedServer {
+            name: "test".to_string(),
+            macs: vec![[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]],
+            uuid: "test-uuid".to_string(),
+            architecture: Architecture::X64Uefi,
+            hardware: HardwareConfig::default(),
+        };
+        let mut state = ServerState::new("test", &config);
+        state.allocated_ips[0] = Some("192.168.1.100".parse().unwrap());
+
+        let attrs = build_attributes(&state.hardware, &state.server_name, &state);
+
+        // Check network_interfaces
+        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
+        assert_eq!(network_interfaces.len(), 1);
+
+        let nic0 = &network_interfaces[0];
+        assert_eq!(nic0["interface_name"], "eth0");
+        assert_eq!(nic0["mac_address"], "52:54:00:12:34:56");
+        assert_eq!(nic0["ip_address"], "192.168.1.100");
+        assert_eq!(nic0["is_primary"], true);
+
+        // Check legacy mac_address field
+        assert_eq!(attrs.get("mac_address").unwrap(), "52:54:00:12:34:56");
+    }
+
+    #[test]
+    fn test_build_attributes_multiple_nics() {
+        let config = ResolvedServer {
+            name: "test".to_string(),
+            macs: vec![
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x57],
+            ],
+            uuid: "test-uuid".to_string(),
+            architecture: Architecture::X64Uefi,
+            hardware: HardwareConfig::default(),
+        };
+        let mut state = ServerState::new("test", &config);
+        state.allocated_ips[0] = Some("192.168.1.100".parse().unwrap());
+        state.allocated_ips[1] = Some("192.168.1.101".parse().unwrap());
+
+        let attrs = build_attributes(&state.hardware, &state.server_name, &state);
+
+        // Check network_interfaces
+        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
+        assert_eq!(network_interfaces.len(), 2);
+
+        let nic0 = &network_interfaces[0];
+        assert_eq!(nic0["interface_name"], "eth0");
+        assert_eq!(nic0["mac_address"], "52:54:00:12:34:56");
+        assert_eq!(nic0["ip_address"], "192.168.1.100");
+        assert_eq!(nic0["is_primary"], true);
+
+        let nic1 = &network_interfaces[1];
+        assert_eq!(nic1["interface_name"], "eth1");
+        assert_eq!(nic1["mac_address"], "52:54:00:12:34:57");
+        assert_eq!(nic1["ip_address"], "192.168.1.101");
+        assert_eq!(nic1["is_primary"], false);
+
+        // Check legacy mac_address field (should be first NIC)
+        assert_eq!(attrs.get("mac_address").unwrap(), "52:54:00:12:34:56");
+    }
+
+    #[test]
+    fn test_build_attributes_no_ips() {
+        let config = ResolvedServer {
+            name: "test".to_string(),
+            macs: vec![
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x57],
+            ],
+            uuid: "test-uuid".to_string(),
+            architecture: Architecture::X64Uefi,
+            hardware: HardwareConfig::default(),
+        };
+        let state = ServerState::new("test", &config);
+
+        let attrs = build_attributes(&state.hardware, &state.server_name, &state);
+
+        // Check network_interfaces
+        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
+        assert_eq!(network_interfaces.len(), 2);
+
+        // IPs should be null when not allocated
+        let nic0 = &network_interfaces[0];
+        assert!(nic0["ip_address"].is_null());
+
+        let nic1 = &network_interfaces[1];
+        assert!(nic1["ip_address"].is_null());
+    }
 }

@@ -22,6 +22,7 @@ use anyhow::anyhow;
 mod store;
 
 pub use store::Device;
+pub use store::NetworkInterface;
 
 pub enum BootTarget {
     LocalDisk,
@@ -419,6 +420,21 @@ impl Director {
 
     pub async fn set_device_ip_address(&self, uuid: &str, ip: &str) -> anyhow::Result<()> {
         self.store.set_ip_address(uuid, ip).await
+    }
+
+    pub async fn get_network_interfaces(
+        &self,
+        uuid: &str,
+    ) -> anyhow::Result<Vec<NetworkInterface>> {
+        self.store.get_network_interfaces(uuid).await
+    }
+
+    pub async fn set_network_interfaces(
+        &self,
+        uuid: &str,
+        interfaces: &[NetworkInterface],
+    ) -> anyhow::Result<()> {
+        self.store.set_network_interfaces(uuid, interfaces).await
     }
 }
 

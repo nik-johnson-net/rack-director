@@ -111,18 +111,17 @@ pub async fn full_boot(
         "Starting dynamic boot sequence for '{}'",
         server_config.name
     ));
-    output.detail(
-        "MAC",
-        &format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            server_config.mac[0],
-            server_config.mac[1],
-            server_config.mac[2],
-            server_config.mac[3],
-            server_config.mac[4],
-            server_config.mac[5]
-        ),
-    );
+    // Display all MACs
+    if server_config.macs.len() == 1 {
+        output.detail("MAC", &crate::server::format_mac(&server_config.macs[0]));
+    } else {
+        for (idx, mac) in server_config.macs.iter().enumerate() {
+            output.detail(
+                &format!("MAC (eth{})", idx),
+                &crate::server::format_mac(mac),
+            );
+        }
+    }
     output.detail("UUID", &server_config.uuid);
     output.detail("Architecture", server_config.architecture.as_str());
 
@@ -147,8 +146,12 @@ pub async fn full_boot(
 
         // Phase 1: Firmware DHCP + TFTP
         output.step("Phase 1: Firmware Boot (DHCP + TFTP)");
-        dhcp::discover(conn, &mut state, output)?;
-        dhcp::request(conn, &mut state, output)?;
+        output.info("Attempting to obtain DHCP lease (trying interfaces sequentially)...");
+        dhcp::discover_all_nics(conn, &mut state, output)?;
+        output.info(&format!(
+            "Using NIC {} for TFTP boot...",
+            state.current_nic_index
+        ));
         tftp::download(conn, &mut state, output)?;
 
         // Phase 2: iPXE boot script interpretation
@@ -211,6 +214,7 @@ pub async fn ipxe_boot(
     output: &Output,
 ) -> Result<()> {
     output.step("iPXE Second-Stage Boot");
+    output.info("Using NIC 0 (primary) for iPXE boot...");
 
     dhcp::request_as_ipxe(conn, state, output)?;
 

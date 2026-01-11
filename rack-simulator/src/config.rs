@@ -15,7 +15,11 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    pub mac_address: String,
+    // Support both old single MAC and new multiple MACs for backward compatibility
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_addresses: Option<Vec<String>>,
     pub uuid: String,
     pub architecture: String,
     #[serde(default)]
@@ -93,7 +97,7 @@ impl Config {
             .get(name)
             .ok_or_else(|| anyhow!("Server '{}' not found in config", name))?;
 
-        let mac = resolve_mac(&server.mac_address, name)?;
+        let macs = resolve_macs(server, name)?;
         let uuid = resolve_uuid(&server.uuid, name)?;
         let architecture = Architecture::from_str(&server.architecture)?;
 
@@ -112,7 +116,7 @@ impl Config {
 
         Ok(ResolvedServer {
             name: name.to_string(),
-            mac,
+            macs,
             uuid,
             architecture,
             hardware,
@@ -123,18 +127,38 @@ impl Config {
 #[derive(Debug, Clone)]
 pub struct ResolvedServer {
     pub name: String,
-    pub mac: [u8; 6],
+    pub macs: Vec<[u8; 6]>,
     pub uuid: String,
     pub architecture: Architecture,
     pub hardware: HardwareConfig,
 }
 
-fn resolve_mac(value: &str, server_name: &str) -> Result<[u8; 6]> {
-    if value == "auto" {
-        Ok(generate_mac(server_name))
-    } else {
-        parse_mac(value)
+/// Resolve MAC addresses from ServerConfig
+/// Supports:
+/// - mac_addresses: ["52:54:00:12:34:56", "52:54:00:12:34:57"] (multiple)
+/// - mac_address: "52:54:00:12:34:56" (single, legacy) - generates 2 sequential MACs
+/// - mac_address: "auto" (auto-generate 2 MACs from server name)
+fn resolve_macs(server: &ServerConfig, server_name: &str) -> Result<Vec<[u8; 6]>> {
+    // Priority 1: Use mac_addresses if provided
+    if let Some(mac_strings) = &server.mac_addresses {
+        return mac_strings.iter().map(|s| parse_mac(s)).collect();
     }
+
+    // Priority 2: Use mac_address (legacy) - generate 2 sequential MACs
+    if let Some(mac_string) = &server.mac_address {
+        let first_mac = if mac_string == "auto" {
+            generate_mac(server_name)
+        } else {
+            parse_mac(mac_string)?
+        };
+        let second_mac = increment_mac(first_mac);
+        return Ok(vec![first_mac, second_mac]);
+    }
+
+    // Fallback: Auto-generate 2 MACs
+    let first_mac = generate_mac(server_name);
+    let second_mac = increment_mac(first_mac);
+    Ok(vec![first_mac, second_mac])
 }
 
 fn resolve_uuid(value: &str, server_name: &str) -> Result<String> {
@@ -155,6 +179,24 @@ fn generate_mac(seed: &str) -> [u8; 6] {
     mac[4] = ((hash >> 8) & 0xFF) as u8;
     mac[5] = (hash & 0xFF) as u8;
     mac
+}
+
+/// Increment a MAC address by 1
+fn increment_mac(mac: [u8; 6]) -> [u8; 6] {
+    let mut new_mac = mac;
+    // Increment last byte with overflow handling
+    if new_mac[5] == 255 {
+        new_mac[5] = 0;
+        if new_mac[4] == 255 {
+            new_mac[4] = 0;
+            new_mac[3] = new_mac[3].wrapping_add(1);
+        } else {
+            new_mac[4] = new_mac[4].wrapping_add(1);
+        }
+    } else {
+        new_mac[5] = new_mac[5].wrapping_add(1);
+    }
+    new_mac
 }
 
 fn generate_uuid(seed: &str) -> String {
@@ -247,7 +289,8 @@ pub fn create_server(
     config.servers.insert(
         name.to_string(),
         ServerConfig {
-            mac_address: mac.to_string(),
+            mac_address: Some(mac.to_string()),
+            mac_addresses: None,
             uuid: uuid.to_string(),
             architecture: arch.to_string(),
             hardware_profile: profile.map(String::from),
@@ -278,14 +321,28 @@ pub fn list_servers(config: &Config, output: &Output) {
         return;
     }
 
-    println!("{:<20} {:<18} {:<12}", "NAME", "MAC", "ARCH");
+    println!("{:<20} {:<18} {:<12}", "NAME", "MAC(s)", "ARCH");
     println!("{:-<20} {:-<18} {:-<12}", "", "", "");
 
     for (name, server) in &config.servers {
-        println!(
-            "{:<20} {:<18} {:<12}",
-            name, server.mac_address, server.architecture
-        );
+        // Display first MAC or "auto"
+        let mac_display = server
+            .mac_addresses
+            .as_ref()
+            .and_then(|v| v.first())
+            .map(|s| s.as_str())
+            .or(server.mac_address.as_deref())
+            .unwrap_or("auto");
+
+        let mac_count = server.mac_addresses.as_ref().map(|v| v.len()).unwrap_or(2); // Default to 2 NICs
+
+        let mac_str = if mac_count > 1 {
+            format!("{} (+{})", mac_display, mac_count - 1)
+        } else {
+            mac_display.to_string()
+        };
+
+        println!("{:<20} {:<18} {:<12}", name, mac_str, server.architecture);
     }
 }
 
@@ -293,18 +350,19 @@ pub fn show_server(config: &Config, name: &str, output: &Output) -> Result<()> {
     let resolved = config.get_server(name)?;
 
     output.step(&format!("Server: {}", resolved.name));
-    output.detail(
-        "MAC Address",
-        &format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            resolved.mac[0],
-            resolved.mac[1],
-            resolved.mac[2],
-            resolved.mac[3],
-            resolved.mac[4],
-            resolved.mac[5]
-        ),
-    );
+
+    // Display all MAC addresses
+    if resolved.macs.len() == 1 {
+        output.detail("MAC Address", &crate::server::format_mac(&resolved.macs[0]));
+    } else {
+        for (idx, mac) in resolved.macs.iter().enumerate() {
+            output.detail(
+                &format!("MAC Address (eth{})", idx),
+                &crate::server::format_mac(mac),
+            );
+        }
+    }
+
     output.detail("UUID", &resolved.uuid);
     output.detail("Architecture", resolved.architecture.as_str());
 
@@ -368,5 +426,99 @@ mod tests {
             Architecture::Arm64Uefi
         );
         assert!(Architecture::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_increment_mac() {
+        // Normal increment
+        let mac1 = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let mac2 = increment_mac(mac1);
+        assert_eq!(mac2, [0x52, 0x54, 0x00, 0x12, 0x34, 0x57]);
+
+        // Overflow last byte
+        let mac3 = [0x52, 0x54, 0x00, 0x12, 0x34, 0xFF];
+        let mac4 = increment_mac(mac3);
+        assert_eq!(mac4, [0x52, 0x54, 0x00, 0x12, 0x35, 0x00]);
+
+        // Overflow two bytes
+        let mac5 = [0x52, 0x54, 0x00, 0x12, 0xFF, 0xFF];
+        let mac6 = increment_mac(mac5);
+        assert_eq!(mac6, [0x52, 0x54, 0x00, 0x13, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_resolve_macs_explicit_multiple() {
+        let server = ServerConfig {
+            mac_address: None,
+            mac_addresses: Some(vec![
+                "52:54:00:12:34:56".to_string(),
+                "52:54:00:12:34:57".to_string(),
+                "52:54:00:12:34:58".to_string(),
+            ]),
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        let macs = resolve_macs(&server, "test-server").unwrap();
+        assert_eq!(macs.len(), 3);
+        assert_eq!(macs[0], [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        assert_eq!(macs[1], [0x52, 0x54, 0x00, 0x12, 0x34, 0x57]);
+        assert_eq!(macs[2], [0x52, 0x54, 0x00, 0x12, 0x34, 0x58]);
+    }
+
+    #[test]
+    fn test_resolve_macs_legacy_single() {
+        let server = ServerConfig {
+            mac_address: Some("52:54:00:12:34:56".to_string()),
+            mac_addresses: None,
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        let macs = resolve_macs(&server, "test-server").unwrap();
+        assert_eq!(macs.len(), 2);
+        assert_eq!(macs[0], [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        assert_eq!(macs[1], [0x52, 0x54, 0x00, 0x12, 0x34, 0x57]);
+    }
+
+    #[test]
+    fn test_resolve_macs_auto() {
+        let server = ServerConfig {
+            mac_address: Some("auto".to_string()),
+            mac_addresses: None,
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        let macs = resolve_macs(&server, "test-server").unwrap();
+        assert_eq!(macs.len(), 2);
+        // Should be deterministic
+        let expected_first = generate_mac("test-server");
+        assert_eq!(macs[0], expected_first);
+        assert_eq!(macs[1], increment_mac(expected_first));
+    }
+
+    #[test]
+    fn test_resolve_macs_neither_field() {
+        let server = ServerConfig {
+            mac_address: None,
+            mac_addresses: None,
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        let macs = resolve_macs(&server, "test-server").unwrap();
+        assert_eq!(macs.len(), 2);
+        let expected_first = generate_mac("test-server");
+        assert_eq!(macs[0], expected_first);
+        assert_eq!(macs[1], increment_mac(expected_first));
     }
 }

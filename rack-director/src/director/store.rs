@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::lifecycle::DeviceLifecycle;
@@ -18,6 +19,14 @@ pub struct Device {
     pub created_at: Option<String>,
     pub first_seen_at: Option<String>,
     pub last_seen_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkInterface {
+    pub interface_name: String,
+    pub mac_address: String,
+    pub ip_address: Option<String>,
+    pub is_primary: bool,
 }
 
 #[derive(Clone)]
@@ -182,15 +191,21 @@ impl DirectorStore {
     }
 
     /// Find device UUID by MAC address from device attributes
+    /// Searches both legacy mac_address field and network_interfaces array
     pub async fn find_device_by_mac(&self, mac: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
-            "SELECT uuid FROM devices WHERE json_extract(attributes, '$.mac_address') = ?",
+            "SELECT uuid FROM devices
+             WHERE json_extract(attributes, '$.mac_address') = ?
+                OR EXISTS (
+                  SELECT 1 FROM json_each(attributes, '$.network_interfaces')
+                  WHERE json_extract(value, '$.mac_address') = ?
+                )",
         )?;
 
         let result = stmt
-            .query_row(params![mac], |row| row.get::<_, String>(0))
+            .query_row(params![mac, mac], |row| row.get::<_, String>(0))
             .optional()?;
 
         Ok(result)
@@ -231,10 +246,45 @@ impl DirectorStore {
     pub async fn set_mac_address(&self, uuid: &str, mac: &str) -> Result<()> {
         let conn = self.conn.lock().await;
 
+        // First, update the legacy mac_address field
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.mac_address', ?) WHERE uuid = ?",
             params![mac, uuid],
         )?;
+
+        // Then, if network_interfaces array exists, update the primary NIC's MAC address
+        let has_interfaces: bool = conn
+            .query_row(
+                "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
+                params![uuid],
+                |row| {
+                    let json_type: Option<String> = row.get(0)?;
+                    Ok(json_type == Some("array".to_string()))
+                },
+            )
+            .optional()?
+            .unwrap_or(false);
+
+        if has_interfaces {
+            // Find the index of the primary interface
+            let primary_index: Option<i64> = conn
+                .query_row(
+                    "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?), '$.network_interfaces')
+                     WHERE json_extract(value, '$.is_primary') = 1
+                     LIMIT 1",
+                    params![uuid],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+
+            if let Some(index) = primary_index {
+                let path = format!("$.network_interfaces[{}].mac_address", index);
+                conn.execute(
+                    "UPDATE devices SET attributes = json_set(attributes, ?, ?) WHERE uuid = ?",
+                    params![path, mac, uuid],
+                )?;
+            }
+        }
 
         Ok(())
     }
@@ -243,12 +293,108 @@ impl DirectorStore {
     pub async fn set_ip_address(&self, uuid: &str, ip: &str) -> Result<()> {
         let conn = self.conn.lock().await;
 
+        // First, update the legacy ip_address field
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.ip_address', ?) WHERE uuid = ?",
             params![ip, uuid],
         )?;
 
+        // Then, if network_interfaces array exists, update the primary NIC's IP address
+        let has_interfaces: bool = conn
+            .query_row(
+                "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
+                params![uuid],
+                |row| {
+                    let json_type: Option<String> = row.get(0)?;
+                    Ok(json_type == Some("array".to_string()))
+                },
+            )
+            .optional()?
+            .unwrap_or(false);
+
+        if has_interfaces {
+            // Find the index of the primary interface
+            let primary_index: Option<i64> = conn
+                .query_row(
+                    "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?), '$.network_interfaces')
+                     WHERE json_extract(value, '$.is_primary') = 1
+                     LIMIT 1",
+                    params![uuid],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+
+            if let Some(index) = primary_index {
+                let path = format!("$.network_interfaces[{}].ip_address", index);
+                conn.execute(
+                    "UPDATE devices SET attributes = json_set(attributes, ?, ?) WHERE uuid = ?",
+                    params![path, ip, uuid],
+                )?;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Get network interfaces from device attributes
+    pub async fn get_network_interfaces(&self, uuid: &str) -> Result<Vec<NetworkInterface>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT json_extract(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
+        )?;
+
+        let result = stmt
+            .query_row(params![uuid], |row| row.get::<_, Option<String>>(0))
+            .optional()?;
+
+        match result {
+            Some(Some(json_str)) => {
+                // Try to parse the JSON array
+                let interfaces: Vec<NetworkInterface> =
+                    serde_json::from_str(&json_str).unwrap_or_else(|_| Vec::new());
+                Ok(interfaces)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Set network interfaces in device attributes
+    pub async fn set_network_interfaces(
+        &self,
+        uuid: &str,
+        interfaces: &[NetworkInterface],
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+
+        let json_str = serde_json::to_string(interfaces)?;
+
+        conn.execute(
+            "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', json(?)) WHERE uuid = ?",
+            params![json_str, uuid],
+        )?;
+
+        Ok(())
+    }
+
+    /// Find device UUID by MAC address in either legacy mac_address field or network_interfaces array
+    pub async fn find_device_by_any_mac(&self, mac: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT uuid FROM devices
+             WHERE json_extract(attributes, '$.mac_address') = ?
+                OR EXISTS (
+                  SELECT 1 FROM json_each(attributes, '$.network_interfaces')
+                  WHERE json_extract(value, '$.mac_address') = ?
+                )",
+        )?;
+
+        let result = stmt
+            .query_row(params![mac, mac], |row| row.get::<_, String>(0))
+            .optional()?;
+
+        Ok(result)
     }
 }
 
@@ -569,5 +715,519 @@ mod tests {
             "test-host"
         );
         assert_eq!(device.attributes.len(), 1);
+    }
+
+    // Tests for multi-NIC support
+
+    #[tokio::test]
+    async fn test_get_network_interfaces_empty() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440030";
+
+        // Register device without any NICs
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Get interfaces should return empty vec
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_network_interfaces_single() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440031";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set single network interface
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+        }];
+        store
+            .set_network_interfaces(uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Retrieve and verify
+        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved[0].interface_name, "eth0");
+        assert_eq!(retrieved[0].mac_address, "aa:bb:cc:dd:ee:01");
+        assert_eq!(retrieved[0].ip_address, Some("10.0.0.100".to_string()));
+        assert!(retrieved[0].is_primary);
+    }
+
+    #[tokio::test]
+    async fn test_get_network_interfaces_multiple() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440032";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set multiple network interfaces
+        let interfaces = vec![
+            NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+            },
+            NetworkInterface {
+                interface_name: "eth1".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                ip_address: Some("10.0.0.101".to_string()),
+                is_primary: false,
+            },
+            NetworkInterface {
+                interface_name: "eth2".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:03".to_string(),
+                ip_address: None,
+                is_primary: false,
+            },
+        ];
+        store
+            .set_network_interfaces(uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Retrieve and verify
+        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(retrieved.len(), 3);
+        assert_eq!(retrieved[0].interface_name, "eth0");
+        assert_eq!(retrieved[1].interface_name, "eth1");
+        assert_eq!(retrieved[2].interface_name, "eth2");
+        assert!(retrieved[0].is_primary);
+        assert!(!retrieved[1].is_primary);
+        assert!(!retrieved[2].is_primary);
+    }
+
+    #[tokio::test]
+    async fn test_set_network_interfaces_overwrites() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440033";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set initial interfaces
+        let initial = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+        }];
+        store.set_network_interfaces(uuid, &initial).await.unwrap();
+
+        // Overwrite with different interfaces
+        let updated = vec![
+            NetworkInterface {
+                interface_name: "ens0".to_string(),
+                mac_address: "11:22:33:44:55:66".to_string(),
+                ip_address: Some("192.168.1.100".to_string()),
+                is_primary: true,
+            },
+            NetworkInterface {
+                interface_name: "ens1".to_string(),
+                mac_address: "11:22:33:44:55:67".to_string(),
+                ip_address: None,
+                is_primary: false,
+            },
+        ];
+        store.set_network_interfaces(uuid, &updated).await.unwrap();
+
+        // Verify it was overwritten
+        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(retrieved.len(), 2);
+        assert_eq!(retrieved[0].interface_name, "ens0");
+        assert_eq!(retrieved[1].interface_name, "ens1");
+    }
+
+    #[tokio::test]
+    async fn test_find_device_by_mac_legacy_field() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440034";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set MAC using legacy method
+        store
+            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
+
+        // Find by MAC should work
+        let found = store.find_device_by_mac("aa:bb:cc:dd:ee:ff").await.unwrap();
+        assert_eq!(found, Some(uuid.to_string()));
+
+        // Non-existent MAC should return None
+        let not_found = store.find_device_by_mac("00:00:00:00:00:00").await.unwrap();
+        assert_eq!(not_found, None);
+    }
+
+    #[tokio::test]
+    async fn test_find_device_by_mac_in_interfaces_array() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440035";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set network interfaces
+        let interfaces = vec![
+            NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+            },
+            NetworkInterface {
+                interface_name: "eth1".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                ip_address: Some("10.0.0.101".to_string()),
+                is_primary: false,
+            },
+        ];
+        store
+            .set_network_interfaces(uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Find by primary MAC
+        let found1 = store.find_device_by_mac("aa:bb:cc:dd:ee:01").await.unwrap();
+        assert_eq!(found1, Some(uuid.to_string()));
+
+        // Find by secondary MAC
+        let found2 = store.find_device_by_mac("aa:bb:cc:dd:ee:02").await.unwrap();
+        assert_eq!(found2, Some(uuid.to_string()));
+
+        // Non-existent MAC should return None
+        let not_found = store.find_device_by_mac("00:00:00:00:00:00").await.unwrap();
+        assert_eq!(not_found, None);
+    }
+
+    #[tokio::test]
+    async fn test_find_device_by_any_mac() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440036";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set both legacy MAC and interfaces array
+        store
+            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
+
+        let interfaces = vec![
+            NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+            },
+            NetworkInterface {
+                interface_name: "eth1".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                ip_address: None,
+                is_primary: false,
+            },
+        ];
+        store
+            .set_network_interfaces(uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Find by legacy MAC
+        let found_legacy = store
+            .find_device_by_any_mac("aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
+        assert_eq!(found_legacy, Some(uuid.to_string()));
+
+        // Find by interface MAC
+        let found_iface = store
+            .find_device_by_any_mac("aa:bb:cc:dd:ee:02")
+            .await
+            .unwrap();
+        assert_eq!(found_iface, Some(uuid.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_mac_address_legacy_only() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440037";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set MAC address without interfaces array
+        store
+            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
+
+        // Verify legacy field is set
+        let device = store.get_device(uuid).await.unwrap();
+        assert_eq!(
+            device
+                .attributes
+                .get("mac_address")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "aa:bb:cc:dd:ee:ff"
+        );
+
+        // Verify interfaces array is still empty
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_set_mac_address_updates_primary_interface() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440038";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set network interfaces
+        let interfaces = vec![
+            NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+            },
+            NetworkInterface {
+                interface_name: "eth1".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                ip_address: None,
+                is_primary: false,
+            },
+        ];
+        store
+            .set_network_interfaces(uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Update MAC address
+        store
+            .set_mac_address(uuid, "11:22:33:44:55:66")
+            .await
+            .unwrap();
+
+        // Verify legacy field is updated
+        let device = store.get_device(uuid).await.unwrap();
+        assert_eq!(
+            device
+                .attributes
+                .get("mac_address")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "11:22:33:44:55:66"
+        );
+
+        // Verify primary interface MAC is updated
+        let updated_interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(updated_interfaces[0].mac_address, "11:22:33:44:55:66");
+        // Secondary interface should be unchanged
+        assert_eq!(updated_interfaces[1].mac_address, "aa:bb:cc:dd:ee:02");
+    }
+
+    #[tokio::test]
+    async fn test_set_ip_address_legacy_only() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440039";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set IP address without interfaces array
+        store.set_ip_address(uuid, "10.0.0.100").await.unwrap();
+
+        // Verify legacy field is set
+        let device = store.get_device(uuid).await.unwrap();
+        assert_eq!(
+            device
+                .attributes
+                .get("ip_address")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "10.0.0.100"
+        );
+
+        // Verify interfaces array is still empty
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_set_ip_address_updates_primary_interface() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440040";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set network interfaces
+        let interfaces = vec![
+            NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+            },
+            NetworkInterface {
+                interface_name: "eth1".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                ip_address: Some("10.0.0.101".to_string()),
+                is_primary: false,
+            },
+        ];
+        store
+            .set_network_interfaces(uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Update IP address
+        store.set_ip_address(uuid, "192.168.1.50").await.unwrap();
+
+        // Verify legacy field is updated
+        let device = store.get_device(uuid).await.unwrap();
+        assert_eq!(
+            device
+                .attributes
+                .get("ip_address")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "192.168.1.50"
+        );
+
+        // Verify primary interface IP is updated
+        let updated_interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(
+            updated_interfaces[0].ip_address,
+            Some("192.168.1.50".to_string())
+        );
+        // Secondary interface should be unchanged
+        assert_eq!(
+            updated_interfaces[1].ip_address,
+            Some("10.0.0.101".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_backward_compatibility_legacy_device() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440041";
+
+        // Register device and set up as a legacy device (no network_interfaces)
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        store
+            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
+        store.set_ip_address(uuid, "10.0.0.100").await.unwrap();
+
+        // Verify legacy fields work
+        let device = store.get_device(uuid).await.unwrap();
+        assert_eq!(
+            device
+                .attributes
+                .get("mac_address")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "aa:bb:cc:dd:ee:ff"
+        );
+        assert_eq!(
+            device
+                .attributes
+                .get("ip_address")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "10.0.0.100"
+        );
+
+        // Verify find_device_by_mac still works
+        let found = store.find_device_by_mac("aa:bb:cc:dd:ee:ff").await.unwrap();
+        assert_eq!(found, Some(uuid.to_string()));
+
+        // Verify get_network_interfaces returns empty array
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_network_interfaces_invalid_json() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440042";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Manually set invalid JSON in network_interfaces field
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', 'invalid') WHERE uuid = ?",
+            params![uuid],
+        ).unwrap();
+        drop(conn);
+
+        // Should return empty vec instead of error
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 0);
     }
 }

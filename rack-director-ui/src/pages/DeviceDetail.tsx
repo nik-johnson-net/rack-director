@@ -202,8 +202,47 @@ function DeviceDetail() {
               <span className="font-medium">IP Address:</span>
               <span className="font-mono">{ipAddress || <span className="text-gray-400">—</span>}</span>
 
-              <span className="font-medium">MAC Address:</span>
-              <span className="font-mono text-xs">{device.attributes?.mac_address || <span className="text-gray-400">—</span>}</span>
+              <span className="font-medium">Network Interfaces:</span>
+              <div className="col-span-2">
+                {device.attributes?.network_interfaces && device.attributes.network_interfaces.length > 0 ? (
+                  <table className="min-w-full text-sm border">
+                    <thead>
+                      <tr className="border-b bg-gray-50">
+                        <th className="text-left py-2 px-3">Interface</th>
+                        <th className="text-left py-2 px-3">MAC Address</th>
+                        <th className="text-left py-2 px-3">IP Address</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {device.attributes.network_interfaces.map((nic, idx) => (
+                        <tr key={idx} className={`border-b ${nic.is_primary ? "bg-blue-50" : ""}`}>
+                          <td className="py-2 px-3 font-mono text-xs">
+                            {nic.interface_name}
+                            {nic.is_primary && (
+                              <Badge className="ml-2 text-xs" variant="default">Primary</Badge>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 font-mono text-xs">{nic.mac_address}</td>
+                          <td className="py-2 px-3 font-mono text-xs">
+                            {nic.ip_address || <span className="text-gray-400">—</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <span className="text-gray-400">
+                    {device.attributes?.mac_address ? (
+                      <div className="text-sm">
+                        <span className="font-mono">{device.attributes.mac_address}</span>
+                        <span className="ml-2 text-xs text-gray-500">(Legacy format - trigger re-discovery to update)</span>
+                      </div>
+                    ) : (
+                      "No network interfaces discovered"
+                    )}
+                  </span>
+                )}
+              </div>
 
               <span className="font-medium">Last Seen:</span>
               <span className="text-xs">{device.last_seen_at ? new Date(device.last_seen_at).toLocaleString() : "Never"}</span>

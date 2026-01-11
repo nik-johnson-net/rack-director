@@ -15,7 +15,7 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use crate::{director::BootTarget, http::AppState};
+use crate::{director::BootTarget, director::NetworkInterface, http::AppState};
 
 use crate::http::error::Error;
 
@@ -79,7 +79,56 @@ async fn ipxe_handler(
                 lease.mac_address,
                 lease.ip_address
             );
-            // Store MAC address in device attributes
+
+            // Get existing network interfaces
+            let mut interfaces = state
+                .director
+                .get_network_interfaces(&uuid)
+                .await
+                .unwrap_or_else(|_| Vec::new());
+
+            if interfaces.is_empty() {
+                // No existing interfaces - create first one
+                let nic = NetworkInterface {
+                    interface_name: String::from("unknown"), // Will be updated by agent
+                    mac_address: lease.mac_address.clone(),
+                    ip_address: Some(lease.ip_address.clone()),
+                    is_primary: true,
+                };
+                interfaces.push(nic);
+
+                if let Err(e) = state
+                    .director
+                    .set_network_interfaces(&uuid, &interfaces)
+                    .await
+                {
+                    warn!(
+                        "Couldn't store network interfaces for device {}: {}",
+                        uuid, e
+                    );
+                }
+            } else {
+                // Find matching NIC by MAC and update its IP
+                if let Some(nic) = interfaces
+                    .iter_mut()
+                    .find(|n| n.mac_address == lease.mac_address)
+                {
+                    nic.ip_address = Some(lease.ip_address.clone());
+
+                    if let Err(e) = state
+                        .director
+                        .set_network_interfaces(&uuid, &interfaces)
+                        .await
+                    {
+                        warn!(
+                            "Couldn't update network interfaces for device {}: {}",
+                            uuid, e
+                        );
+                    }
+                }
+            }
+
+            // Always update legacy fields for backward compatibility
             if let Err(e) = state
                 .director
                 .set_device_mac_address(&uuid, &lease.mac_address)
@@ -87,7 +136,6 @@ async fn ipxe_handler(
             {
                 warn!("Couldn't store MAC address for device {uuid}: {e}");
             }
-            // Store IP address in device attributes
             if let Err(e) = state
                 .director
                 .set_device_ip_address(&uuid, &lease.ip_address)
@@ -343,10 +391,61 @@ async fn update_attributes(
 ) -> Result<NoContent, StatusCode> {
     let uuid = payload.uuid;
     let attributes = payload.attributes;
-    if let Err(e) = state.director.update_attributes(&uuid, attributes).await {
+
+    // First, store the attributes as provided by the agent
+    if let Err(e) = state
+        .director
+        .update_attributes(&uuid, attributes.clone())
+        .await
+    {
         warn!("Couldn't update attributes for {uuid}: {e}");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    // Then, if network_interfaces were provided, backfill IP addresses from DHCP leases
+    if let Some(network_interfaces_value) = attributes.get("network_interfaces")
+        && let Some(interfaces_array) = network_interfaces_value.as_array()
+    {
+        let mut enriched_interfaces: Vec<NetworkInterface> = Vec::new();
+
+        for interface_value in interfaces_array {
+            // Parse the interface from JSON
+            match serde_json::from_value::<NetworkInterface>(interface_value.clone()) {
+                Ok(mut nic) => {
+                    // Look up DHCP lease for this MAC
+                    if let Ok(Some(lease)) =
+                        state.dhcp_store.get_lease_by_mac(&nic.mac_address).await
+                    {
+                        log::info!(
+                            "Backfilling IP {} for NIC {} (MAC {})",
+                            lease.ip_address,
+                            nic.interface_name,
+                            nic.mac_address
+                        );
+                        nic.ip_address = Some(lease.ip_address);
+                    }
+                    enriched_interfaces.push(nic);
+                }
+                Err(e) => {
+                    warn!("Failed to parse network interface from JSON: {}", e);
+                }
+            }
+        }
+
+        // Update the device with IP-enriched network interfaces
+        if !enriched_interfaces.is_empty()
+            && let Err(e) = state
+                .director
+                .set_network_interfaces(&uuid, &enriched_interfaces)
+                .await
+        {
+            warn!(
+                "Couldn't set enriched network interfaces for {}: {}",
+                uuid, e
+            );
+        }
+    }
+
     Ok(NoContent)
 }
 

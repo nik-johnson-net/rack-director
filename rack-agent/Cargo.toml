@@ -16,4 +16,5 @@ std-logger.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+tempfile = "3.13.0"
 tokio-test.workspace = true
