@@ -1,4 +1,4 @@
-import { Calendar, Home, Inbox, Search, Settings, HardDrive, Briefcase } from "lucide-react"
+import { Home, Server, Settings, HardDrive, Users, ClipboardList, GitBranch } from "lucide-react"
 
 import {
   Sidebar,
@@ -12,42 +12,62 @@ import {
 } from "@/components/ui/sidebar"
 import { Link, useMatch } from "react-router";
 
-// Menu items.
-const items = [
+// Menu items organized by groups
+const menuGroups = [
   {
-    title: "Home",
-    url: "/",
-    icon: Home,
+    label: "Infrastructure",
+    items: [
+      {
+        title: "Home",
+        url: "/",
+        icon: Home,
+      },
+      {
+        title: "Devices",
+        url: "/devices",
+        icon: Server,
+      },
+      {
+        title: "Operating Systems",
+        url: "/operating-systems",
+        icon: HardDrive,
+      },
+    ],
   },
   {
-    title: "Devices",
-    url: "/devices",
-    icon: Inbox,
+    label: "Configuration",
+    items: [
+      {
+        title: "Roles",
+        url: "/roles",
+        icon: Users,
+      },
+      {
+        title: "Plans",
+        url: "/plans",
+        icon: ClipboardList,
+      },
+    ],
   },
   {
-    title: "Operating Systems",
-    url: "/operating-systems",
-    icon: HardDrive,
+    label: "Monitoring",
+    items: [
+      {
+        title: "Transitions",
+        url: "/transitions",
+        icon: GitBranch,
+      },
+    ],
   },
   {
-    title: "Roles",
-    url: "/roles",
-    icon: Briefcase,
-  },
-  {
-    title: "Plans",
-    url: "/plans",
-    icon: Calendar,
-  },
-  {
-    title: "Transitions",
-    url: "/transitions",
-    icon: Search,
-  },
-  {
-    title: "Settings",
-    url: "/settings",
-    icon: Settings,
+    label: "System",
+    items: [
+      {
+        title: "Settings",
+        url: "/settings",
+        icon: Settings,
+      },
+    ],
   },
 ]
 
@@ -55,16 +75,18 @@ export function AppSidebar() {
   return (
     <Sidebar>
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>Rack Director</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {items.map((item) => (
-                <AppSidebarMenuItem key={item.title} {...item} />
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {menuGroups.map((group) => (
+          <SidebarGroup key={group.label}>
+            <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {group.items.map((item) => (
+                  <AppSidebarMenuItem key={item.title} {...item} />
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
       </SidebarContent>
     </Sidebar>
   )

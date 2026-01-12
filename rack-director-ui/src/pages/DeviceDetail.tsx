@@ -3,6 +3,8 @@ import { useParams, useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { Label } from "@/components/ui/label";
 import {
   AlertDialog,
@@ -33,17 +35,6 @@ import {
   type DeviceLifecycle,
 } from "@/lib/client";
 import { ArrowLeft, CheckCircle, Clock } from "lucide-react";
-
-const getLifecycleColor = (lifecycle?: string) => {
-  switch (lifecycle) {
-    case "provisioned": return "bg-green-100 text-green-800 border-green-300";
-    case "unprovisioned": return "bg-yellow-100 text-yellow-800 border-yellow-300";
-    case "new": return "bg-blue-100 text-blue-800 border-blue-300";
-    case "removed": return "bg-gray-100 text-gray-800 border-gray-300";
-    case "broken": return "bg-red-100 text-red-800 border-red-300";
-    default: return "bg-gray-100 text-gray-600 border-gray-300";
-  }
-};
 
 const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
 
@@ -155,6 +146,13 @@ function DeviceDetail() {
 
   return (
     <div className="space-y-4 max-w-5xl">
+      <Breadcrumbs
+        items={[
+          { label: "Devices", href: "/devices" },
+          { label: device.attributes?.hostname || device.uuid },
+        ]}
+      />
+
       <div className="flex items-center gap-4">
         <Button
           variant="outline"
@@ -167,12 +165,10 @@ function DeviceDetail() {
           <h1 className="text-3xl font-bold">
             {device.attributes?.hostname || device.uuid}
           </h1>
-          <p className="text-sm text-gray-500 font-mono">{device.uuid}</p>
+          <p className="text-sm text-muted-foreground font-mono">{device.uuid}</p>
         </div>
         {status?.current_lifecycle && (
-          <Badge variant="outline" className={`${getLifecycleColor(status.current_lifecycle)} text-sm px-3 py-1`}>
-            {status.current_lifecycle}
-          </Badge>
+          <StatusBadge status={status.current_lifecycle} className="text-sm px-3 py-1" />
         )}
       </div>
 
@@ -183,7 +179,7 @@ function DeviceDetail() {
       )}
 
       {/* Device Information */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card>
           <CardHeader>
             <CardTitle>Device Information</CardTitle>
@@ -363,13 +359,9 @@ function DeviceDetail() {
 
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <Badge variant="outline" className={getLifecycleColor(transition.from_state)}>
-                        {transition.from_state}
-                      </Badge>
-                      <span className="text-gray-400">→</span>
-                      <Badge variant="outline" className={getLifecycleColor(transition.to_state)}>
-                        {transition.to_state}
-                      </Badge>
+                      <StatusBadge status={transition.from_state} />
+                      <span className="text-muted-foreground">→</span>
+                      <StatusBadge status={transition.to_state} />
                     </div>
                     <div className="text-xs text-gray-500 mt-1">
                       Started: {new Date(transition.started_at).toLocaleString()}

@@ -3,19 +3,9 @@ import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tan
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Button } from "../ui/button"
 import { Badge } from "../ui/badge"
+import { StatusBadge } from "../ui/status-badge"
 import { Eye } from "lucide-react"
 import { useNavigate } from "react-router"
-
-const getLifecycleColor = (lifecycle?: string) => {
-  switch (lifecycle) {
-    case "provisioned": return "bg-green-100 text-green-800 border-green-300";
-    case "unprovisioned": return "bg-yellow-100 text-yellow-800 border-yellow-300";
-    case "new": return "bg-blue-100 text-blue-800 border-blue-300";
-    case "removed": return "bg-gray-100 text-gray-800 border-gray-300";
-    case "broken": return "bg-red-100 text-red-800 border-red-300";
-    default: return "bg-gray-100 text-gray-600 border-gray-300";
-  }
-};
 
 interface DevicesTableEnhancedProps {
   data: Device[];
@@ -111,11 +101,9 @@ export default function DevicesTableEnhanced({ data, dhcpLeases, rolesMap }: Dev
       cell: ({ row }) => {
         const lifecycle = row.original.lifecycle;
         return lifecycle ? (
-          <Badge variant="outline" className={`${getLifecycleColor(lifecycle)} text-xs`}>
-            {lifecycle}
-          </Badge>
+          <StatusBadge status={lifecycle} />
         ) : (
-          <span className="text-gray-400">—</span>
+          <span className="text-muted-foreground">—</span>
         );
       },
     },

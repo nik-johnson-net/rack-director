@@ -17,6 +17,18 @@ const badgeVariants = cva(
           "border-transparent bg-destructive text-white [a&]:hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
         outline:
           "text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
+        "status-new":
+          "bg-[oklch(var(--status-new-bg))] text-[oklch(var(--status-new))] border-[oklch(var(--status-new-border))]",
+        "status-unprovisioned":
+          "bg-[oklch(var(--status-unprovisioned-bg))] text-[oklch(var(--status-unprovisioned))] border-[oklch(var(--status-unprovisioned-border))]",
+        "status-provisioned":
+          "bg-[oklch(var(--status-provisioned-bg))] text-[oklch(var(--status-provisioned))] border-[oklch(var(--status-provisioned-border))]",
+        "status-broken":
+          "bg-[oklch(var(--status-broken-bg))] text-[oklch(var(--status-broken))] border-[oklch(var(--status-broken-border))]",
+        "status-removed":
+          "bg-[oklch(var(--status-removed-bg))] text-[oklch(var(--status-removed))] border-[oklch(var(--status-removed-border))]",
+        "status-provisioning":
+          "bg-[oklch(var(--status-provisioning-bg))] text-[oklch(var(--status-provisioning))] border-[oklch(var(--status-provisioning-border))] animate-pulse",
       },
     },
     defaultVariants: {

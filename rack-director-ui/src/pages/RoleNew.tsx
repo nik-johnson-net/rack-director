@@ -5,9 +5,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/page-header";
 import PartitionEditor from "@/components/roles/partition-editor";
 import { createRole, getOperatingSystems, type Partition, type OperatingSystem } from "@/lib/client";
-import { ArrowLeft } from "lucide-react";
 
 function RoleNew() {
   const navigate = useNavigate();
@@ -88,16 +88,13 @@ function RoleNew() {
   if (operatingSystems.length === 0) {
     return (
       <div className="space-y-4 max-w-2xl">
-        <div className="flex items-center gap-4">
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => navigate('/roles')}
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h1 className="text-3xl font-bold">Add Role</h1>
-        </div>
+        <PageHeader
+          breadcrumbs={[
+            { label: "Roles", href: "/roles" },
+            { label: "New Role" }
+          ]}
+          title="Add Role"
+        />
         <Card>
           <CardContent className="pt-6">
             <p className="text-center text-gray-600">
@@ -116,16 +113,14 @@ function RoleNew() {
 
   return (
     <div className="space-y-4 max-w-4xl">
-      <div className="flex items-center gap-4">
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => navigate('/roles')}
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <h1 className="text-3xl font-bold">Add Role</h1>
-      </div>
+      <PageHeader
+        breadcrumbs={[
+          { label: "Roles", href: "/roles" },
+          { label: "New Role" }
+        ]}
+        title="Add Role"
+        description="Define a provisioning role with OS, disk layout, and configuration"
+      />
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Basic Information */}
