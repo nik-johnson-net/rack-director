@@ -140,10 +140,7 @@ pub fn discover_all_nics(
         match try_nic_with_timeout(conn, state, nic_index, output) {
             Ok(()) => {
                 state.current_nic_index = nic_index;
-                output.success(&format!(
-                    "Successfully obtained lease on NIC {}",
-                    nic_index
-                ));
+                output.success(&format!("Successfully obtained lease on NIC {}", nic_index));
                 return Ok(());
             }
             Err(e) => {

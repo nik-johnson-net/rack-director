@@ -1,16 +1,19 @@
 mod allocator;
 mod boot_config;
 mod handler;
+mod ip_discovery;
 mod store;
 
 use anyhow::Result;
 use rusqlite::Connection;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 use crate::director::Director;
 
+pub use ip_discovery::discover_server_identifier;
 pub use store::{DhcpStore, Lease};
 
 use allocator::IpAllocator;
@@ -33,6 +36,7 @@ impl DhcpServer {
         director: Director,
         tftp_server: String,
         http_server: String,
+        server_identifier: Ipv4Addr,
         address: Option<String>,
     ) -> Result<Self> {
         let store = DhcpStore::new(db);
@@ -46,10 +50,11 @@ impl DhcpServer {
         log::info!("  Lease Duration: {}s", config.lease_duration);
         log::info!("  TFTP Server: {}", tftp_server);
         log::info!("  HTTP Server: {}", http_server);
+        log::info!("  Server Identifier: {}", server_identifier);
 
         let allocator = IpAllocator::new(store.clone(), director.clone(), config.clone());
         let boot_config = BootConfigProvider::new(tftp_server, http_server);
-        let handler = DhcpHandler::new(store, director, allocator, boot_config);
+        let handler = DhcpHandler::new(store, director, allocator, boot_config, server_identifier);
 
         Ok(Self {
             handler,
@@ -113,11 +118,13 @@ mod tests {
             "http://localhost:8080",
         );
 
+        let server_identifier = "10.0.0.1".parse().unwrap();
         let server = DhcpServer::new(
             db,
             director,
             "10.0.0.1:69".to_string(),
             "http://10.0.0.1:3000".to_string(),
+            server_identifier,
             Some("0.0.0.0:6767".to_string()),
         )
         .await

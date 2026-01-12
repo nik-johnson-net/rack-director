@@ -21,6 +21,7 @@ pub struct DhcpHandler {
     director: Director,
     allocator: IpAllocator,
     boot_config: BootConfigProvider,
+    server_identifier: Ipv4Addr,
 }
 
 impl DhcpHandler {
@@ -29,12 +30,14 @@ impl DhcpHandler {
         director: Director,
         allocator: IpAllocator,
         boot_config: BootConfigProvider,
+        server_identifier: Ipv4Addr,
     ) -> Self {
         Self {
             store,
             director,
             allocator,
             boot_config,
+            server_identifier,
         }
     }
 
@@ -216,7 +219,7 @@ impl DhcpHandler {
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Offer));
         msg.opts_mut()
-            .insert(v4::DhcpOption::ServerIdentifier(config.gateway.parse()?));
+            .insert(v4::DhcpOption::ServerIdentifier(self.server_identifier));
         msg.opts_mut()
             .insert(v4::DhcpOption::AddressLeaseTime(config.lease_duration));
 
@@ -303,13 +306,11 @@ impl DhcpHandler {
         msg.set_chaddr(req.chaddr());
         msg.set_flags(req.flags());
 
-        let config = self.allocator.config();
-
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Nak));
 
         msg.opts_mut()
-            .insert(v4::DhcpOption::ServerIdentifier(config.gateway.parse()?));
+            .insert(v4::DhcpOption::ServerIdentifier(self.server_identifier));
 
         Ok(msg)
     }
@@ -405,6 +406,144 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_server_identifier_in_offer() {
+        let handler = create_test_handler();
+
+        // Create a minimal DISCOVER message
+        let mut discover = Message::default();
+        discover.set_opcode(Opcode::BootRequest);
+        discover.set_xid(0x12345678);
+        discover.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        discover
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Discover));
+
+        // Build an OFFER response
+        let offer = handler
+            .build_offer(&discover, "10.0.0.100".parse().unwrap())
+            .unwrap();
+
+        // Verify the server identifier matches the handler's configured value
+        let server_id = offer
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::ServerIdentifier(ip) = opt {
+                    Some(*ip)
+                } else {
+                    None
+                }
+            })
+            .expect("Server Identifier should be present in OFFER");
+
+        assert_eq!(
+            server_id, handler.server_identifier,
+            "Server Identifier in OFFER should match handler's configured value"
+        );
+    }
+
+    #[test]
+    fn test_server_identifier_in_nak() {
+        let handler = create_test_handler();
+
+        // Create a minimal REQUEST message
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+
+        // Build a NAK response
+        let nak = handler.build_nak(&request).unwrap();
+
+        // Verify the server identifier matches the handler's configured value
+        let server_id = nak
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::ServerIdentifier(ip) = opt {
+                    Some(*ip)
+                } else {
+                    None
+                }
+            })
+            .expect("Server Identifier should be present in NAK");
+
+        assert_eq!(
+            server_id, handler.server_identifier,
+            "Server Identifier in NAK should match handler's configured value"
+        );
+    }
+
+    #[test]
+    fn test_custom_server_identifier() {
+        use crate::database;
+        use crate::director::Director;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+        use tokio::sync::Mutex;
+
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let conn = database::open(db_path).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let store = DhcpStore::new(db.clone());
+        let director = Director::new(
+            db.clone(),
+            Arc::new(MemoryImageStore::new()),
+            "http://localhost:8080",
+        );
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = rt.block_on(store.load_config()).unwrap();
+
+        let allocator = IpAllocator::new(store.clone(), director.clone(), config);
+        let boot_config = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+
+        // Use a custom server identifier different from gateway
+        let custom_server_id: Ipv4Addr = "192.168.1.50".parse().unwrap();
+        let handler = DhcpHandler::new(store, director, allocator, boot_config, custom_server_id);
+
+        // Verify the handler stores the custom value
+        assert_eq!(
+            handler.server_identifier, custom_server_id,
+            "Handler should store custom server identifier"
+        );
+
+        // Build an OFFER and verify it uses the custom identifier
+        let mut discover = Message::default();
+        discover.set_opcode(Opcode::BootRequest);
+        discover.set_xid(0x12345678);
+        discover.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        discover
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Discover));
+
+        let offer = handler
+            .build_offer(&discover, "10.0.0.100".parse().unwrap())
+            .unwrap();
+
+        let server_id = offer
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::ServerIdentifier(ip) = opt {
+                    Some(*ip)
+                } else {
+                    None
+                }
+            })
+            .expect("Server Identifier should be present in OFFER");
+
+        assert_eq!(
+            server_id, custom_server_id,
+            "OFFER should use custom server identifier, not gateway"
+        );
+    }
+
     fn create_test_handler() -> DhcpHandler {
         use crate::database;
         use crate::director::Director;
@@ -429,7 +568,8 @@ mod tests {
 
         let allocator = IpAllocator::new(store.clone(), director.clone(), config);
         let boot_config = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+        let server_identifier = "10.0.0.1".parse().unwrap();
 
-        DhcpHandler::new(store, director, allocator, boot_config)
+        DhcpHandler::new(store, director, allocator, boot_config, server_identifier)
     }
 }

@@ -47,10 +47,11 @@ impl ServerState {
 
             // Migrate old single MAC format to new multiple MACs format
             if state.mac_addresses.is_empty()
-                && let Some(old_mac) = state.mac_address {
-                    state.mac_addresses = vec![old_mac];
-                    state.mac_address = None;
-                }
+                && let Some(old_mac) = state.mac_address
+            {
+                state.mac_addresses = vec![old_mac];
+                state.mac_address = None;
+            }
 
             // Update with config
             state.mac_addresses = config.macs.clone();

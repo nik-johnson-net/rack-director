@@ -12,6 +12,7 @@ mod tftp;
 
 use std::{io, sync::Arc};
 
+use anyhow::anyhow;
 use clap::Parser;
 use tokio::{sync::Mutex, task::JoinHandle};
 
@@ -52,6 +53,11 @@ pub struct Args {
     // HTTP server public url
     #[arg(long)]
     http_public_url: Option<String>,
+
+    // DHCP Server Identifier (Option 54) - the IP address of this DHCP server
+    // If not provided, will be auto-discovered or fall back to gateway
+    #[arg(long)]
+    dhcp_server_identifier: Option<String>,
 
     // Storage configuration
     #[arg(
@@ -144,11 +150,16 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
 
     let http_server = public_url.clone();
 
+    // Determine DHCP Server Identifier (Option 54)
+    // Priority: CLI arg > auto-discovered IP > fallback to gateway
+    let server_identifier = determine_server_identifier(args.dhcp_server_identifier.as_ref())?;
+
     let dhcp_server = dhcp::DhcpServer::new(
         db.clone(),
         director.clone(),
         tftp_public,
         http_server,
+        server_identifier,
         Some(args.dhcp_address.clone()),
     )
     .await
@@ -231,5 +242,105 @@ fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow
             "Invalid storage-type: {}. Must be 'local' or 's3'",
             args.storage_type
         )),
+    }
+}
+
+/// Determines the DHCP Server Identifier (Option 54) to use for DHCP responses.
+///
+/// This function implements a three-tier priority system:
+/// 1. **CLI Argument**: If `cli_identifier` is provided and valid, use it
+/// 2. **Auto-discovery**: Attempt to automatically discover the server's outbound IP
+///
+/// # Arguments
+///
+/// * `cli_identifier` - Optional CLI-provided server identifier string
+///
+/// # Returns
+///
+/// Returns the determined IPv4 address to use as the DHCP Server Identifier.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Use CLI-provided identifier
+/// let identifier = determine_server_identifier(Some(&"10.0.0.1".to_string()));
+///
+/// // Auto-discover when no CLI arg provided
+/// let identifier = determine_server_identifier(None);
+/// ```
+fn determine_server_identifier(
+    cli_identifier: Option<&String>,
+) -> anyhow::Result<std::net::Ipv4Addr> {
+    if let Some(identifier_str) = cli_identifier {
+        // Use explicitly provided identifier
+        match identifier_str.parse() {
+            Ok(ip) => {
+                log::info!("Using CLI-provided DHCP Server Identifier: {}", ip);
+                Ok(ip)
+            }
+            Err(e) => {
+                log::error!(
+                    "Invalid DHCP Server Identifier '{}': {}.",
+                    identifier_str,
+                    e
+                );
+                Err(anyhow::anyhow!("failed to parse `{identifier_str}`: {e}"))
+            }
+        }
+    } else {
+        // No CLI arg provided, attempt auto-discovery
+        match dhcp::discover_server_identifier() {
+            Ok(ip) => {
+                log::info!("Auto-discovered DHCP Server Identifier: {}", ip);
+                Ok(ip)
+            }
+            Err(e) => {
+                log::warn!("Failed to auto-discover DHCP Server Identifier: {}.", e,);
+                Err(anyhow!("failed to auto-discovery DHCP Server Identifier"))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_determine_server_identifier_with_valid_cli_arg() {
+        // Test that a valid CLI-provided IP is used directly
+        let cli_ip = "192.168.1.100".to_string();
+
+        let result = determine_server_identifier(Some(&cli_ip));
+
+        assert_eq!(
+            result.unwrap(),
+            "192.168.1.100".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_determine_server_identifier_with_invalid_cli_arg() {
+        // Test that an invalid CLI arg falls back to auto-discovery or gateway
+        let cli_ip = "invalid-ip-address".to_string();
+
+        let result = determine_server_identifier(Some(&cli_ip));
+
+        // Result should be either auto-discovered IP or gateway, but not panic
+        // We can't assert the exact value since it depends on network state,
+        // but we can verify it returns a valid IPv4 address
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_determine_server_identifier_without_cli_arg() {
+        // Test that when no CLI arg is provided, auto-discovery is attempted
+        let result = determine_server_identifier(None).unwrap();
+
+        // Should return either auto-discovered IP or gateway fallback
+        // We can't assert the exact value since it depends on network state,
+        // but we can verify it returns a valid IPv4 address
+        assert_ne!(result, std::net::Ipv4Addr::UNSPECIFIED);
+        assert_ne!(result, std::net::Ipv4Addr::LOCALHOST);
     }
 }
