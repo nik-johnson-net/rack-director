@@ -226,7 +226,7 @@ impl LifecycleStore {
             from_state: DeviceLifecycle::from(from_state_str),
             to_state: DeviceLifecycle::from(to_state_str),
             plan_id: row.get(4)?,
-            created_at: row.get(5)?,
+            started_at: row.get(5)?,
             completed_at: row.get(6)?,
             success: row.get(7)?,
             error_message: row.get(8)?,
