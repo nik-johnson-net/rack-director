@@ -134,25 +134,25 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let storage_config = build_storage_config(&args)?;
     let image_store = storage::create_image_store(storage_config).await?;
 
+    // Determine DHCP Server Identifier (Option 54)
+    // Priority: CLI arg > auto-discovered IP > fallback to gateway
+    let server_identifier = determine_server_identifier(args.dhcp_server_identifier.as_ref())?;
+
     // Initialize Director
-    let public_url = args.http_public_url.to_owned().unwrap_or_default();
+    let public_url = args
+        .http_public_url
+        .unwrap_or_else(|| server_identifier.to_string());
     let director: Director = Director::new(db.clone(), image_store.clone(), &public_url);
 
     // Initialize DHCP server and store
     let dhcp_store = dhcp::DhcpStore::new(db.clone());
 
-    // Determine TFTP public address - use explicit arg if provided, otherwise use gateway from config
-    let dhcp_config = dhcp_store.load_config().await.unwrap();
+    // Determine TFTP public address
     let tftp_public = args
         .tftp_public_address
-        .clone()
-        .unwrap_or_else(|| dhcp_config.gateway.clone());
+        .unwrap_or_else(|| public_url.clone());
 
     let http_server = public_url.clone();
-
-    // Determine DHCP Server Identifier (Option 54)
-    // Priority: CLI arg > auto-discovered IP > fallback to gateway
-    let server_identifier = determine_server_identifier(args.dhcp_server_identifier.as_ref())?;
 
     let dhcp_server = dhcp::DhcpServer::new(
         db.clone(),

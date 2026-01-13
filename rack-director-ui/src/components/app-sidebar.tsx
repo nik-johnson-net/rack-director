@@ -1,4 +1,4 @@
-import { Home, Server, Settings, HardDrive, Users, ClipboardList, GitBranch } from "lucide-react"
+import { Home, Server, Settings, HardDrive, Users, ClipboardList, GitBranch, Network } from "lucide-react"
 
 import {
   Sidebar,
@@ -26,6 +26,11 @@ const menuGroups = [
         title: "Devices",
         url: "/devices",
         icon: Server,
+      },
+      {
+        title: "Networks",
+        url: "/networks",
+        icon: Network,
       },
       {
         title: "Operating Systems",

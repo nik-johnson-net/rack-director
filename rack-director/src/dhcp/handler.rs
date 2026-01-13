@@ -13,7 +13,7 @@ use crate::director::Director;
 
 use super::allocator::IpAllocator;
 use super::boot_config::{BootConfigProvider, BootMode};
-use super::store::{DhcpStore, LeaseState, format_mac};
+use super::store::{DhcpNetwork, DhcpStore, LeaseState, format_mac};
 
 #[derive(Clone)]
 pub struct DhcpHandler {
@@ -56,15 +56,38 @@ impl DhcpHandler {
             }
         };
 
+        // Extract relay agent address (giaddr)
+        let relay_agent = if msg.giaddr() != Ipv4Addr::UNSPECIFIED {
+            Some(msg.giaddr())
+        } else {
+            None
+        };
+
+        // Match to network based on relay agent
+        let network = match self.store.get_network_by_relay(relay_agent).await? {
+            Some(network) => network,
+            None => {
+                log::warn!("No network found for relay agent {:?}", relay_agent);
+                return Ok(());
+            }
+        };
+
+        log::debug!(
+            "Using network '{}' (id={}) for relay {:?}",
+            network.name,
+            network.id,
+            relay_agent
+        );
+
         let response = match msg.opts().msg_type() {
-            Some(MessageType::Discover) => self.handle_discover(msg).await?,
-            Some(MessageType::Request) => self.handle_request(msg).await?,
+            Some(MessageType::Discover) => self.handle_discover(&msg, &network).await?,
+            Some(MessageType::Request) => self.handle_request(&msg, &network).await?,
             Some(MessageType::Release) => {
-                self.handle_release(msg).await?;
+                self.handle_release(&msg).await?;
                 None
             }
             Some(MessageType::Decline) => {
-                self.handle_decline(msg).await?;
+                self.handle_decline(&msg).await?;
                 None
             }
             _ => {
@@ -74,62 +97,109 @@ impl DhcpHandler {
         };
 
         if let Some(resp) = response {
-            let mut buf = Vec::new();
-            resp.encode(&mut Encoder::new(&mut buf))?;
-
-            // Send response back to peer
-            // In production, this would be broadcast to 255.255.255.255:68
-            // For localhost testing, we send unicast to the peer address
-            socket.send_to(&buf, peer_addr).await?;
+            self.send_response(resp, &msg, peer_addr, socket).await?;
         }
 
         Ok(())
     }
 
-    async fn handle_discover(&self, msg: Message) -> Result<Option<Message>> {
+    /// Send DHCP response following RFC 3046 relay agent rules
+    async fn send_response(
+        &self,
+        resp: Message,
+        req: &Message,
+        peer_addr: SocketAddr,
+        socket: Arc<UdpSocket>,
+    ) -> Result<()> {
+        let mut buf = Vec::new();
+        resp.encode(&mut Encoder::new(&mut buf))?;
+
+        // RFC 3046: If giaddr is set, send to relay agent on port 67
+        // Otherwise, send to peer (broadcast or unicast)
+        let dest = if req.giaddr() != Ipv4Addr::UNSPECIFIED {
+            SocketAddr::new(req.giaddr().into(), 67)
+        } else {
+            // For localhost testing, we send unicast to the peer address
+            // In production, this would be broadcast to 255.255.255.255:68
+            peer_addr
+        };
+
+        socket.send_to(&buf, dest).await?;
+        log::debug!("Sent DHCP response to {}", dest);
+
+        Ok(())
+    }
+
+    async fn handle_discover(
+        &self,
+        msg: &Message,
+        network: &DhcpNetwork,
+    ) -> Result<Option<Message>> {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
-        log::info!("DHCP DISCOVER from MAC {}", mac_str);
+        log::info!(
+            "DHCP DISCOVER from MAC {} on network '{}'",
+            mac_str,
+            network.name
+        );
 
         // Check if device exists in devices table by MAC
         let device_uuid = self.director.find_device_by_mac(&mac_str).await?;
 
-        // Allocate or retrieve existing IP
+        // Allocate or retrieve existing IP in this network
         let ip = if let Some(uuid) = &device_uuid {
             log::debug!("Device UUID {} found for MAC {}", uuid, mac_str);
-            self.allocator.allocate_for_device(&mac_str, uuid).await?
+            self.allocator
+                .allocate_for_device_in_network(&mac_str, uuid, network.id)
+                .await?
         } else {
             log::debug!(
                 "No device UUID found for MAC {}, allocating from pool",
                 mac_str
             );
-            self.allocator.allocate_for_mac(&mac_str).await?
+            self.allocator
+                .allocate_for_mac_in_network(&mac_str, network.id)
+                .await?
         };
 
         // Create lease in 'offered' state
         self.store
-            .create_or_update_lease(
+            .create_or_update_lease_with_network(
                 &mac_str,
                 &ip,
                 device_uuid.as_deref(),
                 LeaseState::Offered,
-                self.allocator.config().lease_duration,
+                network.lease_duration,
+                network.id,
             )
             .await?;
 
         // Build DHCP Offer
-        let offer = self.build_offer(&msg, ip)?;
-        log::info!("DHCP OFFER {} to MAC {}", ip, mac_str);
+        let offer = self.build_offer(msg, ip, network)?;
+        log::info!(
+            "DHCP OFFER {} to MAC {} on network '{}'",
+            ip,
+            mac_str,
+            network.name
+        );
 
         Ok(Some(offer))
     }
 
-    async fn handle_request(&self, msg: Message) -> Result<Option<Message>> {
+    async fn handle_request(
+        &self,
+        msg: &Message,
+        network: &DhcpNetwork,
+    ) -> Result<Option<Message>> {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
-        log::info!("DHCP REQUEST from MAC {}", mac_str);
+        log::info!(
+            "DHCP REQUEST from MAC {} on network '{}'",
+            mac_str,
+            network.name
+        );
 
         // Extract requested IP address
         let requested_ip = if let Some((_code, v4::DhcpOption::RequestedIpAddress(ip))) = msg
@@ -144,7 +214,7 @@ impl DhcpHandler {
                 msg.ciaddr()
             } else {
                 log::warn!("DHCP REQUEST without requested IP or ciaddr");
-                return Ok(Some(self.build_nak(&msg)?));
+                return Ok(Some(self.build_nak(msg)?));
             }
         };
 
@@ -160,7 +230,7 @@ impl DhcpHandler {
                     requested_ip,
                     lease_ip
                 );
-                return Ok(Some(self.build_nak(&msg)?));
+                return Ok(Some(self.build_nak(msg)?));
             }
 
             // Update lease to 'active'
@@ -172,17 +242,22 @@ impl DhcpHandler {
             }
 
             // Build DHCP Ack with boot options
-            let ack = self.build_ack(&msg, lease_ip)?;
-            log::info!("DHCP ACK {} to MAC {}", requested_ip, mac_str);
+            let ack = self.build_ack(msg, lease_ip, network)?;
+            log::info!(
+                "DHCP ACK {} to MAC {} on network '{}'",
+                requested_ip,
+                mac_str,
+                network.name
+            );
 
             Ok(Some(ack))
         } else {
             log::warn!("No lease found for MAC {}", mac_str);
-            Ok(Some(self.build_nak(&msg)?))
+            Ok(Some(self.build_nak(msg)?))
         }
     }
 
-    async fn handle_release(&self, msg: Message) -> Result<()> {
+    async fn handle_release(&self, msg: &Message) -> Result<()> {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
@@ -193,7 +268,7 @@ impl DhcpHandler {
         Ok(())
     }
 
-    async fn handle_decline(&self, msg: Message) -> Result<()> {
+    async fn handle_decline(&self, msg: &Message) -> Result<()> {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
@@ -205,7 +280,7 @@ impl DhcpHandler {
         Ok(())
     }
 
-    fn build_offer(&self, req: &Message, ip: Ipv4Addr) -> Result<Message> {
+    fn build_offer(&self, req: &Message, ip: Ipv4Addr, network: &DhcpNetwork) -> Result<Message> {
         let mut msg = Message::default();
         msg.set_opcode(Opcode::BootReply);
         msg.set_xid(req.xid());
@@ -213,24 +288,22 @@ impl DhcpHandler {
         msg.set_chaddr(req.chaddr());
         msg.set_flags(req.flags());
 
-        let config = self.allocator.config();
-
         // Standard DHCP options
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Offer));
         msg.opts_mut()
             .insert(v4::DhcpOption::ServerIdentifier(self.server_identifier));
         msg.opts_mut()
-            .insert(v4::DhcpOption::AddressLeaseTime(config.lease_duration));
+            .insert(v4::DhcpOption::AddressLeaseTime(network.lease_duration));
 
         // Network configuration
-        let subnet_mask = self.calculate_subnet_mask(&config.subnet)?;
+        let subnet_mask = self.calculate_subnet_mask(&network.subnet)?;
         msg.opts_mut()
             .insert(v4::DhcpOption::SubnetMask(subnet_mask));
         msg.opts_mut()
-            .insert(v4::DhcpOption::Router(vec![config.gateway.parse()?]));
+            .insert(v4::DhcpOption::Router(vec![network.gateway.parse()?]));
 
-        let dns_servers: Vec<Ipv4Addr> = config
+        let dns_servers: Vec<Ipv4Addr> = network
             .dns_servers
             .iter()
             .filter_map(|s| s.parse().ok())
@@ -243,8 +316,8 @@ impl DhcpHandler {
         Ok(msg)
     }
 
-    fn build_ack(&self, req: &Message, ip: Ipv4Addr) -> Result<Message> {
-        let mut msg = self.build_offer(req, ip)?;
+    fn build_ack(&self, req: &Message, ip: Ipv4Addr, network: &DhcpNetwork) -> Result<Message> {
+        let mut msg = self.build_offer(req, ip, network)?;
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Ack));
 
@@ -408,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_server_identifier_in_offer() {
-        let handler = create_test_handler();
+        let (handler, store) = create_test_handler_with_store();
 
         // Create a minimal DISCOVER message
         let mut discover = Message::default();
@@ -419,9 +492,13 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
+        // Get default network
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let network = rt.block_on(store.get_network(1)).unwrap();
+
         // Build an OFFER response
         let offer = handler
-            .build_offer(&discover, "10.0.0.100".parse().unwrap())
+            .build_offer(&discover, "10.0.0.100".parse().unwrap(), &network)
             .unwrap();
 
         // Verify the server identifier matches the handler's configured value
@@ -498,20 +575,28 @@ mod tests {
         );
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = rt.block_on(store.load_config()).unwrap();
 
-        let allocator = IpAllocator::new(store.clone(), director.clone(), config);
+        let allocator = IpAllocator::new(store.clone());
         let boot_config = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
 
         // Use a custom server identifier different from gateway
         let custom_server_id: Ipv4Addr = "192.168.1.50".parse().unwrap();
-        let handler = DhcpHandler::new(store, director, allocator, boot_config, custom_server_id);
+        let handler = DhcpHandler::new(
+            store.clone(),
+            director,
+            allocator,
+            boot_config,
+            custom_server_id,
+        );
 
         // Verify the handler stores the custom value
         assert_eq!(
             handler.server_identifier, custom_server_id,
             "Handler should store custom server identifier"
         );
+
+        // Get default network
+        let network = rt.block_on(store.get_network(1)).unwrap();
 
         // Build an OFFER and verify it uses the custom identifier
         let mut discover = Message::default();
@@ -523,7 +608,7 @@ mod tests {
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
         let offer = handler
-            .build_offer(&discover, "10.0.0.100".parse().unwrap())
+            .build_offer(&discover, "10.0.0.100".parse().unwrap(), &network)
             .unwrap();
 
         let server_id = offer
@@ -544,7 +629,7 @@ mod tests {
         );
     }
 
-    fn create_test_handler() -> DhcpHandler {
+    fn create_test_handler_with_store() -> (DhcpHandler, DhcpStore) {
         use crate::database;
         use crate::director::Director;
         use std::sync::Arc;
@@ -562,14 +647,22 @@ mod tests {
             "http://localhost:8080",
         );
 
-        // Use tokio runtime for async operation
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = rt.block_on(store.load_config()).unwrap();
-
-        let allocator = IpAllocator::new(store.clone(), director.clone(), config);
+        let allocator = IpAllocator::new(store.clone());
         let boot_config = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
         let server_identifier = "10.0.0.1".parse().unwrap();
 
-        DhcpHandler::new(store, director, allocator, boot_config, server_identifier)
+        let handler = DhcpHandler::new(
+            store.clone(),
+            director,
+            allocator,
+            boot_config,
+            server_identifier,
+        );
+        (handler, store)
+    }
+
+    fn create_test_handler() -> DhcpHandler {
+        let (handler, _store) = create_test_handler_with_store();
+        handler
     }
 }

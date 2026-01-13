@@ -2,104 +2,153 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
 
-use crate::director::Director;
-
-use super::store::{DhcpConfig, DhcpStore};
+use super::store::DhcpStore;
 
 #[derive(Clone)]
 pub struct IpAllocator {
     store: DhcpStore,
-    director: Director,
-    config: DhcpConfig,
 }
 
 impl IpAllocator {
-    pub fn new(store: DhcpStore, director: Director, config: DhcpConfig) -> Self {
-        Self {
-            store,
-            director,
-            config,
-        }
+    pub fn new(store: DhcpStore) -> Self {
+        Self { store }
     }
 
-    /// Allocate IP for a known device (MAC -> UUID mapping exists)
-    pub async fn allocate_for_device(&self, mac: &str, uuid: &str) -> Result<Ipv4Addr> {
-        // Check if device has static IP in attributes
-        if let Some(static_ip) = self.director.get_device_static_ip(uuid).await? {
-            log::debug!("Device {} has static IP {}", uuid, static_ip);
-            return Ok(static_ip);
+    /// Allocate IP for a known device (MAC -> UUID mapping exists) within a specific network
+    pub async fn allocate_for_device_in_network(
+        &self,
+        mac: &str,
+        uuid: &str,
+        network_id: i64,
+    ) -> Result<Ipv4Addr> {
+        // 1. Check static reservation in this network
+        if let Some(reservation) = self.store.get_static_reservation(network_id, mac).await? {
+            log::debug!(
+                "Device {} has static reservation {} in network {}",
+                uuid,
+                reservation.ip_address,
+                network_id
+            );
+            return Ok(reservation.ip_address.parse()?);
         }
 
-        // Check existing lease
+        // 2. Check existing lease in this network
         if let Some(lease) = self.store.get_lease_by_mac(mac).await?
             && !lease.is_expired()
+            && lease.network_id == Some(network_id)
         {
             log::debug!(
-                "Reusing existing lease for MAC {}: {}",
+                "Reusing existing lease for MAC {} in network {}: {}",
                 mac,
+                network_id,
                 lease.ip_address
             );
             return Ok(lease.ip_address.parse()?);
         }
 
-        // Allocate from pool
-        self.allocate_from_pool(mac).await
+        // 3. Allocate from pools in this network
+        self.allocate_from_pools(network_id, mac).await
     }
 
-    /// Allocate IP for unknown device (no UUID mapping)
-    pub async fn allocate_for_mac(&self, mac: &str) -> Result<Ipv4Addr> {
-        // Check existing lease
+    /// Allocate IP for unknown device (no UUID mapping) within a specific network
+    pub async fn allocate_for_mac_in_network(
+        &self,
+        mac: &str,
+        network_id: i64,
+    ) -> Result<Ipv4Addr> {
+        // 1. Check static reservation in this network
+        if let Some(reservation) = self.store.get_static_reservation(network_id, mac).await? {
+            log::debug!(
+                "MAC {} has static reservation {} in network {}",
+                mac,
+                reservation.ip_address,
+                network_id
+            );
+            return Ok(reservation.ip_address.parse()?);
+        }
+
+        // 2. Check existing lease in this network
         if let Some(lease) = self.store.get_lease_by_mac(mac).await?
             && !lease.is_expired()
+            && lease.network_id == Some(network_id)
         {
             log::debug!(
-                "Reusing existing lease for MAC {}: {}",
+                "Reusing existing lease for MAC {} in network {}: {}",
                 mac,
+                network_id,
                 lease.ip_address
             );
             return Ok(lease.ip_address.parse()?);
         }
 
-        // Allocate from pool
-        self.allocate_from_pool(mac).await
+        // 3. Allocate from pools in this network
+        self.allocate_from_pools(network_id, mac).await
     }
 
-    async fn allocate_from_pool(&self, mac: &str) -> Result<Ipv4Addr> {
-        let range = self.parse_range()?;
+    /// Allocate from pools within a network (try each pool until success)
+    async fn allocate_from_pools(&self, network_id: i64, mac: &str) -> Result<Ipv4Addr> {
+        let pools = self.store.list_pools_for_network(network_id).await?;
 
-        // Get all active leases
+        if pools.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No pools configured for network {}",
+                network_id
+            ));
+        }
+
+        // Get all active IPs in this network
         let active_ips: HashSet<Ipv4Addr> = self
             .store
-            .get_active_leases()
+            .get_leases_by_network(network_id)
             .await?
             .into_iter()
+            .filter(|l| !l.is_expired())
             .filter_map(|l| l.ip_address.parse().ok())
             .collect();
 
-        // Find first available IP
-        for ip in range {
-            if !active_ips.contains(&ip) {
-                log::info!("Allocated IP {} for MAC {}", ip, mac);
-                return Ok(ip);
+        // Get all statically reserved IPs in this network
+        let reserved_ips: HashSet<Ipv4Addr> = self
+            .store
+            .list_static_reservations(network_id)
+            .await?
+            .into_iter()
+            .filter_map(|r| r.ip_address.parse().ok())
+            .collect();
+
+        // Try each pool until allocation succeeds
+        for pool in pools {
+            let range = parse_ip_range(&pool.range_start, &pool.range_end)?;
+
+            for ip in range {
+                if !active_ips.contains(&ip) && !reserved_ips.contains(&ip) {
+                    log::info!(
+                        "Allocated {} from pool '{}' (network {}) for MAC {}",
+                        ip,
+                        pool.name,
+                        network_id,
+                        mac
+                    );
+                    return Ok(ip);
+                }
             }
         }
 
-        Err(anyhow::anyhow!("DHCP pool exhausted"))
+        Err(anyhow::anyhow!(
+            "All pools exhausted for network {}",
+            network_id
+        ))
     }
+}
 
-    fn parse_range(&self) -> Result<impl Iterator<Item = Ipv4Addr>> {
-        let start: Ipv4Addr = self.config.range_start.parse()?;
-        let end: Ipv4Addr = self.config.range_end.parse()?;
+/// Parse IP range from start and end addresses
+fn parse_ip_range(start: &str, end: &str) -> Result<impl Iterator<Item = Ipv4Addr>> {
+    let start_ip: Ipv4Addr = start.parse()?;
+    let end_ip: Ipv4Addr = end.parse()?;
 
-        let start_u32: u32 = start.into();
-        let end_u32: u32 = end.into();
+    let start_u32: u32 = start_ip.into();
+    let end_u32: u32 = end_ip.into();
 
-        Ok((start_u32..=end_u32).map(Ipv4Addr::from))
-    }
-
-    pub fn config(&self) -> &DhcpConfig {
-        &self.config
-    }
+    Ok((start_u32..=end_u32).map(Ipv4Addr::from))
 }
 
 #[cfg(test)]
@@ -119,21 +168,16 @@ mod tests {
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
-        let director = Director::new(
-            db,
-            Arc::new(MemoryImageStore::new()),
-            "http://localhost:8080",
-        );
-        let config = store.load_config().await.unwrap();
-        (IpAllocator::new(store, director, config), temp_dir)
+        (IpAllocator::new(store), temp_dir)
     }
 
     #[tokio::test]
-    async fn test_allocate_for_mac() {
+    async fn test_allocate_for_mac_in_network() {
         let (allocator, _temp_dir) = create_test_allocator().await;
         let mac = "aa:bb:cc:dd:ee:ff";
 
-        let ip = allocator.allocate_for_mac(mac).await.unwrap();
+        // Default network (id=1) should exist after migration
+        let ip = allocator.allocate_for_mac_in_network(mac, 1).await.unwrap();
         assert_eq!(ip.to_string(), "10.0.0.100"); // First IP in default range
     }
 
@@ -141,19 +185,33 @@ mod tests {
     async fn test_allocate_reuses_existing_lease() {
         let (allocator, _temp_dir) = create_test_allocator().await;
         let mac = "aa:bb:cc:dd:ee:ff";
+        let network_id = 1;
 
         // First allocation
-        let ip1 = allocator.allocate_for_mac(mac).await.unwrap();
+        let ip1 = allocator
+            .allocate_for_mac_in_network(mac, network_id)
+            .await
+            .unwrap();
 
         // Create lease
         allocator
             .store
-            .create_or_update_lease(mac, &ip1, None, LeaseState::Active, 3600)
+            .create_or_update_lease_with_network(
+                mac,
+                &ip1,
+                None,
+                LeaseState::Active,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
         // Second allocation should return same IP
-        let ip2 = allocator.allocate_for_mac(mac).await.unwrap();
+        let ip2 = allocator
+            .allocate_for_mac_in_network(mac, network_id)
+            .await
+            .unwrap();
         assert_eq!(ip1, ip2);
     }
 
@@ -162,18 +220,63 @@ mod tests {
         let (allocator, _temp_dir) = create_test_allocator().await;
         let mac1 = "aa:bb:cc:dd:ee:ff";
         let mac2 = "11:22:33:44:55:66";
+        let network_id = 1;
 
-        let ip1 = allocator.allocate_for_mac(mac1).await.unwrap();
+        let ip1 = allocator
+            .allocate_for_mac_in_network(mac1, network_id)
+            .await
+            .unwrap();
         allocator
             .store
-            .create_or_update_lease(mac1, &ip1, None, LeaseState::Active, 3600)
+            .create_or_update_lease_with_network(
+                mac1,
+                &ip1,
+                None,
+                LeaseState::Active,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
-        let ip2 = allocator.allocate_for_mac(mac2).await.unwrap();
+        let ip2 = allocator
+            .allocate_for_mac_in_network(mac2, network_id)
+            .await
+            .unwrap();
 
         assert_ne!(ip1, ip2);
         assert_eq!(ip1.to_string(), "10.0.0.100");
         assert_eq!(ip2.to_string(), "10.0.0.101");
+    }
+
+    #[tokio::test]
+    async fn test_static_reservation_takes_priority() {
+        let (allocator, _temp_dir) = create_test_allocator().await;
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let network_id = 1;
+        let static_ip = "10.0.0.50";
+
+        // Create static reservation
+        allocator
+            .store
+            .create_static_reservation(network_id, mac, static_ip, None)
+            .await
+            .unwrap();
+
+        // Allocation should return the static IP
+        let ip = allocator
+            .allocate_for_mac_in_network(mac, network_id)
+            .await
+            .unwrap();
+        assert_eq!(ip.to_string(), static_ip);
+    }
+
+    #[tokio::test]
+    async fn test_parse_ip_range() {
+        let range: Vec<Ipv4Addr> = parse_ip_range("10.0.0.1", "10.0.0.5").unwrap().collect();
+
+        assert_eq!(range.len(), 5);
+        assert_eq!(range[0].to_string(), "10.0.0.1");
+        assert_eq!(range[4].to_string(), "10.0.0.5");
     }
 }

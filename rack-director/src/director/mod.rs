@@ -1,4 +1,3 @@
-use std::net::Ipv4Addr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -408,10 +407,6 @@ impl Director {
 
     pub async fn find_device_by_mac(&self, mac: &str) -> anyhow::Result<Option<String>> {
         self.store.find_device_by_mac(mac).await
-    }
-
-    pub async fn get_device_static_ip(&self, uuid: &str) -> anyhow::Result<Option<Ipv4Addr>> {
-        self.store.get_device_static_ip(uuid).await
     }
 
     pub async fn set_device_mac_address(&self, uuid: &str, mac: &str) -> anyhow::Result<()> {

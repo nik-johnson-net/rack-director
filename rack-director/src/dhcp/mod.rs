@@ -14,7 +14,7 @@ use tokio::{net::UdpSocket, task::JoinHandle};
 use crate::director::Director;
 
 pub use ip_discovery::discover_server_identifier;
-pub use store::{DhcpStore, Lease};
+pub use store::{DhcpNetwork, DhcpPool, DhcpStore, Lease, StaticReservation};
 
 use allocator::IpAllocator;
 use boot_config::BootConfigProvider;
@@ -40,19 +40,25 @@ impl DhcpServer {
         address: Option<String>,
     ) -> Result<Self> {
         let store = DhcpStore::new(db);
-        let config = store.load_config().await?;
 
-        log::info!("DHCP configuration loaded:");
-        log::info!("  Subnet: {}", config.subnet);
-        log::info!("  Range: {} - {}", config.range_start, config.range_end);
-        log::info!("  Gateway: {}", config.gateway);
-        log::info!("  DNS Servers: {:?}", config.dns_servers);
-        log::info!("  Lease Duration: {}s", config.lease_duration);
+        log::info!("DHCP server configuration:");
         log::info!("  TFTP Server: {}", tftp_server);
         log::info!("  HTTP Server: {}", http_server);
         log::info!("  Server Identifier: {}", server_identifier);
 
-        let allocator = IpAllocator::new(store.clone(), director.clone(), config.clone());
+        // List networks at startup for diagnostic purposes
+        let networks = store.list_networks().await?;
+        log::info!("  Configured networks: {}", networks.len());
+        for network in &networks {
+            log::info!(
+                "    - {} (id={}, relay={:?})",
+                network.name,
+                network.id,
+                network.relay_agent_address
+            );
+        }
+
+        let allocator = IpAllocator::new(store.clone());
         let boot_config = BootConfigProvider::new(tftp_server, http_server);
         let handler = DhcpHandler::new(store, director, allocator, boot_config, server_identifier);
 

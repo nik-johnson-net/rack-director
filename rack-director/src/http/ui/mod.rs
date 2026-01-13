@@ -1,5 +1,6 @@
 mod devices;
 mod dhcp;
+mod networks;
 mod operating_systems;
 mod roles;
 
@@ -25,6 +26,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         // Merge all UI API routes
         .merge(devices::routes(state.clone()))
         .merge(dhcp::routes(state.clone()))
+        .merge(networks::routes(state.clone()))
         .merge(operating_systems::routes(state.clone()))
         .merge(roles::routes(state))
 }

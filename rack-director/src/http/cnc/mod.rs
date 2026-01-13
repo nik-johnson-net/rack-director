@@ -338,19 +338,15 @@ async fn get_device_network_info(
 
     if let Some(lease) = lease {
         // Get DHCP config for gateway and DNS
-        let config = state
-            .dhcp_store
-            .get_config()
-            .map_err(Error::ServerInternalError)?;
-
-        let dns_servers = config.dns_servers;
+        let network = state.dhcp_store.get_network(lease.id).await?;
+        let dns_servers = network.dns_servers;
 
         Ok(crate::templates::NetworkInfo {
             mac_address: lease.mac_address,
             ip_address: lease.ip_address,
-            gateway: config.gateway,
+            gateway: network.gateway,
             dns_servers,
-            netmask: "255.255.255.0".to_string(), // TODO: Calculate from subnet
+            netmask: network.subnet, // TODO: Calculate from subnet
         })
     } else {
         Err(Error::NotFound("Device has no DHCP lease".to_string()))

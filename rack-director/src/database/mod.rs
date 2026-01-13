@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-const LATEST_VERSION: i32 = 7;
+const LATEST_VERSION: i32 = 8;
 const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -12,6 +12,7 @@ const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/5.sql"),
     include_str!("migrations/6.sql"),
     include_str!("migrations/7.sql"),
+    include_str!("migrations/8.sql"),
 ];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {

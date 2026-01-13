@@ -17,7 +17,9 @@ import OperatingSystemEdit from './pages/OperatingSystemEdit.tsx';
 import Roles from './pages/Roles.tsx';
 import RoleNew from './pages/RoleNew.tsx';
 import RoleEdit from './pages/RoleEdit.tsx';
-import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole } from './lib/client.ts';
+import Networks from './pages/Networks.tsx';
+import NetworkDetail from './pages/NetworkDetail.tsx';
+import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork } from './lib/client.ts';
 import Loading from './pages/Loading.tsx';
 
 const router = createBrowserRouter([
@@ -33,6 +35,22 @@ const router = createBrowserRouter([
       { path: "/roles", loader: getRoles, Component: Roles, HydrateFallback: Loading },
       { path: "/roles/new", Component: RoleNew },
       { path: "/roles/:id", loader: ({ params }) => getRole(parseInt(params.id!)), Component: RoleEdit, HydrateFallback: Loading },
+      { path: "/networks", loader: getNetworks, Component: Networks, HydrateFallback: Loading },
+      {
+        path: "/networks/:id",
+        loader: async ({ params }) => {
+          const networkId = parseInt(params.id!);
+          const [network, pools, reservations, leases] = await Promise.all([
+            getNetwork(networkId),
+            getPoolsForNetwork(networkId),
+            getStaticReservations(networkId),
+            getLeasesForNetwork(networkId),
+          ]);
+          return { network, pools, reservations, leases };
+        },
+        Component: NetworkDetail,
+        HydrateFallback: Loading
+      },
       { path: "/plans", Component: Plans },
       { path: "/transitions", Component: Transitions },
       { path: "/settings", Component: Settings },

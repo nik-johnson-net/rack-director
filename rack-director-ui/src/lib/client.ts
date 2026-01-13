@@ -47,6 +47,69 @@ export type DhcpLease = {
   ip_address: string;
   device_uuid?: string;
   expires_at?: string;
+  network_id?: number;
+}
+
+export type DhcpNetwork = {
+  id: number;
+  name: string;
+  subnet: string;
+  gateway: string;
+  dns_servers: string[];
+  lease_duration: number;
+  relay_agent_address?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type DhcpPool = {
+  id: number;
+  network_id: number;
+  name: string;
+  range_start: string;
+  range_end: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type StaticReservation = {
+  id: number;
+  network_id: number;
+  mac_address: string;
+  ip_address: string;
+  hostname?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CreateDhcpNetworkRequest = {
+  name: string;
+  subnet: string;
+  gateway: string;
+  dns_servers: string[];
+  lease_duration: number;
+  relay_agent_address?: string;
+}
+
+export type UpdateDhcpNetworkRequest = {
+  name?: string;
+  subnet?: string;
+  gateway?: string;
+  dns_servers?: string[];
+  lease_duration?: number;
+  relay_agent_address?: string;
+}
+
+export type CreateDhcpPoolRequest = {
+  name: string;
+  range_start: string;
+  range_end: string;
+}
+
+export type CreateStaticReservationRequest = {
+  mac_address: string;
+  ip_address: string;
+  hostname?: string;
 }
 
 export type LifecycleTransition = {
@@ -535,6 +598,171 @@ export async function getDhcpLeaseByMac(mac: string): Promise<DhcpLease | null> 
     } else {
       console.error('Error getting DHCP lease:', response.statusText);
       throw new Error('Failed to fetch DHCP lease');
+    }
+  });
+}
+
+// DHCP Networks API
+
+export async function getNetworks(): Promise<DhcpNetwork[]> {
+  return fetch('/ui/dhcp/networks').then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting networks:', response.statusText);
+      throw new Error('Failed to fetch networks');
+    }
+  });
+}
+
+export async function getNetwork(id: number): Promise<DhcpNetwork> {
+  return fetch(`/ui/dhcp/networks/${id}`).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting network:', response.statusText);
+      throw new Error('Failed to fetch network');
+    }
+  });
+}
+
+export async function createNetwork(data: CreateDhcpNetworkRequest): Promise<DhcpNetwork> {
+  return fetch('/ui/dhcp/networks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error creating network:', response.statusText);
+      throw new Error('Failed to create network');
+    }
+  });
+}
+
+export async function updateNetwork(id: number, data: UpdateDhcpNetworkRequest): Promise<DhcpNetwork> {
+  return fetch(`/ui/dhcp/networks/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error updating network:', response.statusText);
+      throw new Error('Failed to update network');
+    }
+  });
+}
+
+export async function deleteNetwork(id: number): Promise<void> {
+  return fetch(`/ui/dhcp/networks/${id}`, {
+    method: 'DELETE'
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error deleting network:', response.statusText);
+      throw new Error('Failed to delete network');
+    }
+  });
+}
+
+export async function getPoolsForNetwork(networkId: number): Promise<DhcpPool[]> {
+  return fetch(`/ui/dhcp/networks/${networkId}/pools`).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting pools:', response.statusText);
+      throw new Error('Failed to fetch pools');
+    }
+  });
+}
+
+export async function createPool(networkId: number, data: CreateDhcpPoolRequest): Promise<DhcpPool> {
+  return fetch(`/ui/dhcp/networks/${networkId}/pools`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error creating pool:', response.statusText);
+      throw new Error('Failed to create pool');
+    }
+  });
+}
+
+export async function updatePool(id: number, data: CreateDhcpPoolRequest): Promise<DhcpPool> {
+  return fetch(`/ui/dhcp/pools/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error updating pool:', response.statusText);
+      throw new Error('Failed to update pool');
+    }
+  });
+}
+
+export async function deletePool(id: number): Promise<void> {
+  return fetch(`/ui/dhcp/pools/${id}`, {
+    method: 'DELETE'
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error deleting pool:', response.statusText);
+      throw new Error('Failed to delete pool');
+    }
+  });
+}
+
+export async function getStaticReservations(networkId: number): Promise<StaticReservation[]> {
+  return fetch(`/ui/dhcp/networks/${networkId}/static-reservations`).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting static reservations:', response.statusText);
+      throw new Error('Failed to fetch static reservations');
+    }
+  });
+}
+
+export async function createStaticReservation(networkId: number, data: CreateStaticReservationRequest): Promise<StaticReservation> {
+  return fetch(`/ui/dhcp/networks/${networkId}/static-reservations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error creating static reservation:', response.statusText);
+      throw new Error('Failed to create static reservation');
+    }
+  });
+}
+
+export async function deleteStaticReservation(id: number): Promise<void> {
+  return fetch(`/ui/dhcp/static-reservations/${id}`, {
+    method: 'DELETE'
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error deleting static reservation:', response.statusText);
+      throw new Error('Failed to delete static reservation');
+    }
+  });
+}
+
+export async function getLeasesForNetwork(networkId: number): Promise<DhcpLease[]> {
+  return fetch(`/ui/dhcp/networks/${networkId}/leases`).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting leases for network:', response.statusText);
+      throw new Error('Failed to fetch leases for network');
     }
   });
 }

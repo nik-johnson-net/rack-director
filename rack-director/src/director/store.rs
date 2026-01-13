@@ -1,4 +1,3 @@
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -211,25 +210,6 @@ impl DirectorStore {
         Ok(result)
     }
 
-    /// Get static IP for device from attributes
-    pub async fn get_device_static_ip(&self, uuid: &str) -> Result<Option<Ipv4Addr>> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn.prepare(
-            "SELECT json_extract(attributes, '$.static_ip') FROM devices WHERE uuid = ?",
-        )?;
-
-        let result = stmt
-            .query_row(params![uuid], |row| row.get::<_, Option<String>>(0))
-            .optional()?;
-
-        if let Some(Some(ip_str)) = result {
-            Ok(Some(ip_str.parse()?))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Set hostname in device attributes
     pub async fn set_hostname(&self, uuid: &str, hostname: &str) -> Result<()> {
         let conn = self.conn.lock().await;
@@ -378,6 +358,7 @@ impl DirectorStore {
     }
 
     /// Find device UUID by MAC address in either legacy mac_address field or network_interfaces array
+    #[cfg(test)]
     pub async fn find_device_by_any_mac(&self, mac: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().await;
 
