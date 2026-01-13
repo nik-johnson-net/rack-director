@@ -33,6 +33,7 @@ pub async fn start_rack_director() -> Result<RackDirectorHandle, anyhow::Error> 
         "--tftp-address=127.0.0.1:0",
         "--tftp-public-address=10.0.0.1",
         "--http-public-url=http://10.0.0.1",
+        "--enable-autodiscover",
     ]);
     let handle = rack_director::rack_director_start(args).await?;
 

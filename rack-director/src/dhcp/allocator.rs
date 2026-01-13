@@ -156,8 +156,6 @@ mod tests {
     use super::*;
     use crate::database;
     use crate::dhcp::store::LeaseState;
-    use crate::director::Director;
-    use crate::storage::MemoryImageStore;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;

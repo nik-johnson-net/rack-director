@@ -37,6 +37,7 @@ impl DhcpServer {
         tftp_server: String,
         http_server: String,
         server_identifier: Ipv4Addr,
+        enable_autodiscover: bool,
         address: Option<String>,
     ) -> Result<Self> {
         let store = DhcpStore::new(db);
@@ -45,6 +46,14 @@ impl DhcpServer {
         log::info!("  TFTP Server: {}", tftp_server);
         log::info!("  HTTP Server: {}", http_server);
         log::info!("  Server Identifier: {}", server_identifier);
+        log::info!(
+            "  Autodiscover: {}",
+            if enable_autodiscover {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
 
         // List networks at startup for diagnostic purposes
         let networks = store.list_networks().await?;
@@ -59,7 +68,7 @@ impl DhcpServer {
         }
 
         let allocator = IpAllocator::new(store.clone());
-        let boot_config = BootConfigProvider::new(tftp_server, http_server);
+        let boot_config = BootConfigProvider::new(tftp_server, http_server, enable_autodiscover);
         let handler = DhcpHandler::new(store, director, allocator, boot_config, server_identifier);
 
         Ok(Self {
@@ -131,6 +140,7 @@ mod tests {
             "10.0.0.1:69".to_string(),
             "http://10.0.0.1:3000".to_string(),
             server_identifier,
+            false,
             Some("0.0.0.0:6767".to_string()),
         )
         .await

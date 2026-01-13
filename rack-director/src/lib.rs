@@ -97,6 +97,10 @@ pub struct Args {
         help = "Path to agent image files (vmlinuz, initramfs.img)"
     )]
     agent_images_path: String,
+
+    // Enable autodiscovery of unknown devices
+    #[arg(long, default_value_t = false)]
+    enable_autodiscover: bool,
 }
 
 pub struct RackDirectorHandle {
@@ -160,6 +164,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         tftp_public,
         http_server,
         server_identifier,
+        args.enable_autodiscover,
         Some(args.dhcp_address.clone()),
     )
     .await

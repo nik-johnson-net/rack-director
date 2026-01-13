@@ -201,6 +201,9 @@ impl DhcpHandler {
             network.name
         );
 
+        // Look up device UUID early for authorization checks
+        let device_uuid = self.director.find_device_by_mac(&mac_str).await?;
+
         // Extract requested IP address
         let requested_ip = if let Some((_code, v4::DhcpOption::RequestedIpAddress(ip))) = msg
             .opts()
@@ -235,14 +238,14 @@ impl DhcpHandler {
 
             // Update lease to 'active'
             self.store.activate_lease(&mac_str).await?;
-            if let Some(uuid) = self.director.find_device_by_mac(&mac_str).await? {
+            if let Some(uuid) = &device_uuid {
                 self.director
-                    .set_device_ip_address(&uuid, &lease_ip.to_string())
+                    .set_device_ip_address(uuid, &lease_ip.to_string())
                     .await?;
             }
 
-            // Build DHCP Ack with boot options
-            let ack = self.build_ack(msg, lease_ip, network)?;
+            // Build DHCP Ack with boot options (passing device_uuid for authorization)
+            let ack = self.build_ack(msg, lease_ip, network, device_uuid.as_deref())?;
             log::info!(
                 "DHCP ACK {} to MAC {} on network '{}'",
                 requested_ip,
@@ -316,7 +319,13 @@ impl DhcpHandler {
         Ok(msg)
     }
 
-    fn build_ack(&self, req: &Message, ip: Ipv4Addr, network: &DhcpNetwork) -> Result<Message> {
+    fn build_ack(
+        &self,
+        req: &Message,
+        ip: Ipv4Addr,
+        network: &DhcpNetwork,
+        device_uuid: Option<&str>,
+    ) -> Result<Message> {
         let mut msg = self.build_offer(req, ip, network)?;
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Ack));
@@ -325,47 +334,57 @@ impl DhcpHandler {
         let is_ipxe = self.is_ipxe(req);
 
         if is_ipxe {
-            // iPXE second-stage boot: Return HTTP URL for boot script
-            let boot_opts = self.boot_config.get_ipxe_boot_script()?;
-
-            log::debug!(
-                "iPXE detected, returning HTTP boot script: {}",
-                boot_opts.filename
-            );
-
-            // Option 67 (Bootfile Name) - HTTP URL for iPXE script
-            msg.opts_mut().insert(v4::DhcpOption::BootfileName(
-                boot_opts.filename.into_bytes(),
-            ));
-        } else {
-            // First-stage boot: Determine boot mode and return bootloader via TFTP
-            let boot_mode = self.detect_boot_mode(req);
-            let boot_opts = self.boot_config.get_boot_options(boot_mode)?;
-
-            log::debug!(
-                "Boot mode: {:?}, next_server: {:?}, filename: {}",
-                boot_mode,
-                boot_opts.next_server,
-                boot_opts.filename
-            );
-
-            // Option 66 (TFTP Server Name)
-            if let Some(next_server) = &boot_opts.next_server {
-                msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
-                    next_server.clone().into_bytes(),
-                ));
-            }
-
-            // Option 67 (Bootfile Name)
-            msg.opts_mut().insert(v4::DhcpOption::BootfileName(
-                boot_opts.filename.into_bytes(),
-            ));
-
-            // siaddr field (next server IP)
-            if let Some(next_server) = &boot_opts.next_server
-                && let Ok(next_ip) = next_server.parse::<Ipv4Addr>()
+            // iPXE second-stage boot: Return HTTP URL for boot script (if allowed)
+            if let Some(boot_opts) = self
+                .boot_config
+                .get_ipxe_boot_script_if_allowed(device_uuid)?
             {
-                msg.set_siaddr(next_ip);
+                log::debug!(
+                    "iPXE detected, returning HTTP boot script: {}",
+                    boot_opts.filename
+                );
+
+                // Option 67 (Bootfile Name) - HTTP URL for iPXE script
+                msg.opts_mut().insert(v4::DhcpOption::BootfileName(
+                    boot_opts.filename.into_bytes(),
+                ));
+            } else {
+                log::info!("Skipping boot script for unknown device (autodiscover disabled)");
+            }
+        } else {
+            // First-stage boot: Determine boot mode and return bootloader via TFTP (if allowed)
+            let boot_mode = self.detect_boot_mode(req);
+            if let Some(boot_opts) = self
+                .boot_config
+                .get_boot_options_if_allowed(boot_mode, device_uuid)?
+            {
+                log::debug!(
+                    "Boot mode: {:?}, next_server: {:?}, filename: {}",
+                    boot_mode,
+                    boot_opts.next_server,
+                    boot_opts.filename
+                );
+
+                // Option 66 (TFTP Server Name)
+                if let Some(next_server) = &boot_opts.next_server {
+                    msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
+                        next_server.clone().into_bytes(),
+                    ));
+                }
+
+                // Option 67 (Bootfile Name)
+                msg.opts_mut().insert(v4::DhcpOption::BootfileName(
+                    boot_opts.filename.into_bytes(),
+                ));
+
+                // siaddr field (next server IP)
+                if let Some(next_server) = &boot_opts.next_server
+                    && let Ok(next_ip) = next_server.parse::<Ipv4Addr>()
+                {
+                    msg.set_siaddr(next_ip);
+                }
+            } else {
+                log::info!("Skipping boot options for unknown device (autodiscover disabled)");
             }
         }
 
@@ -577,7 +596,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let allocator = IpAllocator::new(store.clone());
-        let boot_config = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+        let boot_config =
+            BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string(), false);
 
         // Use a custom server identifier different from gateway
         let custom_server_id: Ipv4Addr = "192.168.1.50".parse().unwrap();
@@ -648,7 +668,8 @@ mod tests {
         );
 
         let allocator = IpAllocator::new(store.clone());
-        let boot_config = BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+        let boot_config =
+            BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string(), false);
         let server_identifier = "10.0.0.1".parse().unwrap();
 
         let handler = DhcpHandler::new(
