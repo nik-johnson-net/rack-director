@@ -211,14 +211,29 @@ function DeviceDetail() {
                     </thead>
                     <tbody>
                       {device.attributes.network_interfaces.map((nic, idx) => (
-                        <tr key={idx} className={`border-b ${nic.is_primary ? "bg-blue-50" : ""}`}>
+                        <tr
+                          key={idx}
+                          className={`border-b ${
+                            nic.is_primary ? "bg-blue-50" : ""
+                          } ${nic.disabled ? "bg-red-50 opacity-60" : ""}`}
+                        >
                           <td className="py-2 px-3 font-mono text-xs">
                             {nic.interface_name}
                             {nic.is_primary && (
                               <Badge className="ml-2 text-xs" variant="default">Primary</Badge>
                             )}
+                            {nic.disabled && (
+                              <Badge className="ml-2 text-xs" variant="destructive">Disabled</Badge>
+                            )}
                           </td>
-                          <td className="py-2 px-3 font-mono text-xs">{nic.mac_address}</td>
+                          <td className="py-2 px-3 font-mono text-xs">
+                            {nic.mac_address}
+                            {nic.warning_label && (
+                              <div className="text-xs text-red-600 mt-1">
+                                ⚠️ {nic.warning_label}
+                              </div>
+                            )}
+                          </td>
                           <td className="py-2 px-3 font-mono text-xs">
                             {nic.ip_address || <span className="text-gray-400">—</span>}
                           </td>

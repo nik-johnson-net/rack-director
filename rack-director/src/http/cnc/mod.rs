@@ -49,8 +49,24 @@ async fn ipxe_handler(
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
+    // Look up MAC address from client IP early, before device registration
+    let client_ip = addr.ip().to_string();
+    let mac_address = if let Ok(leases) = state.dhcp_store.get_all_leases().await {
+        leases.iter().find(|l| l.ip_address == client_ip).map(|l| l.mac_address.clone())
+    } else {
+        None
+    };
+
     // Register device if it doesn't exist and automatically start discovery
     if !state.director.device_exists(&uuid).await? {
+        // Check for pending device
+        if let Some(mac) = &mac_address {
+            if let Ok(Some(_)) = state.director.find_pending_device_by_mac(mac).await {
+                log::info!("Completing pending device for MAC {} with UUID {}", mac, uuid);
+            }
+        }
+
+        // Register device (existing code)
         if let Err(e) = state
             .director
             .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
@@ -58,6 +74,13 @@ async fn ipxe_handler(
         {
             warn!("Couldn't register device {uuid}: {e}");
         } else {
+            // Complete pending device link (NEW)
+            if let Some(mac) = &mac_address {
+                if let Err(e) = state.director.complete_pending_device(mac, &uuid).await {
+                    warn!("Couldn't complete pending device: {}", e);
+                }
+            }
+
             // Automatically start discovery transition for newly registered devices
             if let Err(e) = state
                 .director
@@ -69,10 +92,9 @@ async fn ipxe_handler(
         }
     }
 
-    // Look up DHCP lease by client IP to get MAC address and store network info
-    let client_ip = addr.ip().to_string();
-    if let Ok(leases) = state.dhcp_store.get_all_leases().await {
-        if let Some(lease) = leases.iter().find(|l| l.ip_address == client_ip) {
+    // Store network info from DHCP lease (reuse the MAC address lookup from above)
+    if let Some(mac) = &mac_address {
+        if let Ok(Some(lease)) = state.dhcp_store.get_lease_by_mac(mac).await {
             log::info!(
                 "Found DHCP lease for device {}: MAC {} IP {}",
                 uuid,
@@ -94,6 +116,9 @@ async fn ipxe_handler(
                     mac_address: lease.mac_address.clone(),
                     ip_address: Some(lease.ip_address.clone()),
                     is_primary: true,
+                    network_id: lease.network_id,
+                    disabled: false,
+                    warning_label: None,
                 };
                 interfaces.push(nic);
 
@@ -143,9 +168,9 @@ async fn ipxe_handler(
             {
                 warn!("Couldn't store IP address for device {uuid}: {e}");
             }
-        } else {
-            log::debug!("No DHCP lease found for IP {}", client_ip);
         }
+    } else {
+        log::debug!("No DHCP lease found for IP {}", client_ip);
     }
 
     // Non-fatal. If the boot target can't be found, redirect loop back here to try again
@@ -413,17 +438,68 @@ async fn update_attributes(
                         state.dhcp_store.get_lease_by_mac(&nic.mac_address).await
                     {
                         log::info!(
-                            "Backfilling IP {} for NIC {} (MAC {})",
+                            "Backfilling IP {} and network_id {} for NIC {} (MAC {})",
                             lease.ip_address,
+                            lease.network_id.unwrap_or(-1),
                             nic.interface_name,
                             nic.mac_address
                         );
                         nic.ip_address = Some(lease.ip_address);
+                        nic.network_id = lease.network_id;
                     }
                     enriched_interfaces.push(nic);
                 }
                 Err(e) => {
                     warn!("Failed to parse network interface from JSON: {}", e);
+                }
+            }
+        }
+
+        // Detect duplicate MACs on the same network
+        for nic in &mut enriched_interfaces {
+            // Only check for duplicates if the interface has a network_id
+            if let Some(network_id) = nic.network_id {
+                match state
+                    .director
+                    .find_duplicate_macs_on_network(&nic.mac_address, network_id, &uuid)
+                    .await
+                {
+                    Ok(duplicates) if !duplicates.is_empty() => {
+                        // Get network name for warning message
+                        let network_name = match state.dhcp_store.get_network(network_id).await {
+                            Ok(network) => network.name,
+                            Err(_) => format!("network {}", network_id),
+                        };
+
+                        nic.disabled = true;
+                        nic.warning_label = Some(format!("Duplicate MAC on {}", network_name));
+
+                        // Log warning with all duplicate devices
+                        let duplicate_list: Vec<String> = duplicates
+                            .iter()
+                            .map(|(dev_uuid, iface)| format!("{}:{}", dev_uuid, iface))
+                            .collect();
+                        log::warn!(
+                            "Duplicate MAC {} detected on network '{}' for device {} interface {}. \
+                             Also found on: {}",
+                            nic.mac_address,
+                            network_name,
+                            uuid,
+                            nic.interface_name,
+                            duplicate_list.join(", ")
+                        );
+                    }
+                    Ok(_) => {
+                        // No duplicates - ensure interface is not disabled
+                        nic.disabled = false;
+                        nic.warning_label = None;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Error checking for duplicate MAC {} on network {}: {}",
+                            nic.mac_address, network_id, e
+                        );
+                    }
                 }
             }
         }

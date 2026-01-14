@@ -19,7 +19,7 @@ import RoleNew from './pages/RoleNew.tsx';
 import RoleEdit from './pages/RoleEdit.tsx';
 import Networks from './pages/Networks.tsx';
 import NetworkDetail from './pages/NetworkDetail.tsx';
-import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork } from './lib/client.ts';
+import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices } from './lib/client.ts';
 import Loading from './pages/Loading.tsx';
 
 const router = createBrowserRouter([
@@ -27,7 +27,19 @@ const router = createBrowserRouter([
     Component: Layout,
     children: [
       { index: true, Component: Index, HydrateFallback: Loading },
-      { path: "/devices", loader: getAllDevices, Component: Devices, HydrateFallback: Loading },
+      {
+        path: "/devices",
+        loader: async () => {
+          const [devices, dhcpLeases, pendingDevices] = await Promise.all([
+            getAllDevices(),
+            getDhcpLeases(),
+            getPendingDevices(),
+          ]);
+          return { devices, dhcpLeases, pendingDevices };
+        },
+        Component: Devices,
+        HydrateFallback: Loading
+      },
       { path: "/devices/:uuid", Component: DeviceDetail },
       { path: "/operating-systems", loader: getOperatingSystems, Component: OperatingSystems, HydrateFallback: Loading },
       { path: "/operating-systems/new", Component: OperatingSystemNew },

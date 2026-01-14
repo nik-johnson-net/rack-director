@@ -35,7 +35,7 @@ echo "initramfs" > ".local-storage/agent-image/initramfs.img"
 
 echo "Starting backend server"
 cargo build --bin rack-director
-cargo run --bin rack-director -- --db-path . --storage-path ./.local-storage/data --tftp-path ./.local-storage/tftp --agent-images-path ./.local-storage/agent-image --dhcp-address 127.0.0.1:1067 --tftp-address 127.0.0.1:1069 --tftp-public-address 127.0.0.1 --http-public-url "http://127.0.0.1" --enable-autodiscover &
+LOG=debug cargo run --bin rack-director -- --db-path . --storage-path ./.local-storage/data --tftp-path ./.local-storage/tftp --agent-images-path ./.local-storage/agent-image --dhcp-address 127.0.0.1:1067 --tftp-address 127.0.0.1:1069 --tftp-public-address 127.0.0.1 --http-public-url "http://127.0.0.1" &
 
 echo "Starting frontend server"
 cd rack-director-ui

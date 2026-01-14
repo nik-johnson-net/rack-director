@@ -22,6 +22,7 @@ mod store;
 
 pub use store::Device;
 pub use store::NetworkInterface;
+pub use store::PendingDevice;
 
 pub enum BootTarget {
     LocalDisk,
@@ -430,6 +431,48 @@ impl Director {
         interfaces: &[NetworkInterface],
     ) -> anyhow::Result<()> {
         self.store.set_network_interfaces(uuid, interfaces).await
+    }
+
+    pub async fn find_duplicate_macs_on_network(
+        &self,
+        mac: &str,
+        network_id: i64,
+        exclude_device: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        self.store
+            .find_duplicate_macs_on_network(mac, network_id, exclude_device)
+            .await
+    }
+
+    pub async fn create_pending_device(
+        &self,
+        mac_address: &str,
+        network_id: i64,
+    ) -> anyhow::Result<i64> {
+        self.store.create_pending_device(mac_address, network_id).await
+    }
+
+    pub async fn find_pending_device_by_mac(
+        &self,
+        mac_address: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        self.store.find_pending_device_by_mac(mac_address).await
+    }
+
+    pub async fn complete_pending_device(
+        &self,
+        mac_address: &str,
+        device_uuid: &str,
+    ) -> anyhow::Result<()> {
+        self.store.complete_pending_device(mac_address, device_uuid).await
+    }
+
+    pub async fn get_pending_devices(&self) -> anyhow::Result<Vec<PendingDevice>> {
+        self.store.get_pending_devices().await
+    }
+
+    pub async fn delete_pending_device(&self, id: i64) -> anyhow::Result<()> {
+        self.store.delete_pending_device(id).await
     }
 }
 

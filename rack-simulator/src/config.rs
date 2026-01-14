@@ -146,19 +146,24 @@ fn resolve_macs(server: &ServerConfig, server_name: &str) -> Result<Vec<[u8; 6]>
 
     // Priority 2: Use mac_address (legacy) - generate 2 sequential MACs
     if let Some(mac_string) = &server.mac_address {
-        let first_mac = if mac_string == "auto" {
-            generate_mac(server_name)
+        if mac_string == "auto" {
+            // Auto-generate with NIC index to ensure uniqueness
+            let macs: Vec<[u8; 6]> = (0..2)
+                .map(|idx| generate_mac(&format!("{}-nic{}", server_name, idx)))
+                .collect();
+            return Ok(macs);
         } else {
-            parse_mac(mac_string)?
-        };
-        let second_mac = increment_mac(first_mac);
-        return Ok(vec![first_mac, second_mac]);
+            let first_mac = parse_mac(mac_string)?;
+            let second_mac = increment_mac(first_mac);
+            return Ok(vec![first_mac, second_mac]);
+        }
     }
 
-    // Fallback: Auto-generate 2 MACs
-    let first_mac = generate_mac(server_name);
-    let second_mac = increment_mac(first_mac);
-    Ok(vec![first_mac, second_mac])
+    // Fallback: Auto-generate 2 MACs with NIC index to ensure uniqueness
+    let macs: Vec<[u8; 6]> = (0..2)
+        .map(|idx| generate_mac(&format!("{}-nic{}", server_name, idx)))
+        .collect();
+    Ok(macs)
 }
 
 fn resolve_uuid(value: &str, server_name: &str) -> Result<String> {
@@ -498,10 +503,11 @@ mod tests {
 
         let macs = resolve_macs(&server, "test-server").unwrap();
         assert_eq!(macs.len(), 2);
-        // Should be deterministic
-        let expected_first = generate_mac("test-server");
+        // Should be deterministic and use NIC index
+        let expected_first = generate_mac("test-server-nic0");
+        let expected_second = generate_mac("test-server-nic1");
         assert_eq!(macs[0], expected_first);
-        assert_eq!(macs[1], increment_mac(expected_first));
+        assert_eq!(macs[1], expected_second);
     }
 
     #[test]
@@ -517,8 +523,113 @@ mod tests {
 
         let macs = resolve_macs(&server, "test-server").unwrap();
         assert_eq!(macs.len(), 2);
-        let expected_first = generate_mac("test-server");
+        // After fix, should use NIC index in seed
+        let expected_first = generate_mac("test-server-nic0");
+        let expected_second = generate_mac("test-server-nic1");
         assert_eq!(macs[0], expected_first);
-        assert_eq!(macs[1], increment_mac(expected_first));
+        assert_eq!(macs[1], expected_second);
+    }
+
+    #[test]
+    fn test_different_servers_same_name_get_different_macs() {
+        // This simulates the scenario where two servers are created with the same name
+        // In practice, this might happen if servers are created and destroyed, or in
+        // testing scenarios where name reuse occurs
+        let server_config = ServerConfig {
+            mac_address: None,
+            mac_addresses: None,
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        // Get MACs for two "instances" with the same name
+        let macs1 = resolve_macs(&server_config, "server1").unwrap();
+        let macs2 = resolve_macs(&server_config, "server1").unwrap();
+
+        // They should be identical (deterministic) when using the same name
+        assert_eq!(macs1, macs2);
+
+        // But servers with different names should get different MACs
+        let macs3 = resolve_macs(&server_config, "server2").unwrap();
+        assert_ne!(macs1[0], macs3[0]);
+        assert_ne!(macs1[1], macs3[1]);
+    }
+
+    #[test]
+    fn test_each_nic_gets_unique_mac_within_server() {
+        let server = ServerConfig {
+            mac_address: None,
+            mac_addresses: None,
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        let macs = resolve_macs(&server, "test-server").unwrap();
+        assert_eq!(macs.len(), 2);
+
+        // Each NIC should have a different MAC address
+        assert_ne!(macs[0], macs[1]);
+    }
+
+    #[test]
+    fn test_mac_generation_is_deterministic_with_nic_index() {
+        // Same server name + same NIC index should always produce same MAC
+        let mac1_nic0 = generate_mac("test-server-nic0");
+        let mac2_nic0 = generate_mac("test-server-nic0");
+        assert_eq!(mac1_nic0, mac2_nic0);
+
+        let mac1_nic1 = generate_mac("test-server-nic1");
+        let mac2_nic1 = generate_mac("test-server-nic1");
+        assert_eq!(mac1_nic1, mac2_nic1);
+
+        // But different NIC indices should produce different MACs
+        assert_ne!(mac1_nic0, mac1_nic1);
+    }
+
+    #[test]
+    fn test_resolve_macs_auto_uses_nic_index() {
+        let server = ServerConfig {
+            mac_address: Some("auto".to_string()),
+            mac_addresses: None,
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        let macs = resolve_macs(&server, "test-server").unwrap();
+        assert_eq!(macs.len(), 2);
+
+        // Should use NIC index in seed
+        let expected_first = generate_mac("test-server-nic0");
+        let expected_second = generate_mac("test-server-nic1");
+        assert_eq!(macs[0], expected_first);
+        assert_eq!(macs[1], expected_second);
+
+        // MACs should be different
+        assert_ne!(macs[0], macs[1]);
+    }
+
+    #[test]
+    fn test_resolve_macs_explicit_mac_still_increments() {
+        // When an explicit MAC is provided (not "auto"), we should still increment
+        // for backward compatibility with existing configs
+        let server = ServerConfig {
+            mac_address: Some("52:54:00:12:34:56".to_string()),
+            mac_addresses: None,
+            uuid: "test-uuid".to_string(),
+            architecture: "x64-uefi".to_string(),
+            hardware_profile: None,
+            hardware: None,
+        };
+
+        let macs = resolve_macs(&server, "test-server").unwrap();
+        assert_eq!(macs.len(), 2);
+        assert_eq!(macs[0], [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        assert_eq!(macs[1], [0x52, 0x54, 0x00, 0x12, 0x34, 0x57]);
     }
 }

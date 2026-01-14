@@ -147,6 +147,22 @@ impl DhcpHandler {
         // Check if device exists in devices table by MAC
         let device_uuid = self.director.find_device_by_mac(&mac_str).await?;
 
+        // Check if this interface is disabled (e.g., due to duplicate MAC)
+        if let Some(uuid) = &device_uuid {
+            let interfaces = self.director.get_network_interfaces(uuid).await?;
+
+            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str) {
+                if iface.disabled {
+                    log::warn!(
+                        "Skipping DHCP DISCOVER for disabled interface {} on device {}. Reason: {}",
+                        mac_str, uuid,
+                        iface.warning_label.as_deref().unwrap_or("unknown")
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+
         // Allocate or retrieve existing IP in this network
         let ip = if let Some(uuid) = &device_uuid {
             log::debug!("Device UUID {} found for MAC {}", uuid, mac_str);
@@ -203,6 +219,22 @@ impl DhcpHandler {
 
         // Look up device UUID early for authorization checks
         let device_uuid = self.director.find_device_by_mac(&mac_str).await?;
+
+        // Check if this interface is disabled (e.g., due to duplicate MAC)
+        if let Some(uuid) = &device_uuid {
+            let interfaces = self.director.get_network_interfaces(uuid).await?;
+
+            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str) {
+                if iface.disabled {
+                    log::warn!(
+                        "Skipping DHCP REQUEST for disabled interface {} on device {}. Reason: {}",
+                        mac_str, uuid,
+                        iface.warning_label.as_deref().unwrap_or("unknown")
+                    );
+                    return Ok(None);
+                }
+            }
+        }
 
         // Extract requested IP address
         let requested_ip = if let Some((_code, v4::DhcpOption::RequestedIpAddress(ip))) = msg

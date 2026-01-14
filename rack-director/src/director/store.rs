@@ -26,6 +26,25 @@ pub struct NetworkInterface {
     pub mac_address: String,
     pub ip_address: Option<String>,
     pub is_primary: bool,
+    /// Network ID this interface is on (if it has an IP)
+    #[serde(default)]
+    pub network_id: Option<i64>,
+    /// Whether this interface is disabled (e.g., due to duplicate MAC)
+    #[serde(default)]
+    pub disabled: bool,
+    /// Warning message explaining why interface is disabled
+    #[serde(default)]
+    pub warning_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingDevice {
+    pub id: i64,
+    pub mac_address: String,
+    pub device_uuid: Option<String>,
+    pub network_id: i64,
+    pub created_at: String,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Clone)]
@@ -376,6 +395,161 @@ impl DirectorStore {
             .optional()?;
 
         Ok(result)
+    }
+
+    /// Create a pending device entry for a MAC address
+    /// Returns the ID of the created pending device
+    /// If a pending device already exists for this MAC, does nothing and returns the existing ID
+    pub async fn create_pending_device(&self, mac_address: &str, network_id: i64) -> Result<i64> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "INSERT INTO pending_devices (mac_address, network_id) VALUES (?1, ?2)
+             ON CONFLICT(mac_address) DO NOTHING",
+            params![mac_address, network_id],
+        )?;
+
+        let id = conn.last_insert_rowid();
+
+        // If no rows were inserted (conflict), get the existing ID
+        if id == 0 {
+            let existing_id: i64 = conn.query_row(
+                "SELECT id FROM pending_devices WHERE mac_address = ?1",
+                params![mac_address],
+                |row| row.get(0),
+            )?;
+            Ok(existing_id)
+        } else {
+            Ok(id)
+        }
+    }
+
+    /// Find pending device ID by MAC address
+    /// Returns None if no pending device exists or if it's already completed
+    pub async fn find_pending_device_by_mac(&self, mac_address: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().await;
+
+        let result = conn
+            .query_row(
+                "SELECT id FROM pending_devices WHERE mac_address = ?1 AND completed_at IS NULL",
+                params![mac_address],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+
+        Ok(result)
+    }
+
+    /// Complete a pending device by linking it to a device UUID
+    /// Marks the pending device as completed
+    pub async fn complete_pending_device(&self, mac_address: &str, device_uuid: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "UPDATE pending_devices
+             SET device_uuid = ?1, completed_at = CURRENT_TIMESTAMP
+             WHERE mac_address = ?2 AND completed_at IS NULL",
+            params![device_uuid, mac_address],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get all pending devices that haven't been completed yet
+    pub async fn get_pending_devices(&self) -> Result<Vec<PendingDevice>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, mac_address, device_uuid, network_id, created_at, completed_at
+             FROM pending_devices
+             WHERE completed_at IS NULL
+             ORDER BY created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(PendingDevice {
+                id: row.get(0)?,
+                mac_address: row.get(1)?,
+                device_uuid: row.get(2)?,
+                network_id: row.get(3)?,
+                created_at: row.get(4)?,
+                completed_at: row.get(5)?,
+            })
+        })?;
+
+        let mut devices = Vec::new();
+        for row in rows {
+            devices.push(row?);
+        }
+
+        Ok(devices)
+    }
+
+    /// Delete a pending device by ID
+    pub async fn delete_pending_device(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM pending_devices WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Find devices with the same MAC address on the same network
+    /// Returns Vec<(device_uuid, interface_name)>
+    ///
+    /// This function searches for duplicate MAC addresses on a specific network,
+    /// excluding a given device UUID. It's used to detect MAC conflicts during
+    /// device registration.
+    pub async fn find_duplicate_macs_on_network(
+        &self,
+        mac: &str,
+        network_id: i64,
+        exclude_device: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT uuid, attributes FROM devices
+             WHERE uuid != ?1
+             AND EXISTS (
+               SELECT 1 FROM json_each(attributes, '$.network_interfaces') as iface
+               WHERE json_extract(iface.value, '$.mac_address') = ?2
+                 AND json_extract(iface.value, '$.network_id') = ?3
+             )",
+        )?;
+
+        let rows = stmt.query_map(params![exclude_device, mac, network_id], |row| {
+            let uuid: String = row.get(0)?;
+            let attributes_json: Option<String> = row.get(1)?;
+            Ok((uuid, attributes_json))
+        })?;
+
+        let mut duplicates = Vec::new();
+
+        for row in rows {
+            let (uuid, attributes_json) = row?;
+
+            // Parse attributes to find the matching interface name
+            if let Some(json_str) = attributes_json {
+                if let Ok(attributes) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str) {
+                    if let Some(interfaces_value) = attributes.get("network_interfaces") {
+                        if let Some(interfaces_array) = interfaces_value.as_array() {
+                            for interface_value in interfaces_array {
+                                // Parse each interface
+                                if let Ok(interface) = serde_json::from_value::<NetworkInterface>(interface_value.clone()) {
+                                    if interface.mac_address == mac && interface.network_id == Some(network_id) {
+                                        duplicates.push((uuid.clone(), interface.interface_name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(duplicates)
     }
 }
 
@@ -733,6 +907,9 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
+        network_id: None,
+        disabled: false,
+        warning_label: None,
         }];
         store
             .set_network_interfaces(uuid, &interfaces)
@@ -766,18 +943,27 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 is_primary: false,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth2".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:03".to_string(),
                 ip_address: None,
                 is_primary: false,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
         ];
         store
@@ -813,6 +999,9 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
+        network_id: None,
+        disabled: false,
+        warning_label: None,
         }];
         store.set_network_interfaces(uuid, &initial).await.unwrap();
 
@@ -823,12 +1012,18 @@ mod tests {
                 mac_address: "11:22:33:44:55:66".to_string(),
                 ip_address: Some("192.168.1.100".to_string()),
                 is_primary: true,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
             NetworkInterface {
                 interface_name: "ens1".to_string(),
                 mac_address: "11:22:33:44:55:67".to_string(),
                 ip_address: None,
                 is_primary: false,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
         ];
         store.set_network_interfaces(uuid, &updated).await.unwrap();
@@ -884,12 +1079,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 is_primary: false,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
         ];
         store
@@ -933,12 +1134,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
                 is_primary: false,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
         ];
         store
@@ -1013,12 +1220,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
                 is_primary: false,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
         ];
         store
@@ -1100,12 +1313,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 is_primary: false,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
             },
         ];
         store
@@ -1210,5 +1429,425 @@ mod tests {
         // Should return empty vec instead of error
         let interfaces = store.get_network_interfaces(uuid).await.unwrap();
         assert_eq!(interfaces.len(), 0);
+    }
+
+    // Tests for duplicate MAC detection
+
+    #[tokio::test]
+    async fn test_network_interface_disabled_fields_serialization() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440043";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create interface with new fields
+        let interface = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: true,
+            warning_label: Some("Duplicate MAC on network main".to_string()),
+        };
+
+        store
+            .set_network_interfaces(uuid, &[interface.clone()])
+            .await
+            .unwrap();
+
+        // Retrieve and verify all fields
+        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved[0].network_id, Some(1));
+        assert_eq!(retrieved[0].disabled, true);
+        assert_eq!(
+            retrieved[0].warning_label,
+            Some("Duplicate MAC on network main".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_network_interface_backward_compatibility() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440044";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Manually set old-style interface without new fields
+        let conn = store.conn.lock().await;
+        conn.execute(
+            r#"UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces',
+               json('[{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:01","ip_address":"10.0.0.100","is_primary":true}]')
+            ) WHERE uuid = ?"#,
+            params![uuid],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Should deserialize with default values for new fields
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[0].network_id, None);
+        assert_eq!(interfaces[0].disabled, false);
+        assert_eq!(interfaces[0].warning_label, None);
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_macs_on_network_no_duplicates() {
+        let (store, _temp) = create_test_store().await;
+        let uuid1 = "550e8400-e29b-41d4-a716-446655440045";
+        let uuid2 = "550e8400-e29b-41d4-a716-446655440046";
+
+        // Register two devices
+        store
+            .register_device(uuid1, Architecture::X86_64)
+            .await
+            .unwrap();
+        store
+            .register_device(uuid2, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set different MACs on same network
+        let interface1 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        let interface2 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+            ip_address: Some("10.0.0.101".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        store
+            .set_network_interfaces(uuid1, &[interface1])
+            .await
+            .unwrap();
+        store
+            .set_network_interfaces(uuid2, &[interface2])
+            .await
+            .unwrap();
+
+        // Should find no duplicates
+        let duplicates = store
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:01", 1, uuid1)
+            .await
+            .unwrap();
+        assert_eq!(duplicates.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_macs_on_network_finds_duplicate() {
+        let (store, _temp) = create_test_store().await;
+        let uuid1 = "550e8400-e29b-41d4-a716-446655440047";
+        let uuid2 = "550e8400-e29b-41d4-a716-446655440048";
+
+        // Register two devices
+        store
+            .register_device(uuid1, Architecture::X86_64)
+            .await
+            .unwrap();
+        store
+            .register_device(uuid2, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set SAME MAC on same network
+        let interface1 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:99".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        let interface2 = NetworkInterface {
+            interface_name: "ens0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:99".to_string(),
+            ip_address: Some("10.0.0.101".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        store
+            .set_network_interfaces(uuid1, &[interface1])
+            .await
+            .unwrap();
+        store
+            .set_network_interfaces(uuid2, &[interface2])
+            .await
+            .unwrap();
+
+        // Should find duplicate when checking from uuid1
+        let duplicates = store
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:99", 1, uuid1)
+            .await
+            .unwrap();
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].0, uuid2);
+        assert_eq!(duplicates[0].1, "ens0");
+
+        // Should find duplicate when checking from uuid2
+        let duplicates = store
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:99", 1, uuid2)
+            .await
+            .unwrap();
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].0, uuid1);
+        assert_eq!(duplicates[0].1, "eth0");
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_macs_on_different_networks() {
+        let (store, _temp) = create_test_store().await;
+        let uuid1 = "550e8400-e29b-41d4-a716-446655440049";
+        let uuid2 = "550e8400-e29b-41d4-a716-446655440050";
+
+        // Register two devices
+        store
+            .register_device(uuid1, Architecture::X86_64)
+            .await
+            .unwrap();
+        store
+            .register_device(uuid2, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set SAME MAC on DIFFERENT networks
+        let interface1 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:88".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        let interface2 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:88".to_string(),
+            ip_address: Some("192.168.1.100".to_string()),
+            is_primary: true,
+            network_id: Some(2),
+            disabled: false,
+            warning_label: None,
+        };
+
+        store
+            .set_network_interfaces(uuid1, &[interface1])
+            .await
+            .unwrap();
+        store
+            .set_network_interfaces(uuid2, &[interface2])
+            .await
+            .unwrap();
+
+        // Should NOT find duplicate on network 1
+        let duplicates = store
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:88", 1, uuid1)
+            .await
+            .unwrap();
+        assert_eq!(duplicates.len(), 0);
+
+        // Should NOT find duplicate on network 2
+        let duplicates = store
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:88", 2, uuid2)
+            .await
+            .unwrap();
+        assert_eq!(duplicates.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_macs_multiple_duplicates() {
+        let (store, _temp) = create_test_store().await;
+        let uuid1 = "550e8400-e29b-41d4-a716-446655440051";
+        let uuid2 = "550e8400-e29b-41d4-a716-446655440052";
+        let uuid3 = "550e8400-e29b-41d4-a716-446655440053";
+
+        // Register three devices
+        store
+            .register_device(uuid1, Architecture::X86_64)
+            .await
+            .unwrap();
+        store
+            .register_device(uuid2, Architecture::X86_64)
+            .await
+            .unwrap();
+        store
+            .register_device(uuid3, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // All three have same MAC on same network
+        let interface1 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:77".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        let interface2 = NetworkInterface {
+            interface_name: "ens0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:77".to_string(),
+            ip_address: Some("10.0.0.101".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        let interface3 = NetworkInterface {
+            interface_name: "enp0s3".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:77".to_string(),
+            ip_address: Some("10.0.0.102".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        store
+            .set_network_interfaces(uuid1, &[interface1])
+            .await
+            .unwrap();
+        store
+            .set_network_interfaces(uuid2, &[interface2])
+            .await
+            .unwrap();
+        store
+            .set_network_interfaces(uuid3, &[interface3])
+            .await
+            .unwrap();
+
+        // Should find 2 duplicates when checking from uuid1
+        let mut duplicates = store
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:77", 1, uuid1)
+            .await
+            .unwrap();
+        assert_eq!(duplicates.len(), 2);
+
+        // Sort for deterministic testing
+        duplicates.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(duplicates[0].0, uuid2);
+        assert_eq!(duplicates[0].1, "ens0");
+        assert_eq!(duplicates[1].0, uuid3);
+        assert_eq!(duplicates[1].1, "enp0s3");
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicate_macs_no_network_id() {
+        let (store, _temp) = create_test_store().await;
+        let uuid1 = "550e8400-e29b-41d4-a716-446655440054";
+        let uuid2 = "550e8400-e29b-41d4-a716-446655440055";
+
+        // Register two devices
+        store
+            .register_device(uuid1, Architecture::X86_64)
+            .await
+            .unwrap();
+        store
+            .register_device(uuid2, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set same MAC but without network_id (legacy interface)
+        let interface1 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:66".to_string(),
+            ip_address: None,
+            is_primary: true,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
+        };
+
+        let interface2 = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:66".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            is_primary: true,
+            network_id: Some(1),
+            disabled: false,
+            warning_label: None,
+        };
+
+        store
+            .set_network_interfaces(uuid1, &[interface1])
+            .await
+            .unwrap();
+        store
+            .set_network_interfaces(uuid2, &[interface2])
+            .await
+            .unwrap();
+
+        // Should NOT find uuid1 (no network_id) when searching network 1
+        let duplicates = store
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:66", 1, uuid2)
+            .await
+            .unwrap();
+        assert_eq!(duplicates.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_pending_device() {
+        let (store, _temp) = create_test_store().await;
+        let mac = "aa:bb:cc:dd:ee:99";
+        let network_id = 1;
+
+        // Create a pending device
+        let pending_id = store
+            .create_pending_device(mac, network_id)
+            .await
+            .unwrap();
+
+        // Verify it was created
+        let pending_devices = store.get_pending_devices().await.unwrap();
+        assert_eq!(pending_devices.len(), 1);
+        assert_eq!(pending_devices[0].id, pending_id);
+        assert_eq!(pending_devices[0].mac_address, mac);
+
+        // Delete the pending device
+        store.delete_pending_device(pending_id).await.unwrap();
+
+        // Verify it was deleted
+        let pending_devices = store.get_pending_devices().await.unwrap();
+        assert_eq!(pending_devices.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_pending_device() {
+        let (store, _temp) = create_test_store().await;
+
+        // Deleting a non-existent pending device should not error
+        // (SQL DELETE on non-existent row succeeds with 0 rows affected)
+        let result = store.delete_pending_device(999).await;
+        assert!(result.is_ok());
     }
 }

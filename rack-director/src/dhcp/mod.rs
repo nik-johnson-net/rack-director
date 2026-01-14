@@ -14,7 +14,7 @@ use tokio::{net::UdpSocket, task::JoinHandle};
 use crate::director::Director;
 
 pub use ip_discovery::discover_server_identifier;
-pub use store::{DhcpNetwork, DhcpPool, DhcpStore, Lease, StaticReservation};
+pub use store::{DhcpNetwork, DhcpPool, DhcpStore, Lease, LeaseState, StaticReservation};
 
 use allocator::IpAllocator;
 use boot_config::BootConfigProvider;

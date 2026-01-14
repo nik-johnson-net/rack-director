@@ -11,6 +11,9 @@ export type NetworkInterface = {
   mac_address: string;
   ip_address?: string;
   is_primary: boolean;
+  network_id?: number;
+  disabled?: boolean;
+  warning_label?: string;
 }
 
 export type Device = {
@@ -48,6 +51,20 @@ export type DhcpLease = {
   device_uuid?: string;
   expires_at?: string;
   network_id?: number;
+}
+
+export type PendingDevice = {
+  id: number;
+  mac_address: string;
+  device_uuid?: string;
+  network_id: number;
+  created_at: string;
+  completed_at?: string;
+}
+
+export type CreatePendingDeviceRequest = {
+  mac_address: string;
+  network_id: number;
 }
 
 export type DhcpNetwork = {
@@ -598,6 +615,44 @@ export async function getDhcpLeaseByMac(mac: string): Promise<DhcpLease | null> 
     } else {
       console.error('Error getting DHCP lease:', response.statusText);
       throw new Error('Failed to fetch DHCP lease');
+    }
+  });
+}
+
+export async function createPendingDevice(data: CreatePendingDeviceRequest): Promise<PendingDevice> {
+  return fetch('/ui/devices/pending', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      return response.json().then((err) => {
+        throw new Error(err.error || 'Failed to create pending device');
+      });
+    }
+  });
+}
+
+export async function getPendingDevices(): Promise<PendingDevice[]> {
+  return fetch('/ui/devices/pending').then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting pending devices:', response.statusText);
+      throw new Error('Failed to fetch pending devices');
+    }
+  });
+}
+
+export async function deletePendingDevice(id: number): Promise<void> {
+  return fetch(`/ui/devices/pending/${id}`, {
+    method: 'DELETE'
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error deleting pending device:', response.statusText);
+      throw new Error('Failed to delete pending device');
     }
   });
 }

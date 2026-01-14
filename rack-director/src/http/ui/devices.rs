@@ -5,7 +5,7 @@ use axum::{
     extract::{self, Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,22 @@ struct DeviceStatusResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CreatePendingDeviceRequest {
+    mac_address: String,
+    network_id: i64,
+}
+
+#[derive(Serialize)]
+struct PendingDeviceResponse {
+    id: i64,
+    mac_address: String,
+    device_uuid: Option<String>,
+    network_id: i64,
+    created_at: String,
+    completed_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +97,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
             get(get_active_transition),
         )
         .route("/ui/devices/{uuid}/status", get(get_device_status))
+        .route("/ui/devices/pending", post(create_pending_device))
+        .route("/ui/devices/pending", get(get_pending_devices))
+        .route("/ui/devices/pending/{id}", delete(delete_pending_device))
         .with_state(state)
 }
 
@@ -283,6 +302,127 @@ async fn get_device_status(
     }))
 }
 
+async fn create_pending_device(
+    State(state): State<Arc<AppState>>,
+    extract::Json(payload): extract::Json<CreatePendingDeviceRequest>,
+) -> Result<(StatusCode, Json<PendingDeviceResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Validate that the lease exists by MAC address
+    let lease = match state.dhcp_store.get_lease_by_mac(&payload.mac_address).await {
+        Ok(Some(lease)) => lease,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("No DHCP lease found for MAC address {}", payload.mac_address),
+                }),
+            ));
+        }
+        Err(e) => {
+            log::error!("Failed to query DHCP lease: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to query DHCP lease".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // Check that the lease is active
+    if lease.state != crate::dhcp::LeaseState::Active {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Lease for MAC {} is not active (state: {:?})", payload.mac_address, lease.state),
+            }),
+        ));
+    }
+
+    // Check that the lease doesn't already have a device
+    if lease.device_uuid.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Lease for MAC {} already has a device UUID", payload.mac_address),
+            }),
+        ));
+    }
+
+    // Create the pending device
+    let id = match state
+        .director
+        .create_pending_device(&payload.mac_address, payload.network_id)
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            log::error!("Failed to create pending device: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to create pending device".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // Return the created pending device
+    Ok((
+        StatusCode::CREATED,
+        Json(PendingDeviceResponse {
+            id,
+            mac_address: payload.mac_address,
+            device_uuid: None,
+            network_id: payload.network_id,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+        }),
+    ))
+}
+
+async fn get_pending_devices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PendingDeviceResponse>>, StatusCode> {
+    match state.director.get_pending_devices().await {
+        Ok(devices) => {
+            let responses: Vec<PendingDeviceResponse> = devices
+                .into_iter()
+                .map(|d| PendingDeviceResponse {
+                    id: d.id,
+                    mac_address: d.mac_address,
+                    device_uuid: d.device_uuid,
+                    network_id: d.network_id,
+                    created_at: d.created_at,
+                    completed_at: d.completed_at,
+                })
+                .collect();
+            Ok(Json(responses))
+        }
+        Err(e) => {
+            log::error!("Failed to get pending devices: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn delete_pending_device(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    match state.director.delete_pending_device(id).await {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            log::error!("Failed to delete pending device {}: {}", id, e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to delete pending device".to_string(),
+                }),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{database, director::Director, storage::MemoryImageStore};
@@ -408,5 +548,39 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_delete_pending_device() {
+        let (state, _temp_dir) = setup_test_state().await;
+
+        // Create a pending device directly (bypassing network/lease setup for simplicity)
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let network_id = 1;
+
+        let pending_id = state
+            .director
+            .create_pending_device(mac, network_id)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Delete the pending device
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/ui/devices/pending/{}", pending_id))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify it's deleted - should return empty list
+        let pending_devices = state.director.get_pending_devices().await.unwrap();
+        assert!(
+            pending_devices.is_empty(),
+            "Pending device should be deleted"
+        );
     }
 }

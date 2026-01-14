@@ -7,9 +7,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import PoolsTable from "@/components/networks/pools-table";
 import ReservationsTable from "@/components/networks/reservations-table";
+import LeasesTable from "@/components/networks/leases-table";
 import {
   updateNetwork,
   type DhcpNetwork,
@@ -17,7 +17,6 @@ import {
   type StaticReservation,
   type DhcpLease,
 } from "@/lib/client";
-import { Network } from "lucide-react";
 
 type LoaderData = {
   network: DhcpNetwork;
@@ -272,62 +271,7 @@ function NetworkDetail() {
               <CardDescription>Currently assigned IP addresses from this network</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="overflow-hidden rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>MAC Address</TableHead>
-                      <TableHead>IP Address</TableHead>
-                      <TableHead>Device UUID</TableHead>
-                      <TableHead>Expires At</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {leases.length > 0 ? (
-                      leases.map((lease, idx) => (
-                        <TableRow key={idx}>
-                          <TableCell>
-                            <span className="font-mono text-xs">{lease.mac_address}</span>
-                          </TableCell>
-                          <TableCell>
-                            <span className="font-mono text-xs">{lease.ip_address}</span>
-                          </TableCell>
-                          <TableCell>
-                            {lease.device_uuid ? (
-                              <button
-                                onClick={() => navigate(`/devices/${lease.device_uuid}`)}
-                                className="font-mono text-xs text-primary hover:underline"
-                              >
-                                {lease.device_uuid}
-                              </button>
-                            ) : (
-                              <span className="text-muted-foreground text-sm">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {lease.expires_at ? (
-                              <span className="text-sm">
-                                {new Date(lease.expires_at).toLocaleString()}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground text-sm">—</span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    ) : (
-                      <TableRow>
-                        <TableCell colSpan={4} className="h-24 text-center">
-                          <div className="flex flex-col items-center gap-2">
-                            <Network className="h-8 w-8 text-muted-foreground" />
-                            <div className="text-muted-foreground">No active leases</div>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
+              <LeasesTable networkId={networkId} leases={leases} />
             </CardContent>
           </Card>
         </TabsContent>
