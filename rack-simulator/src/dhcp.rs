@@ -282,13 +282,12 @@ fn request_internal(
             } else {
                 None
             }
-        })
-        .ok_or_else(|| anyhow!("No bootfile name in DHCP ACK"))?;
+        });
 
     output.info("Received ACK");
     output.detail("Leased IP", &leased_ip.to_string());
     output.detail("Next Server", &next_server.to_string());
-    output.detail("Bootfile", &bootfile);
+    output.detail("Bootfile", bootfile.as_ref().unwrap_or(&"None".to_owned()));
 
     // Store IP for this NIC
     state.allocated_ips[nic_index] = Some(leased_ip);
@@ -297,16 +296,18 @@ fn request_internal(
     if nic_index == 0 {
         state.allocated_ip = Some(leased_ip);
         state.tftp_server = Some(next_server);
-        state.bootfile = Some(bootfile.clone());
+        state.bootfile = bootfile.clone();
 
-        if is_ipxe && bootfile.starts_with("http") {
-            state.boot_script_url = Some(bootfile.clone());
+        if let Some(file) = &bootfile {
+            if is_ipxe && file.starts_with("http") {
+                state.boot_script_url = Some(file.clone());
+            }
         }
     }
 
     output.success(&format!(
         "DHCP REQUEST complete for NIC {}: {} -> {}",
-        nic_index, leased_ip, bootfile
+        nic_index, leased_ip, bootfile.unwrap_or("None".to_string())
     ));
 
     Ok(())

@@ -46,11 +46,13 @@ export type DevicesIndex = {
 }
 
 export type DhcpLease = {
+  id: number;
   mac_address: string;
   ip_address: string;
   device_uuid?: string;
   expires_at?: string;
   network_id?: number;
+  hostname?: string;
 }
 
 export type PendingDevice = {
@@ -126,6 +128,11 @@ export type CreateDhcpPoolRequest = {
 export type CreateStaticReservationRequest = {
   mac_address: string;
   ip_address: string;
+  hostname?: string;
+}
+
+export type MakeStaticRequest = {
+  ip_address?: string;
   hostname?: string;
 }
 
@@ -820,4 +827,30 @@ export async function getLeasesForNetwork(networkId: number): Promise<DhcpLease[
       throw new Error('Failed to fetch leases for network');
     }
   });
+}
+
+export async function makeLeaseStatic(
+  leaseId: number,
+  data: MakeStaticRequest
+): Promise<StaticReservation> {
+  return fetch(`/ui/dhcp/leases/${leaseId}/make-static`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error making lease static:', response.statusText);
+      throw new Error('Failed to make lease static');
+    }
+  });
+}
+
+export async function getStaticReservationByMac(
+  networkId: number,
+  mac: string
+): Promise<StaticReservation | null> {
+  const reservations = await getStaticReservations(networkId);
+  return reservations.find((r) => r.mac_address === mac) || null;
 }

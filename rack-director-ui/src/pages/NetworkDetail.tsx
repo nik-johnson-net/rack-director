@@ -271,7 +271,14 @@ function NetworkDetail() {
               <CardDescription>Currently assigned IP addresses from this network</CardDescription>
             </CardHeader>
             <CardContent>
-              <LeasesTable networkId={networkId} leases={leases} />
+              <LeasesTable
+                network={network}
+                networkId={networkId}
+                leases={leases}
+                onReservationCreated={(reservation) => {
+                  setReservations([...reservations, reservation]);
+                }}
+              />
             </CardContent>
           </Card>
         </TabsContent>

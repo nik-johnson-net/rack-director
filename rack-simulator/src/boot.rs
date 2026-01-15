@@ -23,8 +23,8 @@ enum BootAction {
 ///
 /// This function fetches iPXE scripts from rack-director and automatically
 /// follows chain redirects (important for the UUID redirect flow). It resolves
-/// {uuid} placeholders in chain URLs and returns a BootAction indicating what
-/// to do next.
+/// {uuid} and {net0/mac} placeholders in chain URLs and returns a BootAction
+/// indicating what to do next.
 ///
 /// # Arguments
 ///
@@ -43,6 +43,7 @@ async fn follow_ipxe_chains(
     const MAX_CHAIN_DEPTH: u32 = 10;
     let mut chain_depth = 0;
     let mut uuid_param: Option<&str> = None;
+    let mut mac_param: Option<String> = None;
 
     loop {
         if chain_depth >= MAX_CHAIN_DEPTH {
@@ -57,20 +58,37 @@ async fn follow_ipxe_chains(
             chain_depth
         ));
 
-        let script = http.get_ipxe_script(uuid_param, output).await?;
+        let script = http
+            .get_ipxe_script(uuid_param, mac_param.as_deref(), output)
+            .await?;
         let parsed = parse_ipxe_script(&script);
 
         // Check for chain command
         if let Some(chain_url) = parsed.chain_url {
             chain_depth += 1;
 
-            // Resolve {uuid} placeholder or follow uuid parameter
-            if chain_url.contains("{uuid}") || chain_url.contains("?uuid=") {
-                output.info(&format!(
-                    "Following chain to URL with UUID (depth {})...",
-                    chain_depth
-                ));
-                uuid_param = Some(&state.uuid);
+            // Resolve {uuid} and {net0/mac} placeholders or follow url parameters
+            let has_uuid = chain_url.contains("{uuid}") || chain_url.contains("?uuid=");
+            let has_mac = chain_url.contains("{net0/mac}") || chain_url.contains("?mac=");
+
+            if has_uuid || has_mac {
+                if has_uuid {
+                    output.info(&format!(
+                        "Following chain to URL with UUID (depth {})...",
+                        chain_depth
+                    ));
+                    uuid_param = Some(&state.uuid);
+                }
+                if has_mac {
+                    output.info(&format!(
+                        "Following chain to URL with MAC (depth {})...",
+                        chain_depth
+                    ));
+                    // Use the primary MAC address (first in the list)
+                    if !state.mac_addresses.is_empty() {
+                        mac_param = Some(crate::server::format_mac(&state.mac_addresses[0]));
+                    }
+                }
                 continue;
             } else {
                 return Err(anyhow!("Unexpected chain URL format: {}", chain_url));
@@ -148,6 +166,20 @@ pub async fn full_boot(
         output.step("Phase 1: Firmware Boot (DHCP + TFTP)");
         output.info("Attempting to obtain DHCP lease (trying interfaces sequentially)...");
         dhcp::discover_all_nics(conn, &mut state, output)?;
+
+        if let None = state.bootfile {
+            output.success("No bootfile returned. Server will boot first ");
+            state.save()?;
+
+            println!();
+            output.success(&format!(
+                "Dynamic boot sequence complete for '{}'",
+                server_config.name
+            ));
+
+            return Ok(());
+        }
+
         output.info(&format!(
             "Using NIC {} for TFTP boot...",
             state.current_nic_index
@@ -220,8 +252,15 @@ pub async fn ipxe_boot(
 
     let http = HttpClient::new(conn);
 
+    // Get primary MAC address for queries
+    let mac = if !state.mac_addresses.is_empty() {
+        Some(crate::server::format_mac(&state.mac_addresses[0]))
+    } else {
+        None
+    };
+
     output.info("Fetching iPXE script (without UUID)...");
-    let script1 = http.get_ipxe_script(None, output).await?;
+    let script1 = http.get_ipxe_script(None, mac.as_deref(), output).await?;
     let parsed1 = parse_ipxe_script(&script1);
 
     if let Some(chain_url) = &parsed1.chain_url {
@@ -229,7 +268,7 @@ pub async fn ipxe_boot(
     }
 
     output.info("Fetching iPXE script (with UUID)...");
-    let script2 = http.get_ipxe_script(Some(&state.uuid), output).await?;
+    let script2 = http.get_ipxe_script(Some(&state.uuid), mac.as_deref(), output).await?;
     let parsed2 = parse_ipxe_script(&script2);
 
     if parsed2.is_local_boot {

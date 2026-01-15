@@ -17,11 +17,20 @@ impl HttpClient {
         }
     }
 
-    pub async fn get_ipxe_script(&self, uuid: Option<&str>, output: &Output) -> Result<String> {
-        let url = match uuid {
-            Some(u) => format!("{}/cnc/ipxe?uuid={}", self.base_url, u),
-            None => format!("{}/cnc/ipxe", self.base_url),
-        };
+    pub async fn get_ipxe_script(&self, uuid: Option<&str>, mac: Option<&str>, output: &Output) -> Result<String> {
+        let mut url = format!("{}/cnc/ipxe", self.base_url);
+        let mut params = Vec::new();
+
+        if let Some(u) = uuid {
+            params.push(format!("uuid={}", u));
+        }
+        if let Some(m) = mac {
+            params.push(format!("mac={}", m));
+        }
+
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
 
         output.info(&format!("GET {}", url));
 

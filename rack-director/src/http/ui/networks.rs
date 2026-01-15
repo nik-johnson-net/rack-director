@@ -1,10 +1,11 @@
 use super::super::{AppState, error::Error as HttpError};
 use crate::dhcp::{DhcpNetwork, DhcpPool, Lease, StaticReservation};
+use crate::dhcp::validation;
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, get, put},
+    routing::{delete, get, post, put},
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -36,6 +37,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route(
             "/ui/dhcp/networks/{network_id}/leases",
             get(list_leases_by_network),
+        )
+        .route(
+            "/ui/dhcp/leases/{id}/make-static",
+            post(make_lease_static),
         )
         .with_state(state)
 }
@@ -80,6 +85,12 @@ pub struct UpdatePoolRequest {
 pub struct CreateStaticReservationRequest {
     pub mac_address: String,
     pub ip_address: String,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MakeStaticRequest {
+    pub ip_address: Option<String>,
     pub hostname: Option<String>,
 }
 
@@ -226,6 +237,13 @@ async fn create_static_reservation(
     Path(network_id): Path<i64>,
     Json(req): Json<CreateStaticReservationRequest>,
 ) -> Result<(StatusCode, Json<StaticReservation>), HttpError> {
+    // Fetch the network to get the subnet
+    let network = state.dhcp_store.get_network(network_id).await?;
+
+    // Validate the IP is within the subnet
+    validation::validate_ip_in_network(&req.ip_address, &network.subnet)
+        .map_err(|e| HttpError::BadRequest(e.to_string()))?;
+
     let reservation = state
         .dhcp_store
         .create_static_reservation(
@@ -257,4 +275,49 @@ async fn list_leases_by_network(
 ) -> Result<Json<Vec<Lease>>, HttpError> {
     let leases = state.dhcp_store.get_leases_by_network(network_id).await?;
     Ok(Json(leases))
+}
+
+/// Convert a dynamic lease to a static reservation
+async fn make_lease_static(
+    State(state): State<Arc<AppState>>,
+    Path(lease_id): Path<i64>,
+    Json(req): Json<MakeStaticRequest>,
+) -> Result<(StatusCode, Json<StaticReservation>), HttpError> {
+    // Get the lease by ID
+    let lease = state
+        .dhcp_store
+        .get_lease_by_id(lease_id)
+        .await?
+        .ok_or_else(|| HttpError::NotFound(format!("Lease {} not found", lease_id)))?;
+
+    // Verify the lease has a network_id
+    let network_id = lease
+        .network_id
+        .ok_or_else(|| HttpError::BadRequest("Lease has no associated network".to_string()))?;
+
+    // Fetch the network to get the subnet
+    let network = state.dhcp_store.get_network(network_id).await?;
+
+    // Determine the IP address to use (from request or lease)
+    let ip_address = req.ip_address.as_deref().unwrap_or(&lease.ip_address);
+
+    // Validate IP is in subnet
+    validation::validate_ip_in_network(ip_address, &network.subnet)
+        .map_err(|e| HttpError::BadRequest(e.to_string()))?;
+
+    // Use hostname from request if provided, otherwise use lease hostname
+    let hostname = req.hostname.or(lease.hostname);
+
+    // Create static reservation
+    let reservation = state
+        .dhcp_store
+        .create_static_reservation(
+            network_id,
+            &lease.mac_address,
+            ip_address,
+            hostname.as_deref(),
+        )
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(reservation)))
 }

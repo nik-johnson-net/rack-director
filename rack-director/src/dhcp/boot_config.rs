@@ -66,14 +66,16 @@ impl BootConfigProvider {
     /// # Decision Logic
     /// - If autodiscover is enabled: Always provide boot options (permissive mode)
     /// - If autodiscover is disabled: Only provide boot options for known devices (strict mode)
+    /// - Pending devices (in pending_devices table) are also allowed to boot
     ///
     /// # Arguments
     /// * `device_uuid` - The device UUID if the device is known (exists in devices table)
+    /// * `is_pending_device` - Whether the device exists in the pending_devices table
     ///
     /// # Returns
     /// `true` if boot options should be provided, `false` otherwise
-    pub fn should_provide_boot_options(&self, device_uuid: Option<&str>) -> bool {
-        self.enable_autodiscover || device_uuid.is_some()
+    pub fn should_provide_boot_options(&self, device_uuid: Option<&str>, is_pending_device: bool) -> bool {
+        self.enable_autodiscover || device_uuid.is_some() || is_pending_device
     }
 
     /// Gets boot options for the specified mode if allowed based on device state.
@@ -85,6 +87,7 @@ impl BootConfigProvider {
     /// # Arguments
     /// * `mode` - The boot mode (BIOS Legacy, UEFI, etc.)
     /// * `device_uuid` - The device UUID if known
+    /// * `is_pending_device` - Whether the device exists in the pending_devices table
     ///
     /// # Returns
     /// * `Ok(Some(BootOptions))` - Boot options for allowed devices
@@ -94,8 +97,9 @@ impl BootConfigProvider {
         &self,
         mode: BootMode,
         device_uuid: Option<&str>,
+        is_pending_device: bool,
     ) -> Result<Option<BootOptions>> {
-        if self.should_provide_boot_options(device_uuid) {
+        if self.should_provide_boot_options(device_uuid, is_pending_device) {
             Ok(Some(self.get_boot_options(mode)?))
         } else {
             Ok(None)
@@ -110,6 +114,7 @@ impl BootConfigProvider {
     ///
     /// # Arguments
     /// * `device_uuid` - The device UUID if known
+    /// * `is_pending_device` - Whether the device exists in the pending_devices table
     ///
     /// # Returns
     /// * `Ok(Some(BootOptions))` - Boot script URL for allowed devices
@@ -118,8 +123,9 @@ impl BootConfigProvider {
     pub fn get_ipxe_boot_script_if_allowed(
         &self,
         device_uuid: Option<&str>,
+        is_pending_device: bool,
     ) -> Result<Option<BootOptions>> {
-        if self.should_provide_boot_options(device_uuid) {
+        if self.should_provide_boot_options(device_uuid, is_pending_device) {
             Ok(Some(self.get_ipxe_boot_script()?))
         } else {
             Ok(None)
@@ -175,7 +181,7 @@ mod tests {
     fn test_should_provide_boot_options_autodiscover_enabled_known_device() {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), true);
-        assert!(provider.should_provide_boot_options(Some("device-uuid-123")));
+        assert!(provider.should_provide_boot_options(Some("device-uuid-123"), false));
     }
 
     #[test]
@@ -183,14 +189,14 @@ mod tests {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), true);
         // With autodiscover enabled, even unknown devices (None) should get boot options
-        assert!(provider.should_provide_boot_options(None));
+        assert!(provider.should_provide_boot_options(None, false));
     }
 
     #[test]
     fn test_should_provide_boot_options_autodiscover_disabled_known_device() {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
-        assert!(provider.should_provide_boot_options(Some("device-uuid-123")));
+        assert!(provider.should_provide_boot_options(Some("device-uuid-123"), false));
     }
 
     #[test]
@@ -198,7 +204,7 @@ mod tests {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
         // With autodiscover disabled, unknown devices (None) should NOT get boot options
-        assert!(!provider.should_provide_boot_options(None));
+        assert!(!provider.should_provide_boot_options(None, false));
     }
 
     // Conditional boot options tests
@@ -207,7 +213,7 @@ mod tests {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), true);
         let result = provider
-            .get_boot_options_if_allowed(BootMode::BiosLegacy, None)
+            .get_boot_options_if_allowed(BootMode::BiosLegacy, None, false)
             .unwrap();
         assert!(result.is_some());
         let opts = result.unwrap();
@@ -219,7 +225,7 @@ mod tests {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
         let result = provider
-            .get_boot_options_if_allowed(BootMode::BiosLegacy, None)
+            .get_boot_options_if_allowed(BootMode::BiosLegacy, None, false)
             .unwrap();
         // Should return None for unknown device with autodiscover disabled
         assert!(result.is_none());
@@ -230,7 +236,7 @@ mod tests {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
         let result = provider
-            .get_boot_options_if_allowed(BootMode::UefiBoot, Some("device-uuid-456"))
+            .get_boot_options_if_allowed(BootMode::UefiBoot, Some("device-uuid-456"), false)
             .unwrap();
         assert!(result.is_some());
         let opts = result.unwrap();
@@ -245,7 +251,7 @@ mod tests {
             "http://10.0.0.1:3000".to_string(),
             true,
         );
-        let result = provider.get_ipxe_boot_script_if_allowed(None).unwrap();
+        let result = provider.get_ipxe_boot_script_if_allowed(None, false).unwrap();
         assert!(result.is_some());
         let opts = result.unwrap();
         assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
@@ -258,7 +264,7 @@ mod tests {
             "http://10.0.0.1:3000".to_string(),
             false,
         );
-        let result = provider.get_ipxe_boot_script_if_allowed(None).unwrap();
+        let result = provider.get_ipxe_boot_script_if_allowed(None, false).unwrap();
         // Should return None for unknown device with autodiscover disabled
         assert!(result.is_none());
     }
@@ -271,8 +277,44 @@ mod tests {
             false,
         );
         let result = provider
-            .get_ipxe_boot_script_if_allowed(Some("device-uuid-789"))
+            .get_ipxe_boot_script_if_allowed(Some("device-uuid-789"), false)
             .unwrap();
+        assert!(result.is_some());
+        let opts = result.unwrap();
+        assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
+    }
+
+    // Pending device tests
+    #[test]
+    fn test_should_provide_boot_options_pending_device_autodiscover_disabled() {
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
+        // Pending devices should get boot options even with autodiscover disabled
+        assert!(provider.should_provide_boot_options(None, true));
+    }
+
+    #[test]
+    fn test_get_boot_options_if_allowed_pending_device_autodiscover_disabled() {
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
+        let result = provider
+            .get_boot_options_if_allowed(BootMode::UefiBoot, None, true)
+            .unwrap();
+        // Pending device should get boot options even with autodiscover disabled
+        assert!(result.is_some());
+        let opts = result.unwrap();
+        assert_eq!(opts.filename, "ipxe.efi");
+    }
+
+    #[test]
+    fn test_get_ipxe_boot_script_if_allowed_pending_device_autodiscover_disabled() {
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1:3000".to_string(),
+            false,
+        );
+        let result = provider.get_ipxe_boot_script_if_allowed(None, true).unwrap();
+        // Pending device should get boot script even with autodiscover disabled
         assert!(result.is_some());
         let opts = result.unwrap();
         assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");

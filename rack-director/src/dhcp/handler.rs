@@ -220,6 +220,9 @@ impl DhcpHandler {
         // Look up device UUID early for authorization checks
         let device_uuid = self.director.find_device_by_mac(&mac_str).await?;
 
+        // Check if device is in pending_devices table
+        let is_pending_device = self.director.find_pending_device_by_mac(&mac_str).await?.is_some();
+
         // Check if this interface is disabled (e.g., due to duplicate MAC)
         if let Some(uuid) = &device_uuid {
             let interfaces = self.director.get_network_interfaces(uuid).await?;
@@ -277,7 +280,7 @@ impl DhcpHandler {
             }
 
             // Build DHCP Ack with boot options (passing device_uuid for authorization)
-            let ack = self.build_ack(msg, lease_ip, network, device_uuid.as_deref())?;
+            let ack = self.build_ack(msg, lease_ip, network, device_uuid.as_deref(), is_pending_device)?;
             log::info!(
                 "DHCP ACK {} to MAC {} on network '{}'",
                 requested_ip,
@@ -357,6 +360,7 @@ impl DhcpHandler {
         ip: Ipv4Addr,
         network: &DhcpNetwork,
         device_uuid: Option<&str>,
+        is_pending_device: bool,
     ) -> Result<Message> {
         let mut msg = self.build_offer(req, ip, network)?;
         msg.opts_mut()
@@ -369,7 +373,7 @@ impl DhcpHandler {
             // iPXE second-stage boot: Return HTTP URL for boot script (if allowed)
             if let Some(boot_opts) = self
                 .boot_config
-                .get_ipxe_boot_script_if_allowed(device_uuid)?
+                .get_ipxe_boot_script_if_allowed(device_uuid, is_pending_device)?
             {
                 log::debug!(
                     "iPXE detected, returning HTTP boot script: {}",
@@ -388,7 +392,7 @@ impl DhcpHandler {
             let boot_mode = self.detect_boot_mode(req);
             if let Some(boot_opts) = self
                 .boot_config
-                .get_boot_options_if_allowed(boot_mode, device_uuid)?
+                .get_boot_options_if_allowed(boot_mode, device_uuid, is_pending_device)?
             {
                 log::debug!(
                     "Boot mode: {:?}, next_server: {:?}, filename: {}",

@@ -26,6 +26,9 @@ import {
   getRoles,
   assignRoleToDevice,
   transitionDeviceLifecycle,
+  getStaticReservationByMac,
+  makeLeaseStatic,
+  getNetworks,
   type Device,
   type Role,
   type DeviceStatus,
@@ -33,8 +36,19 @@ import {
   type DhcpLease,
   type RoleWithOs,
   type DeviceLifecycle,
+  type StaticReservation,
+  type DhcpNetwork,
 } from "@/lib/client";
-import { ArrowLeft, CheckCircle, Clock } from "lucide-react";
+import { ArrowLeft, CheckCircle, Clock, Pin } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 
 const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
 
@@ -54,17 +68,31 @@ function DeviceDetail() {
   const [assigningRole, setAssigningRole] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
 
+  // Static IP dialog state
+  const [staticDialogOpen, setStaticDialogOpen] = useState(false);
+  const [selectedInterface, setSelectedInterface] = useState<{
+    mac: string;
+    ip?: string;
+    networkId?: number;
+    leaseId?: number;
+  } | null>(null);
+  const [customIp, setCustomIp] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [staticReservations, setStaticReservations] = useState<Map<string, StaticReservation>>(new Map());
+  const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
+
   useEffect(() => {
     if (!uuid) return;
 
     const fetchData = async () => {
       try {
-        const [deviceData, roleData, statusData, transitionsData, rolesData] = await Promise.all([
+        const [deviceData, roleData, statusData, transitionsData, rolesData, networksData] = await Promise.all([
           getDevice(uuid),
           getDeviceRole(uuid),
           getDeviceStatus(uuid),
           getDeviceTransitions(uuid, true),
-          getRoles()
+          getRoles(),
+          getNetworks()
         ]);
 
         setDevice(deviceData);
@@ -73,11 +101,28 @@ function DeviceDetail() {
         setTransitions(transitionsData);
         setAvailableRoles(rolesData);
         setSelectedRoleId(deviceData.role_id || null);
+        setNetworks(networksData);
 
         // Fetch DHCP lease if MAC address is available
         if (deviceData.attributes?.mac_address) {
           const lease = await getDhcpLeaseByMac(deviceData.attributes.mac_address);
           setDhcpLease(lease);
+        }
+
+        // Fetch static reservations for all network interfaces
+        if (deviceData.attributes?.network_interfaces) {
+          const reservationsMap = new Map<string, StaticReservation>();
+
+          for (const nic of deviceData.attributes.network_interfaces) {
+            if (nic.network_id) {
+              const reservation = await getStaticReservationByMac(nic.network_id, nic.mac_address);
+              if (reservation) {
+                reservationsMap.set(nic.mac_address, reservation);
+              }
+            }
+          }
+
+          setStaticReservations(reservationsMap);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load device data");
@@ -134,6 +179,36 @@ function DeviceDetail() {
     }
   };
 
+  const handleMakeStatic = async () => {
+    if (!selectedInterface?.leaseId) return;
+
+    setError(null);
+    setIsSubmitting(true);
+
+    try {
+      const reservation = await makeLeaseStatic(selectedInterface.leaseId, {
+        ip_address: customIp || undefined,
+      });
+
+      // Update static reservations map
+      const updatedReservations = new Map(staticReservations);
+      updatedReservations.set(selectedInterface.mac, reservation);
+      setStaticReservations(updatedReservations);
+
+      // Close dialog
+      setStaticDialogOpen(false);
+      setSelectedInterface(null);
+      setCustomIp("");
+
+      // Show success message
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to make lease static");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   if (loading) {
     return <div className="p-4">Loading device...</div>;
   }
@@ -178,6 +253,66 @@ function DeviceDetail() {
         </div>
       )}
 
+      {/* Static IP Dialog */}
+      <Dialog open={staticDialogOpen} onOpenChange={setStaticDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Make IP Address Static</DialogTitle>
+            <DialogDescription>
+              Assign a static IP address to this MAC address. You can use the current lease IP or specify a custom one.
+            </DialogDescription>
+          </DialogHeader>
+
+          {selectedInterface && (
+            <div className="space-y-4">
+              <div className="bg-muted p-3 rounded-md">
+                <div className="text-sm">
+                  <span className="font-medium">MAC Address: </span>
+                  <span className="font-mono">{selectedInterface.mac}</span>
+                </div>
+                <div className="text-sm mt-1">
+                  <span className="font-medium">Current IP: </span>
+                  <span className="font-mono">{selectedInterface.ip}</span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="custom-ip">IP Address</Label>
+                <Input
+                  id="custom-ip"
+                  value={customIp}
+                  onChange={(e) => setCustomIp(e.target.value)}
+                  placeholder="e.g., 192.168.1.100"
+                />
+                {selectedInterface.networkId && networks.find(n => n.id === selectedInterface.networkId)?.subnet && (
+                  <p className="text-xs text-muted-foreground">
+                    Subnet: {networks.find(n => n.id === selectedInterface.networkId)?.subnet}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setStaticDialogOpen(false)}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={handleMakeStatic}
+              disabled={isSubmitting}
+            >
+              {isSubmitting ? "Creating..." : "Create Static Reservation"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Device Information */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card>
@@ -210,35 +345,69 @@ function DeviceDetail() {
                       </tr>
                     </thead>
                     <tbody>
-                      {device.attributes.network_interfaces.map((nic, idx) => (
-                        <tr
-                          key={idx}
-                          className={`border-b ${
-                            nic.is_primary ? "bg-blue-50" : ""
-                          } ${nic.disabled ? "bg-red-50 opacity-60" : ""}`}
-                        >
-                          <td className="py-2 px-3 font-mono text-xs">
-                            {nic.interface_name}
-                            {nic.is_primary && (
-                              <Badge className="ml-2 text-xs" variant="default">Primary</Badge>
-                            )}
-                            {nic.disabled && (
-                              <Badge className="ml-2 text-xs" variant="destructive">Disabled</Badge>
-                            )}
-                          </td>
-                          <td className="py-2 px-3 font-mono text-xs">
-                            {nic.mac_address}
-                            {nic.warning_label && (
-                              <div className="text-xs text-red-600 mt-1">
-                                ⚠️ {nic.warning_label}
+                      {device.attributes.network_interfaces.map((nic, idx) => {
+                        const hasStaticReservation = staticReservations.has(nic.mac_address);
+                        return (
+                          <tr
+                            key={idx}
+                            className={`border-b ${
+                              nic.is_primary ? "bg-blue-50" : ""
+                            } ${nic.disabled ? "bg-red-50 opacity-60" : ""}`}
+                          >
+                            <td className="py-2 px-3 font-mono text-xs">
+                              {nic.interface_name}
+                              {nic.is_primary && (
+                                <Badge className="ml-2 text-xs" variant="default">Primary</Badge>
+                              )}
+                              {nic.disabled && (
+                                <Badge className="ml-2 text-xs" variant="destructive">Disabled</Badge>
+                              )}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-xs">
+                              {nic.mac_address}
+                              {nic.warning_label && (
+                                <div className="text-xs text-red-600 mt-1">
+                                  ⚠️ {nic.warning_label}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-xs">
+                              <div className="flex items-center gap-2">
+                                {nic.ip_address || <span className="text-gray-400">—</span>}
+                                {hasStaticReservation && (
+                                  <Badge variant="secondary" className="text-xs">Static</Badge>
+                                )}
+                                {nic.ip_address && !hasStaticReservation && nic.network_id && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={async () => {
+                                      // Look up the lease by MAC to get lease ID
+                                      const lease = await getDhcpLeaseByMac(nic.mac_address);
+                                      if (lease) {
+                                        setSelectedInterface({
+                                          mac: nic.mac_address,
+                                          ip: nic.ip_address,
+                                          networkId: nic.network_id,
+                                          leaseId: lease.id
+                                        });
+                                        setCustomIp(nic.ip_address || "");
+                                        setStaticDialogOpen(true);
+                                      } else {
+                                        setError("No DHCP lease found for this interface");
+                                      }
+                                    }}
+                                    aria-label="Make IP static"
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <Pin className="h-3 w-3" />
+                                  </Button>
+                                )}
                               </div>
-                            )}
-                          </td>
-                          <td className="py-2 px-3 font-mono text-xs">
-                            {nic.ip_address || <span className="text-gray-400">—</span>}
-                          </td>
-                        </tr>
-                      ))}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 ) : (

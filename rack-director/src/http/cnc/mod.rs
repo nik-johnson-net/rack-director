@@ -22,6 +22,7 @@ use crate::http::error::Error;
 #[derive(Deserialize)]
 struct IpxeQuery {
     uuid: Option<String>,
+    mac: Option<String>,
 }
 
 pub fn routes(state: Arc<AppState>) -> Router {
@@ -49,12 +50,18 @@ async fn ipxe_handler(
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
-    // Look up MAC address from client IP early, before device registration
-    let client_ip = addr.ip().to_string();
-    let mac_address = if let Ok(leases) = state.dhcp_store.get_all_leases().await {
-        leases.iter().find(|l| l.ip_address == client_ip).map(|l| l.mac_address.clone())
-    } else {
-        None
+    // Prefer MAC from query parameter, fall back to IP-based lookup for backward compatibility
+    let mac_address = match &params.mac {
+        Some(mac) if !mac.is_empty() => Some(mac.clone()),
+        _ => {
+            // Fallback: Look up MAC address from client IP (may not work in all network setups)
+            let client_ip = addr.ip().to_string();
+            if let Ok(leases) = state.dhcp_store.get_all_leases().await {
+                leases.iter().find(|l| l.ip_address == client_ip).map(|l| l.mac_address.clone())
+            } else {
+                None
+            }
+        }
     };
 
     // Register device if it doesn't exist and automatically start discovery
@@ -170,7 +177,7 @@ async fn ipxe_handler(
             }
         }
     } else {
-        log::debug!("No DHCP lease found for IP {}", client_ip);
+        log::debug!("No MAC address available for device {}", uuid);
     }
 
     // Non-fatal. If the boot target can't be found, redirect loop back here to try again
@@ -381,8 +388,8 @@ async fn get_device_network_info(
 fn generate_uuid_script(root_url: &str) -> String {
     format!(
         r#"#!ipxe
-# Chain boot to send uuid
-chain {root_url}/cnc/ipxe?uuid={{uuid}}
+# Chain boot to send uuid and mac
+chain {root_url}/cnc/ipxe?uuid={{uuid}}&mac={{net0/mac}}
 "#
     )
 }
@@ -515,6 +522,13 @@ async fn update_attributes(
                 "Couldn't set enriched network interfaces for {}: {}",
                 uuid, e
             );
+        }
+
+        // Complete any pending devices whose MACs match the device's interfaces
+        for nic in &enriched_interfaces {
+            if let Err(e) = state.director.complete_pending_device(&nic.mac_address, &uuid).await {
+                log::debug!("Could not complete pending device for MAC {}: {}", nic.mac_address, e);
+            }
         }
     }
 
@@ -705,7 +719,7 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
-        assert!(body_str.contains("chain http://localhost/cnc/ipxe?uuid={uuid}"));
+        assert!(body_str.contains("chain http://localhost/cnc/ipxe?uuid={uuid}&mac={net0/mac}"));
     }
 
     #[tokio::test]
@@ -723,6 +737,53 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_ipxe_handler_with_mac_parameter() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = "550e8400-e29b-41d4-a716-446655440010";
+        let test_mac = "aa:bb:cc:dd:ee:ff";
+
+        // Create a pending device for this MAC
+        state
+            .director
+            .create_pending_device(test_mac, 1)
+            .await
+            .unwrap();
+
+        // Verify pending device exists
+        let pending_id = state
+            .director
+            .find_pending_device_by_mac(test_mac)
+            .await
+            .unwrap();
+        assert!(pending_id.is_some());
+
+        let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
+
+        // Make request with MAC parameter
+        let request = Request::builder()
+            .header("Host", "localhost")
+            .uri(format!("/cnc/ipxe?uuid={}&mac={}", test_uuid, test_mac))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Device should be registered
+        assert!(state.director.device_exists(test_uuid).await.unwrap());
+
+        // Pending device should be completed (removed from pending_devices table)
+        let pending_id = state
+            .director
+            .find_pending_device_by_mac(test_mac)
+            .await
+            .unwrap();
+        assert!(pending_id.is_none(), "Pending device should be completed");
     }
 
     #[tokio::test]

@@ -174,6 +174,34 @@ impl DhcpStore {
         Ok(lease)
     }
 
+    /// Get lease by ID
+    pub async fn get_lease_by_id(&self, id: i64) -> Result<Option<Lease>> {
+        let db = self.db.lock().await;
+
+        let mut stmt = db.prepare(
+            "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname, network_id
+             FROM dhcp_leases WHERE id = ?",
+        )?;
+
+        let lease = stmt
+            .query_row(params![id], |row| {
+                Ok(Lease {
+                    id: row.get(0)?,
+                    mac_address: row.get(1)?,
+                    ip_address: row.get(2)?,
+                    device_uuid: row.get(3)?,
+                    lease_start: row.get::<_, String>(4)?.parse().unwrap(),
+                    lease_end: row.get::<_, String>(5)?.parse().unwrap(),
+                    state: row.get::<_, String>(6)?.parse().unwrap(),
+                    hostname: row.get(7)?,
+                    network_id: row.get(8)?,
+                })
+            })
+            .optional()?;
+
+        Ok(lease)
+    }
+
     /// Activate a lease (transition from Offered to Active)
     pub async fn activate_lease(&self, mac: &str) -> Result<()> {
         let db = self.db.lock().await;

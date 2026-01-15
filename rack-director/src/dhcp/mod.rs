@@ -3,6 +3,7 @@ mod boot_config;
 mod handler;
 mod ip_discovery;
 mod store;
+pub mod validation;
 
 use anyhow::Result;
 use rusqlite::Connection;
