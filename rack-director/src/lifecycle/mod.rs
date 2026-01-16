@@ -315,8 +315,14 @@ mod tests {
         let json = serde_json::to_string(&transition).expect("Failed to serialize");
 
         // Verify that the JSON contains "started_at" and not "created_at"
-        assert!(json.contains("\"started_at\""), "JSON should contain 'started_at' field");
-        assert!(!json.contains("\"created_at\""), "JSON should not contain 'created_at' field");
+        assert!(
+            json.contains("\"started_at\""),
+            "JSON should contain 'started_at' field"
+        );
+        assert!(
+            !json.contains("\"created_at\""),
+            "JSON should not contain 'created_at' field"
+        );
     }
 
     #[test]

@@ -58,7 +58,10 @@ async fn ipxe_handler(
             // Fallback: Look up MAC address from client IP (may not work in all network setups)
             let client_ip = addr.ip().to_string();
             if let Ok(leases) = state.dhcp_store.get_all_leases().await {
-                leases.iter().find(|l| l.ip_address == client_ip).map(|l| l.mac_address.clone())
+                leases
+                    .iter()
+                    .find(|l| l.ip_address == client_ip)
+                    .map(|l| l.mac_address.clone())
             } else {
                 None
             }
@@ -68,10 +71,14 @@ async fn ipxe_handler(
     // Register device if it doesn't exist and automatically start discovery
     if !state.director.device_exists(&uuid).await? {
         // Check for pending device
-        if let Some(mac) = &mac_address {
-            if let Ok(Some(_)) = state.director.find_pending_device_by_mac(mac).await {
-                log::info!("Completing pending device for MAC {} with UUID {}", mac, uuid);
-            }
+        if let Some(mac) = &mac_address
+            && let Ok(Some(_)) = state.director.find_pending_device_by_mac(mac).await
+        {
+            log::info!(
+                "Completing pending device for MAC {} with UUID {}",
+                mac,
+                uuid
+            );
         }
 
         // Register device (existing code)
@@ -83,10 +90,10 @@ async fn ipxe_handler(
             warn!("Couldn't register device {uuid}: {e}");
         } else {
             // Complete pending device link (NEW)
-            if let Some(mac) = &mac_address {
-                if let Err(e) = state.director.complete_pending_device(mac, &uuid).await {
-                    warn!("Couldn't complete pending device: {}", e);
-                }
+            if let Some(mac) = &mac_address
+                && let Err(e) = state.director.complete_pending_device(mac, &uuid).await
+            {
+                warn!("Couldn't complete pending device: {}", e);
             }
 
             // Automatically start discovery transition for newly registered devices
@@ -342,7 +349,7 @@ fn generate_uuid_script(root_url: &str) -> String {
     format!(
         r#"#!ipxe
 # Chain boot to send uuid and mac
-chain {root_url}/cnc/ipxe?uuid={{uuid}}&mac={{net0/mac}}
+chain {root_url}/cnc/ipxe?uuid={{uuid}}&mac={{netX/mac}}
 "#
     )
 }
@@ -479,8 +486,16 @@ async fn update_attributes(
 
         // Complete any pending devices whose MACs match the device's interfaces
         for nic in &enriched_interfaces {
-            if let Err(e) = state.director.complete_pending_device(&nic.mac_address, &uuid).await {
-                log::debug!("Could not complete pending device for MAC {}: {}", nic.mac_address, e);
+            if let Err(e) = state
+                .director
+                .complete_pending_device(&nic.mac_address, &uuid)
+                .await
+            {
+                log::debug!(
+                    "Could not complete pending device for MAC {}: {}",
+                    nic.mac_address,
+                    e
+                );
             }
         }
     }
@@ -506,7 +521,7 @@ fn default_ip_source() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BmcConfig {
     #[serde(default = "default_ip_source")]
-    pub ip_address_source: String,  // "static" or "dhcp"
+    pub ip_address_source: String, // "static" or "dhcp"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,20 +589,16 @@ async fn get_bmc_config(
     };
 
     // Extract BMC config from device attributes
-    let bmc_config_value = device
-        .attributes
-        .get("bmc_config")
-        .ok_or_else(|| {
-            warn!("Device {} has no BMC configuration", uuid);
-            StatusCode::NOT_FOUND
-        })?;
+    let bmc_config_value = device.attributes.get("bmc_config").ok_or_else(|| {
+        warn!("Device {} has no BMC configuration", uuid);
+        StatusCode::NOT_FOUND
+    })?;
 
     // Deserialize BMC config
-    let bmc_config: BmcConfig = serde_json::from_value(bmc_config_value.clone())
-        .map_err(|e| {
-            warn!("Failed to parse BMC config for device {}: {}", uuid, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let bmc_config: BmcConfig = serde_json::from_value(bmc_config_value.clone()).map_err(|e| {
+        warn!("Failed to parse BMC config for device {}: {}", uuid, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Validate configuration based on ip_address_source
     if bmc_config.ip_address_source == "static" {
@@ -743,7 +754,7 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
-        assert!(body_str.contains("chain http://localhost/cnc/ipxe?uuid={uuid}&mac={net0/mac}"));
+        assert!(body_str.contains("chain http://localhost/cnc/ipxe?uuid={uuid}&mac={netX/mac}"));
     }
 
     #[tokio::test]
@@ -1061,10 +1072,7 @@ mod tests {
             .get_device_lifecycle(test_uuid)
             .await
             .unwrap();
-        assert_eq!(
-            lifecycle,
-            Some(crate::lifecycle::DeviceLifecycle::New)
-        );
+        assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
 
         // Simulate agent reporting success for second action (configure_bmc)
         let request = Request::builder()

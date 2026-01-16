@@ -30,7 +30,7 @@ fn default_ip_source() -> String {
 #[derive(Debug, Deserialize)]
 pub struct BmcConfig {
     #[serde(default = "default_ip_source")]
-    pub ip_address_source: String,  // "static" or "dhcp"
+    pub ip_address_source: String, // "static" or "dhcp"
     #[serde(default)]
     pub ip_address: Option<String>,
     #[serde(default)]

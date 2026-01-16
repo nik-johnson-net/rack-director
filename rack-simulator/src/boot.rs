@@ -23,7 +23,7 @@ enum BootAction {
 ///
 /// This function fetches iPXE scripts from rack-director and automatically
 /// follows chain redirects (important for the UUID redirect flow). It resolves
-/// {uuid} and {net0/mac} placeholders in chain URLs and returns a BootAction
+/// {uuid} and {netX/mac} placeholders in chain URLs and returns a BootAction
 /// indicating what to do next.
 ///
 /// # Arguments
@@ -67,9 +67,9 @@ async fn follow_ipxe_chains(
         if let Some(chain_url) = parsed.chain_url {
             chain_depth += 1;
 
-            // Resolve {uuid} and {net0/mac} placeholders or follow url parameters
+            // Resolve {uuid} and {netX/mac} placeholders or follow url parameters
             let has_uuid = chain_url.contains("{uuid}") || chain_url.contains("?uuid=");
-            let has_mac = chain_url.contains("{net0/mac}") || chain_url.contains("?mac=");
+            let has_mac = chain_url.contains("{netX/mac}") || chain_url.contains("?mac=");
 
             if has_uuid || has_mac {
                 if has_uuid {
@@ -167,7 +167,7 @@ pub async fn full_boot(
         output.info("Attempting to obtain DHCP lease (trying interfaces sequentially)...");
         dhcp::discover_all_nics(conn, &mut state, output)?;
 
-        if let None = state.bootfile {
+        if state.bootfile.is_none() {
             output.success("No bootfile returned. Server will boot first ");
             state.save()?;
 
@@ -268,7 +268,9 @@ pub async fn ipxe_boot(
     }
 
     output.info("Fetching iPXE script (with UUID)...");
-    let script2 = http.get_ipxe_script(Some(&state.uuid), mac.as_deref(), output).await?;
+    let script2 = http
+        .get_ipxe_script(Some(&state.uuid), mac.as_deref(), output)
+        .await?;
     let parsed2 = parse_ipxe_script(&script2);
 
     if parsed2.is_local_boot {

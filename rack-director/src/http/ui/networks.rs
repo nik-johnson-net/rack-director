@@ -1,6 +1,6 @@
 use super::super::{AppState, error::Error as HttpError};
-use crate::dhcp::{DhcpNetwork, DhcpPool, Lease, StaticReservation};
 use crate::dhcp::validation;
+use crate::dhcp::{DhcpNetwork, DhcpPool, Lease, StaticReservation};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -38,10 +38,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/ui/dhcp/networks/{network_id}/leases",
             get(list_leases_by_network),
         )
-        .route(
-            "/ui/dhcp/leases/{id}/make-static",
-            post(make_lease_static),
-        )
+        .route("/ui/dhcp/leases/{id}/make-static", post(make_lease_static))
         .with_state(state)
 }
 

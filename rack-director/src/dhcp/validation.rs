@@ -21,7 +21,11 @@ impl fmt::Display for ValidationError {
                 )
             }
             ValidationError::InvalidPrefixLength(len) => {
-                write!(f, "Invalid prefix length: {}. Must be between 0 and 32", len)
+                write!(
+                    f,
+                    "Invalid prefix length: {}. Must be between 0 and 32",
+                    len
+                )
             }
             ValidationError::InvalidIp(ip) => {
                 write!(f, "Invalid IP address: {}", ip)
@@ -200,43 +204,19 @@ mod tests {
         let network = Ipv4Addr::new(10, 0, 0, 0);
 
         // IPs within subnet
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 1),
-            &network,
-            24
-        ));
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 100),
-            &network,
-            24
-        ));
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 254),
-            &network,
-            24
-        ));
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 255),
-            &network,
-            24
-        ));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 1), &network, 24));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 100), &network, 24));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 254), &network, 24));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 255), &network, 24));
 
         // IPs outside subnet
-        assert!(!is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 1, 0),
-            &network,
-            24
-        ));
+        assert!(!is_ip_in_subnet(&Ipv4Addr::new(10, 0, 1, 0), &network, 24));
         assert!(!is_ip_in_subnet(
             &Ipv4Addr::new(10, 0, 1, 100),
             &network,
             24
         ));
-        assert!(!is_ip_in_subnet(
-            &Ipv4Addr::new(11, 0, 0, 0),
-            &network,
-            24
-        ));
+        assert!(!is_ip_in_subnet(&Ipv4Addr::new(11, 0, 0, 0), &network, 24));
     }
 
     #[test]
@@ -261,11 +241,7 @@ mod tests {
             &network,
             16
         ));
-        assert!(!is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 1),
-            &network,
-            16
-        ));
+        assert!(!is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 1), &network, 16));
     }
 
     #[test]
@@ -278,18 +254,10 @@ mod tests {
             &network,
             8
         ));
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 1, 2, 3),
-            &network,
-            8
-        ));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 1, 2, 3), &network, 8));
 
         // IPs outside subnet
-        assert!(!is_ip_in_subnet(
-            &Ipv4Addr::new(11, 0, 0, 0),
-            &network,
-            8
-        ));
+        assert!(!is_ip_in_subnet(&Ipv4Addr::new(11, 0, 0, 0), &network, 8));
     }
 
     #[test]
@@ -297,23 +265,11 @@ mod tests {
         let network = Ipv4Addr::new(10, 0, 0, 1);
 
         // Only exact IP should match
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 1),
-            &network,
-            32
-        ));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 1), &network, 32));
 
         // Even one bit off should fail
-        assert!(!is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 2),
-            &network,
-            32
-        ));
-        assert!(!is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 0),
-            &network,
-            32
-        ));
+        assert!(!is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 2), &network, 32));
+        assert!(!is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 0), &network, 32));
     }
 
     #[test]
@@ -321,21 +277,13 @@ mod tests {
         let network = Ipv4Addr::new(0, 0, 0, 0);
 
         // Everything should match /0
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(0, 0, 0, 0),
-            &network,
-            0
-        ));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(0, 0, 0, 0), &network, 0));
         assert!(is_ip_in_subnet(
             &Ipv4Addr::new(255, 255, 255, 255),
             &network,
             0
         ));
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(192, 168, 1, 1),
-            &network,
-            0
-        ));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(192, 168, 1, 1), &network, 0));
     }
 
     #[test]
@@ -343,21 +291,9 @@ mod tests {
         let network = Ipv4Addr::new(10, 0, 0, 0);
 
         // /31 networks have only 2 addresses
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 0),
-            &network,
-            31
-        ));
-        assert!(is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 1),
-            &network,
-            31
-        ));
-        assert!(!is_ip_in_subnet(
-            &Ipv4Addr::new(10, 0, 0, 2),
-            &network,
-            31
-        ));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 0), &network, 31));
+        assert!(is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 1), &network, 31));
+        assert!(!is_ip_in_subnet(&Ipv4Addr::new(10, 0, 0, 2), &network, 31));
     }
 
     #[test]
@@ -381,10 +317,7 @@ mod tests {
     #[test]
     fn test_validate_ip_in_network_ip_outside_subnet() {
         let result = validate_ip_in_network("10.0.1.100", "10.0.0.0/24");
-        assert!(matches!(
-            result,
-            Err(ValidationError::IpNotInSubnet { .. })
-        ));
+        assert!(matches!(result, Err(ValidationError::IpNotInSubnet { .. })));
     }
 
     #[test]

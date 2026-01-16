@@ -17,7 +17,12 @@ impl HttpClient {
         }
     }
 
-    pub async fn get_ipxe_script(&self, uuid: Option<&str>, mac: Option<&str>, output: &Output) -> Result<String> {
+    pub async fn get_ipxe_script(
+        &self,
+        uuid: Option<&str>,
+        mac: Option<&str>,
+        output: &Output,
+    ) -> Result<String> {
         let mut url = format!("{}/cnc/ipxe", self.base_url);
         let mut params = Vec::new();
 

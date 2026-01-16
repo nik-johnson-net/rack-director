@@ -431,7 +431,12 @@ impl Director {
         self.store.set_mac_address(uuid, mac).await
     }
 
-    pub async fn set_device_ip_address(&self, uuid: &str, ip: &str, mac: &str) -> anyhow::Result<()> {
+    pub async fn set_device_ip_address(
+        &self,
+        uuid: &str,
+        ip: &str,
+        mac: &str,
+    ) -> anyhow::Result<()> {
         self.store.set_ip_address(uuid, ip, mac).await
     }
 
@@ -466,7 +471,9 @@ impl Director {
         mac_address: &str,
         network_id: i64,
     ) -> anyhow::Result<i64> {
-        self.store.create_pending_device(mac_address, network_id).await
+        self.store
+            .create_pending_device(mac_address, network_id)
+            .await
     }
 
     pub async fn find_pending_device_by_mac(
@@ -481,7 +488,9 @@ impl Director {
         mac_address: &str,
         device_uuid: &str,
     ) -> anyhow::Result<()> {
-        self.store.complete_pending_device(mac_address, device_uuid).await
+        self.store
+            .complete_pending_device(mac_address, device_uuid)
+            .await
     }
 
     pub async fn get_pending_devices(&self) -> anyhow::Result<Vec<PendingDevice>> {

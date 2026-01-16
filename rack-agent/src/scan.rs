@@ -44,7 +44,7 @@ fn default_ip_source() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BmcConfiguration {
     #[serde(default = "default_ip_source")]
-    pub ip_address_source: String,  // "static" or "dhcp"
+    pub ip_address_source: String, // "static" or "dhcp"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,28 +288,57 @@ pub async fn configure_bmc(config: &BmcConfiguration, channel: u8) -> Result<()>
     );
 
     // Set IP address source (static or dhcp)
-    run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "ipsrc", &ipsrc]).await?;
+    run_ipmitool_command(
+        channel,
+        &["lan", "set", &channel.to_string(), "ipsrc", &ipsrc],
+    )
+    .await?;
 
     // Only set static IP fields if using static configuration
     if ipsrc == "static" {
         // Require static IP fields
-        let ip_address = config.ip_address.as_ref()
+        let ip_address = config
+            .ip_address
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ip_address required for static BMC configuration"))?;
-        let netmask = config.netmask.as_ref()
+        let netmask = config
+            .netmask
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("netmask required for static BMC configuration"))?;
-        let gateway = config.gateway.as_ref()
+        let gateway = config
+            .gateway
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("gateway required for static BMC configuration"))?;
 
         info!("Configuring static IP: {}", ip_address);
 
         // Set IP address
-        run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "ipaddr", ip_address]).await?;
+        run_ipmitool_command(
+            channel,
+            &["lan", "set", &channel.to_string(), "ipaddr", ip_address],
+        )
+        .await?;
 
         // Set netmask
-        run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "netmask", netmask]).await?;
+        run_ipmitool_command(
+            channel,
+            &["lan", "set", &channel.to_string(), "netmask", netmask],
+        )
+        .await?;
 
         // Set default gateway
-        run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "defgw", "ipaddr", gateway]).await?;
+        run_ipmitool_command(
+            channel,
+            &[
+                "lan",
+                "set",
+                &channel.to_string(),
+                "defgw",
+                "ipaddr",
+                gateway,
+            ],
+        )
+        .await?;
     } else {
         info!("BMC will obtain IP automatically via DHCP");
     }

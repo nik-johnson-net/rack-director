@@ -88,7 +88,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ui/devices", get(get_all_devices))
         .route("/ui/devices/{uuid}", get(get_device_by_uuid))
-        .route("/ui/devices/{uuid}/attributes", patch(update_device_attributes))
+        .route(
+            "/ui/devices/{uuid}/attributes",
+            patch(update_device_attributes),
+        )
         .route("/ui/devices/{uuid}/lifecycle", get(get_device_lifecycle))
         .route(
             "/ui/devices/{uuid}/lifecycle/transition",
@@ -332,13 +335,20 @@ async fn create_pending_device(
     extract::Json(payload): extract::Json<CreatePendingDeviceRequest>,
 ) -> Result<(StatusCode, Json<PendingDeviceResponse>), (StatusCode, Json<ErrorResponse>)> {
     // Validate that the lease exists by MAC address
-    let lease = match state.dhcp_store.get_lease_by_mac(&payload.mac_address).await {
+    let lease = match state
+        .dhcp_store
+        .get_lease_by_mac(&payload.mac_address)
+        .await
+    {
         Ok(Some(lease)) => lease,
         Ok(None) => {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
-                    error: format!("No DHCP lease found for MAC address {}", payload.mac_address),
+                    error: format!(
+                        "No DHCP lease found for MAC address {}",
+                        payload.mac_address
+                    ),
                 }),
             ));
         }
@@ -358,7 +368,10 @@ async fn create_pending_device(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: format!("Lease for MAC {} is not active (state: {:?})", payload.mac_address, lease.state),
+                error: format!(
+                    "Lease for MAC {} is not active (state: {:?})",
+                    payload.mac_address, lease.state
+                ),
             }),
         ));
     }
@@ -368,7 +381,10 @@ async fn create_pending_device(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: format!("Lease for MAC {} already has a device UUID", payload.mac_address),
+                error: format!(
+                    "Lease for MAC {} already has a device UUID",
+                    payload.mac_address
+                ),
             }),
         ));
     }

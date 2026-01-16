@@ -447,7 +447,11 @@ impl DirectorStore {
 
     /// Complete a pending device by linking it to a device UUID
     /// Marks the pending device as completed
-    pub async fn complete_pending_device(&self, mac_address: &str, device_uuid: &str) -> Result<()> {
+    pub async fn complete_pending_device(
+        &self,
+        mac_address: &str,
+        device_uuid: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().await;
 
         conn.execute(
@@ -493,10 +497,7 @@ impl DirectorStore {
     /// Delete a pending device by ID
     pub async fn delete_pending_device(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn.execute(
-            "DELETE FROM pending_devices WHERE id = ?1",
-            params![id],
-        )?;
+        conn.execute("DELETE FROM pending_devices WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -555,19 +556,20 @@ impl DirectorStore {
             let (uuid, attributes_json) = row?;
 
             // Parse attributes to find the matching interface name
-            if let Some(json_str) = attributes_json {
-                if let Ok(attributes) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str) {
-                    if let Some(interfaces_value) = attributes.get("network_interfaces") {
-                        if let Some(interfaces_array) = interfaces_value.as_array() {
-                            for interface_value in interfaces_array {
-                                // Parse each interface
-                                if let Ok(interface) = serde_json::from_value::<NetworkInterface>(interface_value.clone()) {
-                                    if interface.mac_address == mac && interface.network_id == Some(network_id) {
-                                        duplicates.push((uuid.clone(), interface.interface_name.clone()));
-                                    }
-                                }
-                            }
-                        }
+            if let Some(json_str) = attributes_json
+                && let Ok(attributes) =
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
+                && let Some(interfaces_value) = attributes.get("network_interfaces")
+                && let Some(interfaces_array) = interfaces_value.as_array()
+            {
+                for interface_value in interfaces_array {
+                    // Parse each interface
+                    if let Ok(interface) =
+                        serde_json::from_value::<NetworkInterface>(interface_value.clone())
+                        && interface.mac_address == mac
+                        && interface.network_id == Some(network_id)
+                    {
+                        duplicates.push((uuid.clone(), interface.interface_name.clone()));
                     }
                 }
             }
@@ -931,9 +933,9 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
-        network_id: None,
-        disabled: false,
-        warning_label: None,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
         }];
         store
             .set_network_interfaces(uuid, &interfaces)
@@ -967,27 +969,27 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 is_primary: false,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth2".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:03".to_string(),
                 ip_address: None,
                 is_primary: false,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
         ];
         store
@@ -1023,9 +1025,9 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
-        network_id: None,
-        disabled: false,
-        warning_label: None,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
         }];
         store.set_network_interfaces(uuid, &initial).await.unwrap();
 
@@ -1036,18 +1038,18 @@ mod tests {
                 mac_address: "11:22:33:44:55:66".to_string(),
                 ip_address: Some("192.168.1.100".to_string()),
                 is_primary: true,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
             NetworkInterface {
                 interface_name: "ens1".to_string(),
                 mac_address: "11:22:33:44:55:67".to_string(),
                 ip_address: None,
                 is_primary: false,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
         ];
         store.set_network_interfaces(uuid, &updated).await.unwrap();
@@ -1103,18 +1105,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 is_primary: false,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
         ];
         store
@@ -1158,18 +1160,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
                 is_primary: false,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
         ];
         store
@@ -1244,18 +1246,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
                 is_primary: false,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
         ];
         store
@@ -1878,10 +1880,7 @@ mod tests {
         let network_id = 1;
 
         // Create a pending device
-        let pending_id = store
-            .create_pending_device(mac, network_id)
-            .await
-            .unwrap();
+        let pending_id = store.create_pending_device(mac, network_id).await.unwrap();
 
         // Verify it was created
         let pending_devices = store.get_pending_devices().await.unwrap();

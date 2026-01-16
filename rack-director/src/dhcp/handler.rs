@@ -148,26 +148,27 @@ impl DhcpHandler {
         let mut device_uuid = self.director.find_device_by_mac(&mac_str).await?;
 
         // If not found, check if this MAC belongs to a BMC
-        if device_uuid.is_none() {
-            if let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await? {
-                log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
-                device_uuid = Some(bmc_device_uuid);
-            }
+        if device_uuid.is_none()
+            && let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await?
+        {
+            log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
+            device_uuid = Some(bmc_device_uuid);
         }
 
         // Check if this interface is disabled (e.g., due to duplicate MAC)
         if let Some(uuid) = &device_uuid {
             let interfaces = self.director.get_network_interfaces(uuid).await?;
 
-            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str) {
-                if iface.disabled {
-                    log::warn!(
-                        "Skipping DHCP DISCOVER for disabled interface {} on device {}. Reason: {}",
-                        mac_str, uuid,
-                        iface.warning_label.as_deref().unwrap_or("unknown")
-                    );
-                    return Ok(None);
-                }
+            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str)
+                && iface.disabled
+            {
+                log::warn!(
+                    "Skipping DHCP DISCOVER for disabled interface {} on device {}. Reason: {}",
+                    mac_str,
+                    uuid,
+                    iface.warning_label.as_deref().unwrap_or("unknown")
+                );
+                return Ok(None);
             }
         }
 
@@ -229,29 +230,34 @@ impl DhcpHandler {
         let mut device_uuid = self.director.find_device_by_mac(&mac_str).await?;
 
         // If not found, check if this MAC belongs to a BMC
-        if device_uuid.is_none() {
-            if let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await? {
-                log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
-                device_uuid = Some(bmc_device_uuid);
-            }
+        if device_uuid.is_none()
+            && let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await?
+        {
+            log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
+            device_uuid = Some(bmc_device_uuid);
         }
 
         // Check if device is in pending_devices table
-        let is_pending_device = self.director.find_pending_device_by_mac(&mac_str).await?.is_some();
+        let is_pending_device = self
+            .director
+            .find_pending_device_by_mac(&mac_str)
+            .await?
+            .is_some();
 
         // Check if this interface is disabled (e.g., due to duplicate MAC)
         if let Some(uuid) = &device_uuid {
             let interfaces = self.director.get_network_interfaces(uuid).await?;
 
-            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str) {
-                if iface.disabled {
-                    log::warn!(
-                        "Skipping DHCP REQUEST for disabled interface {} on device {}. Reason: {}",
-                        mac_str, uuid,
-                        iface.warning_label.as_deref().unwrap_or("unknown")
-                    );
-                    return Ok(None);
-                }
+            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str)
+                && iface.disabled
+            {
+                log::warn!(
+                    "Skipping DHCP REQUEST for disabled interface {} on device {}. Reason: {}",
+                    mac_str,
+                    uuid,
+                    iface.warning_label.as_deref().unwrap_or("unknown")
+                );
+                return Ok(None);
             }
         }
 
@@ -296,7 +302,13 @@ impl DhcpHandler {
             }
 
             // Build DHCP Ack with boot options (passing device_uuid for authorization)
-            let ack = self.build_ack(msg, lease_ip, network, device_uuid.as_deref(), is_pending_device)?;
+            let ack = self.build_ack(
+                msg,
+                lease_ip,
+                network,
+                device_uuid.as_deref(),
+                is_pending_device,
+            )?;
             log::info!(
                 "DHCP ACK {} to MAC {} on network '{}'",
                 requested_ip,
@@ -406,10 +418,11 @@ impl DhcpHandler {
         } else {
             // First-stage boot: Determine boot mode and return bootloader via TFTP (if allowed)
             let boot_mode = self.detect_boot_mode(req);
-            if let Some(boot_opts) = self
-                .boot_config
-                .get_boot_options_if_allowed(boot_mode, device_uuid, is_pending_device)?
-            {
+            if let Some(boot_opts) = self.boot_config.get_boot_options_if_allowed(
+                boot_mode,
+                device_uuid,
+                is_pending_device,
+            )? {
                 log::debug!(
                     "Boot mode: {:?}, next_server: {:?}, filename: {}",
                     boot_mode,

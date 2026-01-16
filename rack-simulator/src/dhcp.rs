@@ -273,16 +273,13 @@ fn request_internal(
     let leased_ip = ack.yiaddr();
     let next_server = ack.siaddr();
 
-    let bootfile = ack
-        .opts()
-        .get(OptionCode::BootfileName)
-        .and_then(|opt| {
-            if let DhcpOption::BootfileName(name) = opt {
-                Some(String::from_utf8_lossy(name).to_string())
-            } else {
-                None
-            }
-        });
+    let bootfile = ack.opts().get(OptionCode::BootfileName).and_then(|opt| {
+        if let DhcpOption::BootfileName(name) = opt {
+            Some(String::from_utf8_lossy(name).to_string())
+        } else {
+            None
+        }
+    });
 
     output.info("Received ACK");
     output.detail("Leased IP", &leased_ip.to_string());
@@ -298,16 +295,19 @@ fn request_internal(
         state.tftp_server = Some(next_server);
         state.bootfile = bootfile.clone();
 
-        if let Some(file) = &bootfile {
-            if is_ipxe && file.starts_with("http") {
-                state.boot_script_url = Some(file.clone());
-            }
+        if let Some(file) = &bootfile
+            && is_ipxe
+            && file.starts_with("http")
+        {
+            state.boot_script_url = Some(file.clone());
         }
     }
 
     output.success(&format!(
         "DHCP REQUEST complete for NIC {}: {} -> {}",
-        nic_index, leased_ip, bootfile.unwrap_or("None".to_string())
+        nic_index,
+        leased_ip,
+        bootfile.unwrap_or("None".to_string())
     ));
 
     Ok(())
