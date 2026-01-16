@@ -5,7 +5,7 @@ use axum::{
     extract::{self, Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,11 @@ struct CreatePendingDeviceRequest {
     network_id: i64,
 }
 
+#[derive(Deserialize)]
+struct UpdateAttributesRequest {
+    attributes: serde_json::Map<String, serde_json::Value>,
+}
+
 #[derive(Serialize)]
 struct PendingDeviceResponse {
     id: i64,
@@ -83,6 +88,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ui/devices", get(get_all_devices))
         .route("/ui/devices/{uuid}", get(get_device_by_uuid))
+        .route("/ui/devices/{uuid}/attributes", patch(update_device_attributes))
         .route("/ui/devices/{uuid}/lifecycle", get(get_device_lifecycle))
         .route(
             "/ui/devices/{uuid}/lifecycle/transition",
@@ -201,6 +207,25 @@ async fn get_device_by_uuid(
         mac_address,
         hostname,
     }))
+}
+
+async fn update_device_attributes(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<String>,
+    extract::Json(payload): extract::Json<UpdateAttributesRequest>,
+) -> Result<StatusCode, StatusCode> {
+    // Update device attributes
+    match state
+        .director
+        .update_attributes(&uuid, payload.attributes)
+        .await
+    {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            log::error!("Failed to update device attributes for {}: {}", uuid, e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn get_device_lifecycle(

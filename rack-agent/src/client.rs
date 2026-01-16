@@ -1,5 +1,5 @@
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub struct RackDirector {
     client: reqwest::Client,
@@ -21,6 +21,24 @@ struct ActionStatusPayload {
 struct ActionFailedPayload {
     uuid: String,
     error_message: String,
+}
+
+fn default_ip_source() -> String {
+    "static".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BmcConfig {
+    #[serde(default = "default_ip_source")]
+    pub ip_address_source: String,  // "static" or "dhcp"
+    #[serde(default)]
+    pub ip_address: Option<String>,
+    #[serde(default)]
+    pub netmask: Option<String>,
+    #[serde(default)]
+    pub gateway: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 impl RackDirector {
@@ -92,5 +110,21 @@ impl RackDirector {
         }
 
         Ok(())
+    }
+
+    /// Fetch BMC configuration for a device from rack-director
+    pub async fn get_bmc_config(&self, uuid: &str) -> Result<BmcConfig> {
+        let response = self
+            .client
+            .get(format!("{}/devices/{}/bmc_config", self.url, uuid))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to fetch BMC config: {}", response.status());
+        }
+
+        let config = response.json::<BmcConfig>().await?;
+        Ok(config)
     }
 }

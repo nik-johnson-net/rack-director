@@ -289,48 +289,53 @@ impl DirectorStore {
     }
 
     /// Set IP address in device attributes (called by DHCP when lease becomes active)
-    pub async fn set_ip_address(&self, uuid: &str, ip: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-
-        // First, update the legacy ip_address field
-        conn.execute(
-            "UPDATE devices SET attributes = json_set(attributes, '$.ip_address', ?) WHERE uuid = ?",
-            params![ip, uuid],
-        )?;
-
-        // Then, if network_interfaces array exists, update the primary NIC's IP address
-        let has_interfaces: bool = conn
-            .query_row(
-                "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
-                params![uuid],
-                |row| {
-                    let json_type: Option<String> = row.get(0)?;
-                    Ok(json_type == Some("array".to_string()))
-                },
+    /// Updates either BMC IP or network interface IP based on the MAC address
+    pub async fn set_ip_address(&self, uuid: &str, ip: &str, mac: &str) -> Result<()> {
+        // Check if this MAC belongs to the BMC
+        let is_bmc: bool = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT COALESCE(json_extract(attributes, '$.bmc.mac_address') = ?, 0) FROM devices WHERE uuid = ?",
+                params![mac, uuid],
+                |row| row.get::<_, bool>(0),
             )
             .optional()?
-            .unwrap_or(false);
+            .unwrap_or(false)
+        };
 
-        if has_interfaces {
-            // Find the index of the primary interface
-            let primary_index: Option<i64> = conn
-                .query_row(
-                    "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?), '$.network_interfaces')
-                     WHERE json_extract(value, '$.is_primary') = 1
-                     LIMIT 1",
-                    params![uuid],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?;
-
-            if let Some(index) = primary_index {
-                let path = format!("$.network_interfaces[{}].ip_address", index);
-                conn.execute(
-                    "UPDATE devices SET attributes = json_set(attributes, ?, ?) WHERE uuid = ?",
-                    params![path, ip, uuid],
-                )?;
-            }
+        if is_bmc {
+            // Update BMC IP address
+            let conn = self.conn.lock().await;
+            conn.execute(
+                "UPDATE devices SET attributes = json_set(attributes, '$.bmc.ip_address', ?) WHERE uuid = ?",
+                params![ip, uuid],
+            )?;
+            return Ok(());
         }
+
+        // Not a BMC - update network interface by MAC address
+        // Get current network interfaces
+        let mut interfaces = self.get_network_interfaces(uuid).await?;
+
+        // Find interface with matching MAC
+        if let Some(interface) = interfaces.iter_mut().find(|i| i.mac_address == mac) {
+            // Update existing interface
+            interface.ip_address = Some(ip.to_string());
+        } else {
+            // MAC not found - create new interface
+            interfaces.push(NetworkInterface {
+                interface_name: "unknown".to_string(), // Will be updated by agent
+                mac_address: mac.to_string(),
+                ip_address: Some(ip.to_string()),
+                is_primary: interfaces.is_empty(), // Primary only if it's the first interface
+                network_id: None,
+                disabled: false,
+                warning_label: None,
+            });
+        }
+
+        // Save updated interfaces
+        self.set_network_interfaces(uuid, &interfaces).await?;
 
         Ok(())
     }
@@ -495,6 +500,25 @@ impl DirectorStore {
         Ok(())
     }
 
+    /// Find device UUID by BMC MAC address
+    ///
+    /// Searches all devices for a BMC with the given MAC address in their attributes.
+    /// Returns the device UUID if a match is found.
+    pub async fn find_device_by_bmc_mac(&self, mac: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare(
+            "SELECT uuid FROM devices
+             WHERE json_extract(attributes, '$.bmc.mac_address') = ?",
+        )?;
+
+        let result = stmt
+            .query_row(params![mac], |row| row.get::<_, String>(0))
+            .optional()?;
+
+        Ok(result)
+    }
+
     /// Find devices with the same MAC address on the same network
     /// Returns Vec<(device_uuid, interface_name)>
     ///
@@ -651,6 +675,7 @@ mod tests {
     async fn test_set_ip_address() {
         let (store, _temp) = create_test_store().await;
         let uuid = "550e8400-e29b-41d4-a716-446655440023";
+        let mac = "aa:bb:cc:dd:ee:ff";
 
         // Register device
         store
@@ -658,20 +683,19 @@ mod tests {
             .await
             .unwrap();
 
-        // Set IP address
-        store.set_ip_address(uuid, "10.0.0.150").await.unwrap();
+        // Set IP address for a MAC (creates new interface)
+        store.set_ip_address(uuid, "10.0.0.150", mac).await.unwrap();
 
-        // Verify
+        // Verify interface was created with correct IP
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[0].mac_address, mac);
+        assert_eq!(interfaces[0].ip_address, Some("10.0.0.150".to_string()));
+        assert!(interfaces[0].is_primary); // Should be primary as it's the first interface
+
+        // Verify legacy ip_address field is NOT set
         let device = store.get_device(uuid).await.unwrap();
-        assert_eq!(
-            device
-                .attributes
-                .get("ip_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
-            "10.0.0.150"
-        );
+        assert!(device.attributes.get("ip_address").is_none());
     }
 
     #[tokio::test]
@@ -1265,9 +1289,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_ip_address_legacy_only() {
+    async fn test_set_ip_address_creates_interface_when_missing() {
         let (store, _temp) = create_test_store().await;
         let uuid = "550e8400-e29b-41d4-a716-446655440039";
+        let mac = "aa:bb:cc:dd:ee:ff";
 
         // Register device
         store
@@ -1275,28 +1300,23 @@ mod tests {
             .await
             .unwrap();
 
-        // Set IP address without interfaces array
-        store.set_ip_address(uuid, "10.0.0.100").await.unwrap();
+        // Set IP address without pre-existing interfaces array
+        store.set_ip_address(uuid, "10.0.0.100", mac).await.unwrap();
 
-        // Verify legacy field is set
-        let device = store.get_device(uuid).await.unwrap();
-        assert_eq!(
-            device
-                .attributes
-                .get("ip_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
-            "10.0.0.100"
-        );
-
-        // Verify interfaces array is still empty
+        // Verify interface was created
         let interfaces = store.get_network_interfaces(uuid).await.unwrap();
-        assert_eq!(interfaces.len(), 0);
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[0].mac_address, mac);
+        assert_eq!(interfaces[0].ip_address, Some("10.0.0.100".to_string()));
+        assert!(interfaces[0].is_primary);
+
+        // Verify legacy field is NOT set
+        let device = store.get_device(uuid).await.unwrap();
+        assert!(device.attributes.get("ip_address").is_none());
     }
 
     #[tokio::test]
-    async fn test_set_ip_address_updates_primary_interface() {
+    async fn test_set_ip_address_updates_by_mac() {
         let (store, _temp) = create_test_store().await;
         let uuid = "550e8400-e29b-41d4-a716-446655440040";
 
@@ -1313,18 +1333,18 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 is_primary: true,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 is_primary: false,
-            network_id: None,
-            disabled: false,
-            warning_label: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
             },
         ];
         store
@@ -1332,32 +1352,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Update IP address
-        store.set_ip_address(uuid, "192.168.1.50").await.unwrap();
+        // Update IP address for eth1 (non-primary) by MAC
+        store
+            .set_ip_address(uuid, "192.168.1.50", "aa:bb:cc:dd:ee:02")
+            .await
+            .unwrap();
 
-        // Verify legacy field is updated
-        let device = store.get_device(uuid).await.unwrap();
-        assert_eq!(
-            device
-                .attributes
-                .get("ip_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
-            "192.168.1.50"
-        );
-
-        // Verify primary interface IP is updated
+        // Verify eth1 IP is updated
         let updated_interfaces = store.get_network_interfaces(uuid).await.unwrap();
         assert_eq!(
-            updated_interfaces[0].ip_address,
+            updated_interfaces[1].ip_address,
             Some("192.168.1.50".to_string())
         );
-        // Secondary interface should be unchanged
+        // Primary interface (eth0) should be unchanged
         assert_eq!(
-            updated_interfaces[1].ip_address,
-            Some("10.0.0.101".to_string())
+            updated_interfaces[0].ip_address,
+            Some("10.0.0.100".to_string())
         );
+
+        // Verify legacy field is NOT set
+        let device = store.get_device(uuid).await.unwrap();
+        assert!(device.attributes.get("ip_address").is_none());
     }
 
     #[tokio::test]
@@ -1375,9 +1390,12 @@ mod tests {
             .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
-        store.set_ip_address(uuid, "10.0.0.100").await.unwrap();
+        store
+            .set_ip_address(uuid, "10.0.0.100", "aa:bb:cc:dd:ee:ff")
+            .await
+            .unwrap();
 
-        // Verify legacy fields work
+        // Verify legacy mac_address field still works
         let device = store.get_device(uuid).await.unwrap();
         assert_eq!(
             device
@@ -1388,21 +1406,59 @@ mod tests {
                 .unwrap(),
             "aa:bb:cc:dd:ee:ff"
         );
-        assert_eq!(
-            device
-                .attributes
-                .get("ip_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
-            "10.0.0.100"
-        );
+
+        // New behavior: ip_address is stored in network_interfaces, not legacy field
+        assert!(device.attributes.get("ip_address").is_none());
 
         // Verify find_device_by_mac still works
         let found = store.find_device_by_mac("aa:bb:cc:dd:ee:ff").await.unwrap();
         assert_eq!(found, Some(uuid.to_string()));
 
-        // Verify get_network_interfaces returns empty array
+        // Verify network_interfaces was created with the IP
+        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[0].mac_address, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(interfaces[0].ip_address, Some("10.0.0.100".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_ip_address_for_bmc() {
+        let (store, _temp) = create_test_store().await;
+        let uuid = "550e8400-e29b-41d4-a716-446655440042";
+        let bmc_mac = "aa:bb:cc:dd:ee:aa";
+
+        // Register device
+        store
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC information in device attributes
+        let conn = store.conn.lock().await;
+        conn.execute(
+            r#"UPDATE devices SET attributes = json_set(attributes, '$.bmc',
+               json('{"mac_address":"aa:bb:cc:dd:ee:aa","ip_address":null,"ip_address_source":"Unknown"}')
+            ) WHERE uuid = ?"#,
+            params![uuid],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Set IP address for BMC MAC
+        store
+            .set_ip_address(uuid, "10.0.1.50", bmc_mac)
+            .await
+            .unwrap();
+
+        // Verify BMC IP was updated
+        let device = store.get_device(uuid).await.unwrap();
+        let bmc = device.attributes.get("bmc").unwrap();
+        assert_eq!(
+            bmc.get("ip_address").unwrap().as_str().unwrap(),
+            "10.0.1.50"
+        );
+
+        // Verify network_interfaces was NOT created
         let interfaces = store.get_network_interfaces(uuid).await.unwrap();
         assert_eq!(interfaces.len(), 0);
     }

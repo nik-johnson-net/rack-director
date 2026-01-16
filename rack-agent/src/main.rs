@@ -11,6 +11,8 @@ mod scan;
 enum Command {
     /// Scans the device and uploads metadata to Rack Director.
     DeviceScan(scan::DeviceScanArgs),
+    /// Configures the BMC with static IP and credentials.
+    ConfigureBmc,
 }
 
 #[derive(Parser, Debug)]
@@ -48,6 +50,7 @@ async fn main() {
         // CLI subcommand takes precedence
         match command {
             Command::DeviceScan(device_args) => scan::device_scan(&client, &device_args).await,
+            Command::ConfigureBmc => scan::bmc_configure(&client).await,
         }
     } else {
         // Read action from --action flag or /proc/cmdline
@@ -62,6 +65,7 @@ async fn main() {
                 let device_args = scan::DeviceScanArgs::new(false);
                 scan::device_scan(&client, &device_args).await
             }
+            "configure-bmc" => scan::bmc_configure(&client).await,
             _ => {
                 error!("Unknown action: {}", action);
                 std::process::exit(1);

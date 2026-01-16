@@ -16,6 +16,20 @@ export type NetworkInterface = {
   warning_label?: string;
 }
 
+export type BmcInfo = {
+  mac_address: string;
+  ip_address?: string;
+  ip_address_source: string;
+}
+
+export type BmcConfig = {
+  ip_address: string;
+  netmask: string;
+  gateway: string;
+  username?: string;
+  password?: string;
+}
+
 export type Device = {
   uuid: string;
   architecture: Architecture;
@@ -24,6 +38,8 @@ export type Device = {
   attributes: {
     hostname?: string;
     network_interfaces?: NetworkInterface[];
+    bmc?: BmcInfo;
+    bmc_config?: BmcConfig;
     // Legacy fields
     mac_address?: string;
     static_ip?: string;
@@ -544,6 +560,19 @@ export async function getDevice(uuid: string): Promise<Device> {
     } else {
       console.error('Error getting device:', response.statusText);
       throw new Error('Failed to fetch device');
+    }
+  });
+}
+
+export async function updateDeviceAttributes(uuid: string, attributes: Record<string, any>): Promise<void> {
+  return fetch(`/ui/devices/${uuid}/attributes`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ attributes })
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error updating device attributes:', response.statusText);
+      throw new Error('Failed to update device attributes');
     }
   });
 }

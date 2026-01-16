@@ -33,6 +33,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/cnc/update_attributes", post(update_attributes))
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
+        .route("/cnc/devices/{uuid}/bmc_config", get(get_bmc_config))
         .with_state(state)
 }
 
@@ -109,71 +110,23 @@ async fn ipxe_handler(
                 lease.ip_address
             );
 
-            // Get existing network interfaces
-            let mut interfaces = state
+            // Update IP address for the interface with this MAC
+            // This will also create the interface if it doesn't exist yet
+            if let Err(e) = state
                 .director
-                .get_network_interfaces(&uuid)
+                .set_device_ip_address(&uuid, &lease.ip_address, &lease.mac_address)
                 .await
-                .unwrap_or_else(|_| Vec::new());
-
-            if interfaces.is_empty() {
-                // No existing interfaces - create first one
-                let nic = NetworkInterface {
-                    interface_name: String::from("unknown"), // Will be updated by agent
-                    mac_address: lease.mac_address.clone(),
-                    ip_address: Some(lease.ip_address.clone()),
-                    is_primary: true,
-                    network_id: lease.network_id,
-                    disabled: false,
-                    warning_label: None,
-                };
-                interfaces.push(nic);
-
-                if let Err(e) = state
-                    .director
-                    .set_network_interfaces(&uuid, &interfaces)
-                    .await
-                {
-                    warn!(
-                        "Couldn't store network interfaces for device {}: {}",
-                        uuid, e
-                    );
-                }
-            } else {
-                // Find matching NIC by MAC and update its IP
-                if let Some(nic) = interfaces
-                    .iter_mut()
-                    .find(|n| n.mac_address == lease.mac_address)
-                {
-                    nic.ip_address = Some(lease.ip_address.clone());
-
-                    if let Err(e) = state
-                        .director
-                        .set_network_interfaces(&uuid, &interfaces)
-                        .await
-                    {
-                        warn!(
-                            "Couldn't update network interfaces for device {}: {}",
-                            uuid, e
-                        );
-                    }
-                }
+            {
+                warn!("Couldn't store IP address for device {uuid}: {e}");
             }
 
-            // Always update legacy fields for backward compatibility
+            // Update legacy MAC address field for backward compatibility
             if let Err(e) = state
                 .director
                 .set_device_mac_address(&uuid, &lease.mac_address)
                 .await
             {
                 warn!("Couldn't store MAC address for device {uuid}: {e}");
-            }
-            if let Err(e) = state
-                .director
-                .set_device_ip_address(&uuid, &lease.ip_address)
-                .await
-            {
-                warn!("Couldn't store IP address for device {uuid}: {e}");
             }
         }
     } else {
@@ -546,6 +499,24 @@ struct ActionFailedQuery {
     error_message: String,
 }
 
+fn default_ip_source() -> String {
+    "static".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BmcConfig {
+    #[serde(default = "default_ip_source")]
+    pub ip_address_source: String,  // "static" or "dhcp"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub netmask: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
 #[axum::debug_handler]
 async fn action_success(
     State(state): State<Arc<AppState>>,
@@ -581,6 +552,59 @@ async fn action_failed(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+/// Get BMC configuration for a device
+///
+/// This endpoint returns the BMC configuration stored in the device's attributes.
+/// The configuration includes static IP settings and credentials that will be
+/// applied to the BMC by the rack-agent.
+#[axum::debug_handler]
+async fn get_bmc_config(
+    State(state): State<Arc<AppState>>,
+    extract::Path(uuid): extract::Path<String>,
+) -> Result<extract::Json<BmcConfig>, StatusCode> {
+    // Get device
+    let device = match state.director.get_device(&uuid).await {
+        Ok(device) => device,
+        Err(e) => {
+            warn!("Failed to get device {}: {}", uuid, e);
+            return Err(StatusCode::NOT_FOUND);
+        }
+    };
+
+    // Extract BMC config from device attributes
+    let bmc_config_value = device
+        .attributes
+        .get("bmc_config")
+        .ok_or_else(|| {
+            warn!("Device {} has no BMC configuration", uuid);
+            StatusCode::NOT_FOUND
+        })?;
+
+    // Deserialize BMC config
+    let bmc_config: BmcConfig = serde_json::from_value(bmc_config_value.clone())
+        .map_err(|e| {
+            warn!("Failed to parse BMC config for device {}: {}", uuid, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Validate configuration based on ip_address_source
+    if bmc_config.ip_address_source == "static" {
+        // Ensure required fields are present for static configuration
+        if bmc_config.ip_address.is_none()
+            || bmc_config.netmask.is_none()
+            || bmc_config.gateway.is_none()
+        {
+            warn!(
+                "Static BMC config missing required fields for device {}",
+                uuid
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    Ok(extract::Json(bmc_config))
 }
 
 #[cfg(test)]
@@ -932,7 +956,7 @@ mod tests {
             .unwrap();
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
 
-        // Device should have an active discovery plan
+        // Device should have an active discovery plan with 2 actions
         let active_plan = state
             .director
             .get_active_plan_for_device(test_uuid)
@@ -940,8 +964,9 @@ mod tests {
             .unwrap();
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
-        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions.len(), 2);
         assert_eq!(plan.actions[0].action_type, "discover_hardware");
+        assert_eq!(plan.actions[1].action_type, "configure_bmc");
 
         // iPXE response should contain agent kernel boot
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1011,11 +1036,37 @@ mod tests {
             Some("Dell Inc.")
         );
 
-        // Simulate agent reporting success
+        // Simulate agent reporting success for first action (discover_hardware)
         let success_payload = ActionStatusQuery {
             uuid: test_uuid.to_string(),
         };
 
+        let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/cnc/action_success")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&success_payload).unwrap()))
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify device is still in New state (configure_bmc action still pending)
+        let lifecycle = state
+            .director
+            .get_device_lifecycle(test_uuid)
+            .await
+            .unwrap();
+        assert_eq!(
+            lifecycle,
+            Some(crate::lifecycle::DeviceLifecycle::New)
+        );
+
+        // Simulate agent reporting success for second action (configure_bmc)
         let request = Request::builder()
             .method("POST")
             .uri("/cnc/action_success")
@@ -1026,7 +1077,7 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-        // Verify device transitioned to Unprovisioned
+        // Verify device transitioned to Unprovisioned after both actions complete
         let lifecycle = state
             .director
             .get_device_lifecycle(test_uuid)

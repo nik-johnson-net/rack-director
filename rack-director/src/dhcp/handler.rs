@@ -144,8 +144,16 @@ impl DhcpHandler {
             network.name
         );
 
-        // Check if device exists in devices table by MAC
-        let device_uuid = self.director.find_device_by_mac(&mac_str).await?;
+        // Check if device exists in devices table by MAC (device NIC)
+        let mut device_uuid = self.director.find_device_by_mac(&mac_str).await?;
+
+        // If not found, check if this MAC belongs to a BMC
+        if device_uuid.is_none() {
+            if let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await? {
+                log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
+                device_uuid = Some(bmc_device_uuid);
+            }
+        }
 
         // Check if this interface is disabled (e.g., due to duplicate MAC)
         if let Some(uuid) = &device_uuid {
@@ -217,8 +225,16 @@ impl DhcpHandler {
             network.name
         );
 
-        // Look up device UUID early for authorization checks
-        let device_uuid = self.director.find_device_by_mac(&mac_str).await?;
+        // Look up device UUID early for authorization checks (device NIC or BMC)
+        let mut device_uuid = self.director.find_device_by_mac(&mac_str).await?;
+
+        // If not found, check if this MAC belongs to a BMC
+        if device_uuid.is_none() {
+            if let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await? {
+                log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
+                device_uuid = Some(bmc_device_uuid);
+            }
+        }
 
         // Check if device is in pending_devices table
         let is_pending_device = self.director.find_pending_device_by_mac(&mac_str).await?.is_some();
@@ -275,7 +291,7 @@ impl DhcpHandler {
             self.store.activate_lease(&mac_str).await?;
             if let Some(uuid) = &device_uuid {
                 self.director
-                    .set_device_ip_address(uuid, &lease_ip.to_string())
+                    .set_device_ip_address(uuid, &lease_ip.to_string(), &mac_str)
                     .await?;
             }
 

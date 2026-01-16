@@ -159,7 +159,10 @@ impl LifecycleManager {
 
         match transition_type {
             TransitionType::Discover => {
-                vec![Action::new("discover_hardware".to_string(), HashMap::new())]
+                vec![
+                    Action::new("discover_hardware".to_string(), HashMap::new()),
+                    Action::new("configure_bmc".to_string(), HashMap::new()),
+                ]
             }
             TransitionType::Provision => vec![
                 Action::new("install_os".to_string(), HashMap::new()),
@@ -278,8 +281,9 @@ mod tests {
     fn test_plan_stubs() {
         let discover_actions =
             LifecycleManager::get_plan_stub_for_transition(&TransitionType::Discover);
-        assert_eq!(discover_actions.len(), 1);
+        assert_eq!(discover_actions.len(), 2);
         assert_eq!(discover_actions[0].action_type, "discover_hardware");
+        assert_eq!(discover_actions[1].action_type, "configure_bmc");
 
         let provision_actions =
             LifecycleManager::get_plan_stub_for_transition(&TransitionType::Provision);

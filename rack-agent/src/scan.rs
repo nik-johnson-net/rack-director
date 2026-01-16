@@ -30,6 +30,31 @@ struct NetworkInterface {
     is_primary: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BmcInfo {
+    mac_address: String,
+    ip_address: Option<String>,
+    ip_address_source: String,
+}
+
+fn default_ip_source() -> String {
+    "static".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BmcConfiguration {
+    #[serde(default = "default_ip_source")]
+    pub ip_address_source: String,  // "static" or "dhcp"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub netmask: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct HardwareInfo {
     uuid: Option<String>,
@@ -140,6 +165,262 @@ async fn scan_network_interfaces() -> Result<Vec<NetworkInterface>> {
     }
 
     Ok(interfaces)
+}
+
+/// Scan for BMC (Baseboard Management Controller) using ipmitool
+///
+/// This function attempts to detect a BMC by running `ipmitool lan print` on
+/// channels 1, 2, and 8 (common BMC LAN channels). It parses the output to extract:
+/// - MAC Address
+/// - IP Address (converted to None if "0.0.0.0")
+/// - IP Address Source (DHCP, Static, etc.)
+///
+/// Returns None if:
+/// - ipmitool is not available
+/// - No BMC is present
+/// - Parsing fails
+///
+/// This is a best-effort scan and failures are non-fatal.
+async fn scan_bmc() -> Result<Option<BmcInfo>> {
+    // Try common BMC LAN channels in order
+    for channel in [1, 2, 8] {
+        debug!("Attempting to scan BMC on channel {}", channel);
+
+        match tokio::process::Command::new("ipmitool")
+            .args(["lan", "print", &channel.to_string()])
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+
+                // Parse the output
+                if let Some(bmc_info) = parse_ipmitool_output(&stdout) {
+                    info!(
+                        "Discovered BMC on channel {}: MAC={}, IP={:?}, Source={}",
+                        channel,
+                        bmc_info.mac_address,
+                        bmc_info.ip_address,
+                        bmc_info.ip_address_source
+                    );
+                    return Ok(Some(bmc_info));
+                }
+            }
+            Ok(output) => {
+                debug!(
+                    "ipmitool command failed with status {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) => {
+                if channel == 1 {
+                    // Only log on first attempt to avoid spam
+                    debug!("ipmitool not available or failed to execute: {}", e);
+                }
+            }
+        }
+    }
+
+    debug!("No BMC detected on channels 1, 2, or 8");
+    Ok(None)
+}
+
+/// Parse ipmitool lan print output to extract BMC information
+fn parse_ipmitool_output(output: &str) -> Option<BmcInfo> {
+    let mut mac_address: Option<String> = None;
+    let mut ip_address: Option<String> = None;
+    let mut ip_address_source: Option<String> = None;
+
+    for line in output.lines() {
+        let line = line.trim();
+
+        if let Some(value) = line.strip_prefix("MAC Address") {
+            // Extract everything after the first colon
+            if let Some(colon_pos) = value.find(':') {
+                let mac = value[colon_pos + 1..].trim().to_string();
+                if !mac.is_empty() && mac != "00:00:00:00:00:00" {
+                    mac_address = Some(mac);
+                }
+            }
+        } else if let Some(value) = line.strip_prefix("IP Address Source") {
+            if let Some(colon_pos) = value.find(':') {
+                ip_address_source = Some(value[colon_pos + 1..].trim().to_string());
+            }
+        } else if line.starts_with("IP Address") && !line.contains("Source") {
+            // Match "IP Address" but not "IP Address Source"
+            if let Some(colon_pos) = line.find(':') {
+                let ip = line[colon_pos + 1..].trim().to_string();
+                // Treat 0.0.0.0 as "no IP" (None)
+                if !ip.is_empty() && ip != "0.0.0.0" {
+                    ip_address = Some(ip);
+                }
+            }
+        }
+    }
+
+    // Only return BMC info if we found a valid MAC address
+    if let (Some(mac), Some(source)) = (mac_address, ip_address_source) {
+        Some(BmcInfo {
+            mac_address: mac,
+            ip_address,
+            ip_address_source: source,
+        })
+    } else {
+        None
+    }
+}
+
+/// Configure BMC with static or DHCP IP address and credentials
+///
+/// This function configures the BMC by running ipmitool commands to set:
+/// - IP address source (static or dhcp)
+/// - For static: IP address, netmask, and default gateway
+/// - Admin password (user ID 2)
+///
+/// Returns an error if ipmitool is not available or if configuration fails.
+pub async fn configure_bmc(config: &BmcConfiguration, channel: u8) -> Result<()> {
+    let ipsrc = config.ip_address_source.to_lowercase();
+
+    info!(
+        "Configuring BMC on channel {} with IP source: {}",
+        channel, ipsrc
+    );
+
+    // Set IP address source (static or dhcp)
+    run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "ipsrc", &ipsrc]).await?;
+
+    // Only set static IP fields if using static configuration
+    if ipsrc == "static" {
+        // Require static IP fields
+        let ip_address = config.ip_address.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ip_address required for static BMC configuration"))?;
+        let netmask = config.netmask.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("netmask required for static BMC configuration"))?;
+        let gateway = config.gateway.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("gateway required for static BMC configuration"))?;
+
+        info!("Configuring static IP: {}", ip_address);
+
+        // Set IP address
+        run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "ipaddr", ip_address]).await?;
+
+        // Set netmask
+        run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "netmask", netmask]).await?;
+
+        // Set default gateway
+        run_ipmitool_command(channel, &["lan", "set", &channel.to_string(), "defgw", "ipaddr", gateway]).await?;
+    } else {
+        info!("BMC will obtain IP automatically via DHCP");
+    }
+
+    // Set admin password if provided (works for both static and DHCP)
+    if let Some(password) = &config.password {
+        // User ID 2 is typically the ADMIN user
+        run_ipmitool_command(channel, &["user", "set", "password", "2", password]).await?;
+        info!("BMC admin password updated");
+    }
+
+    info!("BMC configuration completed successfully");
+    Ok(())
+}
+
+/// Helper function to run ipmitool command
+async fn run_ipmitool_command(channel: u8, args: &[&str]) -> Result<()> {
+    debug!("Running ipmitool with args: {:?}", args);
+
+    let output = tokio::process::Command::new("ipmitool")
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| anyhow!("Failed to execute ipmitool: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "ipmitool command failed (channel {}): {}",
+            channel,
+            stderr
+        ));
+    }
+
+    Ok(())
+}
+
+/// Configure BMC for the current device
+///
+/// This action:
+/// 1. Gets the device UUID from SMBIOS
+/// 2. Fetches BMC configuration from rack-director
+/// 3. Applies the configuration using ipmitool
+/// 4. Reports success or failure to rack-director
+pub async fn bmc_configure(client: &RackDirector) -> Result<()> {
+    info!("Starting BMC configuration...");
+
+    // Get device UUID
+    let hardware_info = read_dmi().await?;
+    let uuid = hardware_info
+        .uuid
+        .as_ref()
+        .ok_or_else(|| anyhow!("Failed to determine device UUID from SMBIOS"))?;
+
+    info!("Device UUID: {}", uuid);
+
+    // Fetch BMC configuration from rack-director
+    info!("Fetching BMC configuration from rack-director...");
+    let bmc_config = match client.get_bmc_config(uuid).await {
+        Ok(config) => config,
+        Err(e) => {
+            let error_msg = format!("Failed to fetch BMC configuration: {}", e);
+            log::error!("{}", error_msg);
+            client.action_failed(uuid, &error_msg).await?;
+            return Err(e);
+        }
+    };
+
+    info!(
+        "Retrieved BMC configuration: IP source={}",
+        bmc_config.ip_address_source
+    );
+    if let Some(ip) = &bmc_config.ip_address {
+        info!("  IP address: {}", ip);
+    }
+
+    // Convert client BmcConfig to scan BmcConfiguration
+    let config = BmcConfiguration {
+        ip_address_source: bmc_config.ip_address_source,
+        ip_address: bmc_config.ip_address,
+        netmask: bmc_config.netmask,
+        gateway: bmc_config.gateway,
+        username: bmc_config.username,
+        password: bmc_config.password,
+    };
+
+    // Try configuring BMC on channels 1, 2, and 8
+    let mut last_error = None;
+    for channel in [1, 2, 8] {
+        info!("Attempting to configure BMC on channel {}", channel);
+        match configure_bmc(&config, channel).await {
+            Ok(()) => {
+                info!("BMC configured successfully on channel {}", channel);
+                client.action_success(uuid).await?;
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Failed to configure BMC on channel {}: {}", channel, e);
+                last_error = Some(e);
+            }
+        }
+    }
+
+    // All channels failed
+    let error_msg = format!(
+        "Failed to configure BMC on all channels: {}",
+        last_error.unwrap()
+    );
+    log::error!("{}", error_msg);
+    client.action_failed(uuid, &error_msg).await?;
+    Err(anyhow!(error_msg))
 }
 
 pub async fn device_scan(client: &RackDirector, scan_args: &DeviceScanArgs) -> Result<()> {
@@ -261,6 +542,21 @@ async fn perform_scan_and_upload(
                 "Network interface scan failed: {}, continuing with other attributes",
                 e
             );
+            // Non-fatal - continue with other hardware attributes
+        }
+    }
+
+    // Scan for BMC
+    match scan_bmc().await {
+        Ok(Some(bmc_info)) => {
+            info!("Discovered BMC: MAC={}", bmc_info.mac_address);
+            attributes.insert("bmc".to_string(), json!(bmc_info));
+        }
+        Ok(None) => {
+            info!("No BMC detected");
+        }
+        Err(e) => {
+            warn!("BMC scan failed: {}, continuing with other attributes", e);
             // Non-fatal - continue with other hardware attributes
         }
     }
@@ -918,5 +1214,144 @@ mod tests {
         assert_eq!(deserialized.interface_name, "eth1");
         assert_eq!(deserialized.ip_address, None);
         assert!(!deserialized.is_primary);
+    }
+
+    // Tests for BMC detection
+
+    /// Test parsing valid ipmitool output
+    #[test]
+    fn test_parse_ipmitool_output_valid() {
+        let output = r#"
+Set in Progress         : Set Complete
+Auth Type Support       : NONE MD2 MD5 PASSWORD
+IP Address Source       : DHCP Address
+IP Address              : 192.168.1.100
+Subnet Mask             : 255.255.255.0
+MAC Address             : 0c:c4:7a:02:11:fe
+SNMP Community String   : public
+"#;
+
+        let result = parse_ipmitool_output(output);
+        assert!(result.is_some());
+
+        let bmc = result.unwrap();
+        assert_eq!(bmc.mac_address, "0c:c4:7a:02:11:fe");
+        assert_eq!(bmc.ip_address, Some("192.168.1.100".to_string()));
+        assert_eq!(bmc.ip_address_source, "DHCP Address");
+    }
+
+    /// Test parsing ipmitool output with 0.0.0.0 IP (should be treated as None)
+    #[test]
+    fn test_parse_ipmitool_output_zero_ip() {
+        let output = r#"
+Set in Progress         : Set Complete
+IP Address Source       : DHCP Address
+IP Address              : 0.0.0.0
+Subnet Mask             : 0.0.0.0
+MAC Address             : 0c:c4:7a:02:11:fe
+"#;
+
+        let result = parse_ipmitool_output(output);
+        assert!(result.is_some());
+
+        let bmc = result.unwrap();
+        assert_eq!(bmc.mac_address, "0c:c4:7a:02:11:fe");
+        assert_eq!(bmc.ip_address, None);
+        assert_eq!(bmc.ip_address_source, "DHCP Address");
+    }
+
+    /// Test parsing ipmitool output with Static IP
+    #[test]
+    fn test_parse_ipmitool_output_static_ip() {
+        let output = r#"
+Set in Progress         : Set Complete
+IP Address Source       : Static Address
+IP Address              : 10.0.0.50
+Subnet Mask             : 255.255.255.0
+MAC Address             : aa:bb:cc:dd:ee:ff
+Default Gateway IP      : 10.0.0.1
+"#;
+
+        let result = parse_ipmitool_output(output);
+        assert!(result.is_some());
+
+        let bmc = result.unwrap();
+        assert_eq!(bmc.mac_address, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(bmc.ip_address, Some("10.0.0.50".to_string()));
+        assert_eq!(bmc.ip_address_source, "Static Address");
+    }
+
+    /// Test parsing ipmitool output missing MAC (should return None)
+    #[test]
+    fn test_parse_ipmitool_output_missing_mac() {
+        let output = r#"
+Set in Progress         : Set Complete
+IP Address Source       : DHCP Address
+IP Address              : 192.168.1.100
+Subnet Mask             : 255.255.255.0
+"#;
+
+        let result = parse_ipmitool_output(output);
+        assert!(result.is_none());
+    }
+
+    /// Test parsing ipmitool output missing IP source (should return None)
+    #[test]
+    fn test_parse_ipmitool_output_missing_ip_source() {
+        let output = r#"
+Set in Progress         : Set Complete
+IP Address              : 192.168.1.100
+Subnet Mask             : 255.255.255.0
+MAC Address             : 0c:c4:7a:02:11:fe
+"#;
+
+        let result = parse_ipmitool_output(output);
+        assert!(result.is_none());
+    }
+
+    /// Test parsing empty ipmitool output
+    #[test]
+    fn test_parse_ipmitool_output_empty() {
+        let output = "";
+        let result = parse_ipmitool_output(output);
+        assert!(result.is_none());
+    }
+
+    /// Test BmcInfo serialization
+    #[test]
+    fn test_bmc_info_serialization() {
+        let bmc = BmcInfo {
+            mac_address: "0c:c4:7a:02:11:fe".to_string(),
+            ip_address: Some("192.168.1.100".to_string()),
+            ip_address_source: "DHCP Address".to_string(),
+        };
+
+        let json = serde_json::to_string(&bmc).unwrap();
+        assert!(json.contains("0c:c4:7a:02:11:fe"));
+        assert!(json.contains("192.168.1.100"));
+        assert!(json.contains("DHCP Address"));
+
+        let deserialized: BmcInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.mac_address, "0c:c4:7a:02:11:fe");
+        assert_eq!(deserialized.ip_address, Some("192.168.1.100".to_string()));
+        assert_eq!(deserialized.ip_address_source, "DHCP Address");
+    }
+
+    /// Test BmcInfo with no IP address
+    #[test]
+    fn test_bmc_info_no_ip() {
+        let bmc = BmcInfo {
+            mac_address: "0c:c4:7a:02:11:fe".to_string(),
+            ip_address: None,
+            ip_address_source: "DHCP Address".to_string(),
+        };
+
+        let json = serde_json::to_string(&bmc).unwrap();
+        assert!(json.contains("0c:c4:7a:02:11:fe"));
+        assert!(json.contains("null"));
+        assert!(json.contains("DHCP Address"));
+
+        let deserialized: BmcInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.ip_address, None);
     }
 }

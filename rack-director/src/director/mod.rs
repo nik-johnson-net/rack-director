@@ -126,6 +126,23 @@ impl Director {
                     cmdline,
                 })
             }
+            "configure_bmc" => {
+                // Boot the agent image for BMC configuration
+                let kernel_url = format!("{}/cnc/agent-images/vmlinuz", &self.root_url);
+                let initramfs_url = format!("{}/cnc/agent-images/initramfs.img", &self.root_url);
+
+                // Pass the rack-director URL and action via kernel cmdline
+                let cmdline = format!(
+                    "rackdirector.url={}/cnc rackdirector.action=configure-bmc quiet",
+                    &self.root_url
+                );
+
+                Ok(BootTarget::NetBoot {
+                    ramdisk: initramfs_url,
+                    kernel: kernel_url,
+                    cmdline,
+                })
+            }
             "install_os" => {
                 // Get device
                 let device = self.get_device(uuid).await?;
@@ -414,8 +431,8 @@ impl Director {
         self.store.set_mac_address(uuid, mac).await
     }
 
-    pub async fn set_device_ip_address(&self, uuid: &str, ip: &str) -> anyhow::Result<()> {
-        self.store.set_ip_address(uuid, ip).await
+    pub async fn set_device_ip_address(&self, uuid: &str, ip: &str, mac: &str) -> anyhow::Result<()> {
+        self.store.set_ip_address(uuid, ip, mac).await
     }
 
     pub async fn get_network_interfaces(
@@ -473,6 +490,10 @@ impl Director {
 
     pub async fn delete_pending_device(&self, id: i64) -> anyhow::Result<()> {
         self.store.delete_pending_device(id).await
+    }
+
+    pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<String>> {
+        self.store.find_device_by_bmc_mac(mac).await
     }
 }
 
@@ -694,17 +715,18 @@ mod tests {
         assert_eq!(transition.from_state, DeviceLifecycle::New);
         assert_eq!(transition.to_state, DeviceLifecycle::Unprovisioned);
 
-        // Verify a discovery plan was created
+        // Verify a discovery plan was created with 2 actions
         let active_plan = director
             .get_active_plan_for_device(test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
-        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions.len(), 2);
         assert_eq!(plan.actions[0].action_type, "discover_hardware");
+        assert_eq!(plan.actions[1].action_type, "configure_bmc");
 
-        // Verify the device gets the right boot target for discovery
+        // Verify the device gets the right boot target for first action (discover_hardware)
         let boot_target = director.next_boot_target(test_uuid).await.unwrap();
         match boot_target {
             BootTarget::NetBoot {
@@ -715,11 +737,37 @@ mod tests {
                 assert!(kernel.contains("/cnc/agent-images/vmlinuz"));
                 assert!(ramdisk.contains("/cnc/agent-images/initramfs.img"));
                 assert!(cmdline.contains("rackdirector.url="));
+                assert!(cmdline.contains("device-scan"));
             }
             BootTarget::LocalDisk => panic!("Expected NetBoot, got LocalDisk"),
         }
 
-        // Simulate discovery completion
+        // Simulate discovery action completion
+        director.mark_action_success(test_uuid).await.unwrap();
+
+        // Verify second action (configure_bmc) is now current
+        let active_plan = director
+            .get_active_plan_for_device(test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.current_step, 1);
+
+        // Verify the device gets BMC config boot target for second action
+        let boot_target = director.next_boot_target(test_uuid).await.unwrap();
+        match boot_target {
+            BootTarget::NetBoot {
+                ramdisk: _,
+                kernel: _,
+                cmdline,
+            } => {
+                assert!(cmdline.contains("configure-bmc"));
+            }
+            BootTarget::LocalDisk => panic!("Expected NetBoot, got LocalDisk"),
+        }
+
+        // Simulate BMC configuration completion
         director.mark_action_success(test_uuid).await.unwrap();
 
         // Verify plan is now complete

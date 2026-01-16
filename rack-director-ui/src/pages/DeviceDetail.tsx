@@ -29,6 +29,7 @@ import {
   getStaticReservationByMac,
   makeLeaseStatic,
   getNetworks,
+  updateDeviceAttributes,
   type Device,
   type Role,
   type DeviceStatus,
@@ -38,6 +39,7 @@ import {
   type DeviceLifecycle,
   type StaticReservation,
   type DhcpNetwork,
+  type BmcConfig,
 } from "@/lib/client";
 import { ArrowLeft, CheckCircle, Clock, Pin } from "lucide-react";
 import {
@@ -81,6 +83,17 @@ function DeviceDetail() {
   const [staticReservations, setStaticReservations] = useState<Map<string, StaticReservation>>(new Map());
   const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
 
+  // BMC configuration state
+  const [bmcConfig, setBmcConfig] = useState<BmcConfig>({
+    ip_address: "",
+    netmask: "255.255.255.0",
+    gateway: "",
+    username: "ADMIN",
+    password: "",
+  });
+  const [savingBmc, setSavingBmc] = useState(false);
+  const [bmcConfigChanged, setBmcConfigChanged] = useState(false);
+
   useEffect(() => {
     if (!uuid) return;
 
@@ -123,6 +136,21 @@ function DeviceDetail() {
           }
 
           setStaticReservations(reservationsMap);
+        }
+
+        // Initialize BMC configuration from device attributes
+        if (deviceData.attributes?.bmc_config) {
+          setBmcConfig(deviceData.attributes.bmc_config);
+        } else if (deviceData.attributes?.bmc) {
+          // If BMC is discovered but no config exists, initialize with discovered IP
+          const network = networksData.find(n => n.id === deviceData.attributes.network_interfaces?.[0]?.network_id);
+          setBmcConfig({
+            ip_address: deviceData.attributes.bmc.ip_address || "",
+            netmask: "255.255.255.0",
+            gateway: network?.gateway || "",
+            username: "ADMIN",
+            password: "",
+          });
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load device data");
@@ -176,6 +204,32 @@ function DeviceDetail() {
       setError(err instanceof Error ? err.message : "Failed to transition device");
     } finally {
       setTransitioning(false);
+    }
+  };
+
+  const handleSaveBmcConfig = async () => {
+    if (!uuid || !device) return;
+
+    setSavingBmc(true);
+    setError(null);
+
+    try {
+      // Update device attributes with new BMC config
+      const updatedAttributes = {
+        ...device.attributes,
+        bmc_config: bmcConfig,
+      };
+
+      await updateDeviceAttributes(uuid, updatedAttributes);
+
+      // Refresh device data
+      const updatedDevice = await getDevice(uuid);
+      setDevice(updatedDevice);
+      setBmcConfigChanged(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save BMC configuration");
+    } finally {
+      setSavingBmc(false);
     }
   };
 
@@ -474,6 +528,114 @@ function DeviceDetail() {
           </CardContent>
         </Card>
       </div>
+
+      {/* BMC Configuration */}
+      {device.attributes?.bmc && (
+        <Card>
+          <CardHeader>
+            <CardTitle>BMC Configuration</CardTitle>
+            <CardDescription>
+              Baseboard Management Controller settings
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Discovered BMC Info */}
+            <div className="p-3 bg-gray-50 rounded border">
+              <div className="text-sm font-medium mb-2">Discovered BMC</div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <span className="text-gray-600">MAC Address:</span>
+                <span className="font-mono">{device.attributes.bmc.mac_address}</span>
+
+                <span className="text-gray-600">Current IP:</span>
+                <span className="font-mono">{device.attributes.bmc.ip_address || "Not assigned"}</span>
+
+                <span className="text-gray-600">IP Source:</span>
+                <Badge variant={device.attributes.bmc.ip_address_source.includes("DHCP") ? "outline" : "secondary"}>
+                  {device.attributes.bmc.ip_address_source}
+                </Badge>
+              </div>
+            </div>
+
+            {/* BMC Configuration Form */}
+            <div className="space-y-3">
+              <div className="text-sm font-medium">Static IP Configuration</div>
+
+              <div className="space-y-2">
+                <Label htmlFor="bmc-ip">IP Address</Label>
+                <Input
+                  id="bmc-ip"
+                  type="text"
+                  value={bmcConfig.ip_address}
+                  onChange={(e) => {
+                    setBmcConfig({ ...bmcConfig, ip_address: e.target.value });
+                    setBmcConfigChanged(true);
+                  }}
+                  placeholder="192.168.1.100"
+                  className="font-mono"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="bmc-netmask">Netmask</Label>
+                <Input
+                  id="bmc-netmask"
+                  type="text"
+                  value={bmcConfig.netmask}
+                  onChange={(e) => {
+                    setBmcConfig({ ...bmcConfig, netmask: e.target.value });
+                    setBmcConfigChanged(true);
+                  }}
+                  placeholder="255.255.255.0"
+                  className="font-mono"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="bmc-gateway">Gateway</Label>
+                <Input
+                  id="bmc-gateway"
+                  type="text"
+                  value={bmcConfig.gateway}
+                  onChange={(e) => {
+                    setBmcConfig({ ...bmcConfig, gateway: e.target.value });
+                    setBmcConfigChanged(true);
+                  }}
+                  placeholder="192.168.1.1"
+                  className="font-mono"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="bmc-password">Admin Password (optional)</Label>
+                <Input
+                  id="bmc-password"
+                  type="password"
+                  value={bmcConfig.password || ""}
+                  onChange={(e) => {
+                    setBmcConfig({ ...bmcConfig, password: e.target.value });
+                    setBmcConfigChanged(true);
+                  }}
+                  placeholder="Leave blank to keep current"
+                />
+              </div>
+
+              <Button
+                onClick={handleSaveBmcConfig}
+                disabled={savingBmc || !bmcConfigChanged}
+                className="w-full"
+              >
+                {savingBmc ? "Saving..." : "Save BMC Configuration"}
+              </Button>
+
+              {device.attributes.bmc_config && (
+                <div className="text-xs text-gray-500 text-center">
+                  BMC will be configured on next discovery cycle
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Lifecycle Management */}
       <Card>
