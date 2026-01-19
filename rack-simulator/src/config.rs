@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use crate::hardware_profiles::{self, HardwareConfig};
@@ -11,6 +12,15 @@ use crate::output::Output;
 pub struct Config {
     #[serde(default)]
     pub servers: HashMap<String, ServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BmcConfig {
+    pub source: String,
+    pub ip_address: Option<Ipv4Addr>,
+    pub netmask: Option<Ipv4Addr>,
+    pub gateway: Option<Ipv4Addr>,
+    pub mac_address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +36,8 @@ pub struct ServerConfig {
     pub hardware_profile: Option<String>,
     #[serde(default)]
     pub hardware: Option<HardwareConfig>,
+    #[serde(default)]
+    pub bmc: Option<BmcConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,14 +126,37 @@ impl Config {
             base_hardware
         };
 
+        let bmc = if let Some(bmc_config) = &server.bmc {
+            let mac = resolve_mac_bmc(bmc_config, name)?;
+            Some(ResolvedBMC {
+                source: bmc_config.source.clone(),
+                ip_address: bmc_config.ip_address,
+                ip_network: bmc_config.netmask,
+                gateway: bmc_config.gateway,
+                mac,
+            })
+        } else {
+            None
+        };
+
         Ok(ResolvedServer {
             name: name.to_string(),
             macs,
             uuid,
             architecture,
             hardware,
+            bmc,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedBMC {
+    pub source: String,
+    pub ip_address: Option<Ipv4Addr>,
+    pub ip_network: Option<Ipv4Addr>,
+    pub gateway: Option<Ipv4Addr>,
+    pub mac: [u8; 6],
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +166,7 @@ pub struct ResolvedServer {
     pub uuid: String,
     pub architecture: Architecture,
     pub hardware: HardwareConfig,
+    pub bmc: Option<ResolvedBMC>,
 }
 
 /// Resolve MAC addresses from ServerConfig
@@ -164,6 +200,18 @@ fn resolve_macs(server: &ServerConfig, server_name: &str) -> Result<Vec<[u8; 6]>
         .map(|idx| generate_mac(&format!("{}-nic{}", server_name, idx)))
         .collect();
     Ok(macs)
+}
+
+fn resolve_mac_bmc(bmc: &BmcConfig, server_name: &str) -> Result<[u8; 6]> {
+    if bmc.mac_address == "auto" {
+        Ok(generate_mac_bmc(server_name))
+    } else {
+        parse_mac(&bmc.mac_address)
+    }
+}
+
+fn generate_mac_bmc(server_name: &str) -> [u8; 6] {
+    generate_mac(&format!("{}-bmc", server_name))
 }
 
 fn resolve_uuid(value: &str, server_name: &str) -> Result<String> {
@@ -275,6 +323,7 @@ fn merge_hardware(base: &HardwareConfig, overrides: &HardwareConfig) -> Hardware
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_server(
     config_path: &Path,
     name: &str,
@@ -282,6 +331,11 @@ pub fn create_server(
     uuid: &str,
     arch: &str,
     profile: Option<&str>,
+    bmc_mac: Option<&str>,
+    bmc_source: &str,
+    bmc_ip_address: Option<&Ipv4Addr>,
+    bmc_netmask: Option<&Ipv4Addr>,
+    bmc_gateway: Option<&Ipv4Addr>,
 ) -> Result<()> {
     Architecture::from_str(arch)?;
 
@@ -290,6 +344,24 @@ pub fn create_server(
     if config.servers.contains_key(name) {
         return Err(anyhow!("Server '{}' already exists", name));
     }
+
+    let bmc = if let Some(bmc_mac) = bmc_mac {
+        if bmc_source == "Static" && (bmc_ip_address.is_none() || bmc_netmask.is_none()) {
+            return Err(anyhow!(
+                "bmc-ip-address and bmc-netmask must be defined if bmc-source is 'Static'"
+            ));
+        }
+
+        Some(BmcConfig {
+            source: bmc_source.to_string(),
+            ip_address: bmc_ip_address.cloned(),
+            netmask: bmc_netmask.cloned(),
+            mac_address: bmc_mac.to_string(),
+            gateway: bmc_gateway.cloned(),
+        })
+    } else {
+        None
+    };
 
     config.servers.insert(
         name.to_string(),
@@ -300,6 +372,7 @@ pub fn create_server(
             architecture: arch.to_string(),
             hardware_profile: profile.map(String::from),
             hardware: None,
+            bmc,
         },
     );
 
@@ -389,6 +462,32 @@ pub fn show_server(config: &Config, name: &str, output: &Output) -> Result<()> {
         );
     }
 
+    if let Some(bmc) = resolved.bmc {
+        output.detail("BMC MAC", &crate::server::format_mac(&bmc.mac));
+        output.detail("BMC IP Source", &bmc.source);
+        output.detail(
+            "BMC IP Address",
+            &bmc.ip_address
+                .as_ref()
+                .unwrap_or(&Ipv4Addr::new(0, 0, 0, 0))
+                .to_string(),
+        );
+        output.detail(
+            "BMC IP Netmask",
+            &bmc.ip_network
+                .as_ref()
+                .unwrap_or(&Ipv4Addr::new(0, 0, 0, 0))
+                .to_string(),
+        );
+        output.detail(
+            "BMC IP Gateway",
+            &bmc.gateway
+                .as_ref()
+                .unwrap_or(&Ipv4Addr::new(0, 0, 0, 0))
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -464,6 +563,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         let macs = resolve_macs(&server, "test-server").unwrap();
@@ -482,6 +582,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         let macs = resolve_macs(&server, "test-server").unwrap();
@@ -499,6 +600,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         let macs = resolve_macs(&server, "test-server").unwrap();
@@ -519,6 +621,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         let macs = resolve_macs(&server, "test-server").unwrap();
@@ -542,6 +645,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         // Get MACs for two "instances" with the same name
@@ -566,6 +670,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         let macs = resolve_macs(&server, "test-server").unwrap();
@@ -599,6 +704,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         let macs = resolve_macs(&server, "test-server").unwrap();
@@ -625,6 +731,7 @@ mod tests {
             architecture: "x64-uefi".to_string(),
             hardware_profile: None,
             hardware: None,
+            bmc: None,
         };
 
         let macs = resolve_macs(&server, "test-server").unwrap();

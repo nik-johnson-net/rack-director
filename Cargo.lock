@@ -2443,6 +2443,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "common",
  "dhcproto",
  "handlebars",
  "log",

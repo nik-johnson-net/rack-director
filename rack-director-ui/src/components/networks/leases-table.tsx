@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
-import type { DhcpLease, DhcpNetwork, StaticReservation } from "@/lib/client";
-import { createPendingDevice, makeLeaseStatic } from "@/lib/client";
+import type { DhcpLease, DhcpNetwork, StaticReservation, Device } from "@/lib/client";
+import { createPendingDevice, makeLeaseStatic, getDevicesIndex } from "@/lib/client";
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { Button } from "../ui/button";
@@ -49,6 +49,30 @@ export default function LeasesTable({ network, networkId, leases, onLeasesChange
   const [customIp, setCustomIp] = useState("");
   const [hostname, setHostname] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Devices state for BMC lookup
+  const [devices, setDevices] = useState<Device[]>([]);
+
+  // Fetch all devices to identify BMC MACs
+  useEffect(() => {
+    const fetchDevices = async () => {
+      try {
+        const devicesIndex = await getDevicesIndex();
+        setDevices(devicesIndex.devices);
+      } catch (err) {
+        console.error("Failed to fetch devices for BMC lookup:", err);
+      }
+    };
+
+    fetchDevices();
+  }, []);
+
+  // Helper function to find device by BMC MAC
+  const findDeviceByBmcMac = (mac: string): Device | undefined => {
+    return devices.find(device =>
+      device.attributes?.bmc?.mac_address?.toLowerCase() === mac.toLowerCase()
+    );
+  };
 
   const handleCreateDevice = async (lease: DhcpLease) => {
     setError(null);
@@ -135,9 +159,21 @@ export default function LeasesTable({ network, networkId, leases, onLeasesChange
     {
       accessorKey: "mac_address",
       header: "MAC Address",
-      cell: ({ row }) => (
-        <span className="font-mono text-xs">{row.getValue("mac_address")}</span>
-      ),
+      cell: ({ row }) => {
+        const mac = row.getValue("mac_address") as string;
+        const bmcDevice = findDeviceByBmcMac(mac);
+
+        return (
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs">{mac}</span>
+            {bmcDevice && (
+              <Badge variant="secondary" className="text-xs">
+                BMC
+              </Badge>
+            )}
+          </div>
+        );
+      },
     },
     {
       accessorKey: "ip_address",
@@ -150,7 +186,25 @@ export default function LeasesTable({ network, networkId, leases, onLeasesChange
       accessorKey: "device_uuid",
       header: "Device UUID",
       cell: ({ row }) => {
-        const deviceUuid = row.getValue("device_uuid") as string | undefined;
+        const lease = row.original;
+        const deviceUuid = lease.device_uuid;
+        const bmcDevice = findDeviceByBmcMac(lease.mac_address);
+
+        // If this MAC is a BMC, show the device it belongs to
+        if (bmcDevice) {
+          return (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => navigate(`/devices/${bmcDevice.uuid}`)}
+                className="font-mono text-xs text-primary hover:underline"
+              >
+                {bmcDevice.uuid}
+              </button>
+            </div>
+          );
+        }
+
+        // Otherwise show the normal device UUID if present
         if (deviceUuid) {
           return (
             <button
@@ -161,6 +215,7 @@ export default function LeasesTable({ network, networkId, leases, onLeasesChange
             </button>
           );
         }
+
         return (
           <Badge variant="secondary" className="text-xs">
             No Device
@@ -185,10 +240,21 @@ export default function LeasesTable({ network, networkId, leases, onLeasesChange
       cell: ({ row }) => {
         const lease = row.original;
         const deviceUuid = lease.device_uuid;
+        const bmcDevice = findDeviceByBmcMac(lease.mac_address);
 
         return (
           <div className="flex gap-2">
-            {deviceUuid ? (
+            {bmcDevice ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate(`/devices/${bmcDevice.uuid}`)}
+                aria-label="View device"
+              >
+                <Eye className="h-4 w-4 mr-2" />
+                View Device
+              </Button>
+            ) : deviceUuid ? (
               <Button
                 variant="outline"
                 size="sm"

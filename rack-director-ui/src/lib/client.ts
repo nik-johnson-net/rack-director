@@ -23,9 +23,10 @@ export type BmcInfo = {
 }
 
 export type BmcConfig = {
-  ip_address: string;
-  netmask: string;
-  gateway: string;
+  ip_address_source: string; // "static" or "dhcp"
+  ip_address?: string;
+  netmask?: string;
+  gateway?: string;
   username?: string;
   password?: string;
 }

@@ -1,5 +1,7 @@
+use std::net::Ipv4Addr;
+
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::ConnectionConfig;
 use crate::hardware_profiles::HardwareConfig;
@@ -138,7 +140,26 @@ fn build_attributes(
         );
     }
 
+    // Detect BMC
+    if let Some(bmc) = build_bmc(hardware, state) {
+        attrs.insert("bmc".to_owned(), bmc);
+    }
+
     attrs
+}
+
+fn build_bmc(_hardware: &HardwareConfig, state: &ServerState) -> Option<Value> {
+    if let Some(bmc) = &state.bmc {
+        let map = json!({
+            "mac_address": crate::server::format_mac(&bmc.mac_address),
+            "ip_address_source": bmc.ip_source,
+            "ip_address": bmc.allocated_ip.as_ref().unwrap_or(&Ipv4Addr::new(0, 0, 0 ,0)),
+            "ip_netmask": bmc.netmask.as_ref().unwrap_or(&Ipv4Addr::new(0, 0, 0, 0)),
+            "ip_gateway": bmc.gateway.as_ref().unwrap_or(&Ipv4Addr::new(0, 0, 0, 0)),
+        });
+        return Some(map);
+    }
+    None
 }
 
 fn generate_serial(seed: &str) -> String {
@@ -157,7 +178,7 @@ fn simple_hash(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Architecture, ResolvedServer};
+    use crate::config::{Architecture, ResolvedBMC, ResolvedServer};
     use crate::hardware_profiles::HardwareConfig;
 
     #[test]
@@ -168,6 +189,13 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: Architecture::X64Uefi,
             hardware: HardwareConfig::default(),
+            bmc: Some(ResolvedBMC {
+                mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0xFF],
+                source: "DHCP".to_string(),
+                ip_address: None,
+                ip_network: None,
+                gateway: None,
+            }),
         };
         let mut state = ServerState::new("test", &config);
         state.allocated_ips[0] = Some("192.168.1.100".parse().unwrap());
@@ -199,6 +227,13 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: Architecture::X64Uefi,
             hardware: HardwareConfig::default(),
+            bmc: Some(ResolvedBMC {
+                mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0xFF],
+                source: "DHCP".to_string(),
+                ip_address: None,
+                ip_network: None,
+                gateway: None,
+            }),
         };
         let mut state = ServerState::new("test", &config);
         state.allocated_ips[0] = Some("192.168.1.100".parse().unwrap());
@@ -237,6 +272,13 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: Architecture::X64Uefi,
             hardware: HardwareConfig::default(),
+            bmc: Some(ResolvedBMC {
+                mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0xFF],
+                source: "DHCP".to_string(),
+                ip_address: None,
+                ip_network: None,
+                gateway: None,
+            }),
         };
         let state = ServerState::new("test", &config);
 

@@ -8,6 +8,15 @@ use crate::config::{Architecture, ResolvedServer};
 use crate::hardware_profiles::HardwareConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BmcState {
+    pub mac_address: [u8; 6],
+    pub allocated_ip: Option<Ipv4Addr>,
+    pub netmask: Option<Ipv4Addr>,
+    pub gateway: Option<Ipv4Addr>,
+    pub ip_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerState {
     pub server_name: String,
     // Support both old single MAC and new multiple MACs for backward compatibility
@@ -32,6 +41,9 @@ pub struct ServerState {
     pub xid: Option<u32>,
     #[serde(default)]
     pub current_nic_index: usize,
+
+    #[serde(default)]
+    pub bmc: Option<BmcState>,
 }
 
 impl ServerState {
@@ -64,6 +76,18 @@ impl ServerState {
                 state.allocated_ips.resize(state.mac_addresses.len(), None);
             }
 
+            if let Some(bmc) = &config.bmc {
+                state.bmc = Some(BmcState {
+                    mac_address: bmc.mac,
+                    allocated_ip: bmc.ip_address,
+                    netmask: bmc.ip_network,
+                    gateway: None,
+                    ip_source: bmc.source.clone(),
+                });
+            } else {
+                state.bmc = None;
+            }
+
             Ok(state)
         } else {
             Ok(Self::new(name, config))
@@ -72,6 +96,14 @@ impl ServerState {
 
     pub fn new(name: &str, config: &ResolvedServer) -> Self {
         let mac_count = config.macs.len();
+        let bmc = config.bmc.as_ref().map(|bmc| BmcState {
+            mac_address: bmc.mac,
+            allocated_ip: bmc.ip_address,
+            netmask: bmc.ip_network,
+            gateway: None,
+            ip_source: bmc.source.clone(),
+        });
+
         Self {
             server_name: name.to_string(),
             mac_address: None, // Deprecated field
@@ -86,6 +118,7 @@ impl ServerState {
             boot_script_url: None,
             xid: None,
             current_nic_index: 0,
+            bmc,
         }
     }
 
@@ -180,6 +213,7 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: crate::config::Architecture::X64Uefi,
             hardware: crate::hardware_profiles::HardwareConfig::default(),
+            bmc: None,
         };
         let state = ServerState::new("test", &config);
         assert_eq!(state.mac_string(Some(0)), "52:54:00:12:34:56");
@@ -197,6 +231,7 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: crate::config::Architecture::X64Uefi,
             hardware: crate::hardware_profiles::HardwareConfig::default(),
+            bmc: None,
         };
         let state = ServerState::new("test", &config);
         assert_eq!(state.mac_string(Some(0)), "52:54:00:12:34:56");
@@ -218,6 +253,7 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: crate::config::Architecture::X64Uefi,
             hardware: crate::hardware_profiles::HardwareConfig::default(),
+            bmc: None,
         };
         let mut state = ServerState::new("test", &config);
         state.allocated_ips[0] = Some("192.168.1.100".parse().unwrap());

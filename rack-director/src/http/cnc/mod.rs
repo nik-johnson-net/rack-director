@@ -11,6 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::Host;
+use common::Ipv4Subnet;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -333,12 +334,14 @@ async fn get_device_network_info(
         let network = state.dhcp_store.get_network(lease.id).await?;
         let dns_servers = network.dns_servers;
 
+        let subnet: Ipv4Subnet = network.subnet.parse().map_err(anyhow::Error::new)?;
+
         Ok(crate::templates::NetworkInfo {
             mac_address: lease.mac_address,
             ip_address: lease.ip_address,
             gateway: network.gateway,
             dns_servers,
-            netmask: network.subnet, // TODO: Calculate from subnet
+            netmask: subnet.netmask().to_string(),
         })
     } else {
         Err(Error::NotFound("Device has no DHCP lease".to_string()))

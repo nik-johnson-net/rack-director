@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+// TODO: Support BMCs in Hardware Profiles
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HardwareConfig {
     pub manufacturer: Option<String>,

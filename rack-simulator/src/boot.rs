@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use anyhow::{Result, anyhow};
 
 use crate::ConnectionConfig;
@@ -143,12 +145,36 @@ pub async fn full_boot(
     output.detail("UUID", &server_config.uuid);
     output.detail("Architecture", server_config.architecture.as_str());
 
+    if let Some(bmc) = &server_config.bmc {
+        output.detail("BMC MAC", &crate::server::format_mac(&bmc.mac));
+        output.detail("BMC Source", &bmc.source);
+        output.detail(
+            "BMC IP Address",
+            &bmc.ip_address
+                .as_ref()
+                .unwrap_or(&Ipv4Addr::from_bits(0x00))
+                .to_string(),
+        );
+        output.detail(
+            "BMC IP Netmask",
+            &bmc.ip_network
+                .as_ref()
+                .unwrap_or(&Ipv4Addr::from_bits(0x00))
+                .to_string(),
+        );
+    }
+
     let mut state = ServerState::new(&server_config.name, server_config);
     let http = HttpClient::new(conn);
 
     let mut sanboot_count = 0;
     let mut reboot_count = 0;
     const MAX_REBOOTS: u32 = 10;
+
+    // Pretend the BMC boots first
+    if server_config.bmc.is_some() {
+        dhcp::discover(conn, &mut state, dhcp::DiscoverType::Bmc, output)?;
+    }
 
     loop {
         if reboot_count >= MAX_REBOOTS {

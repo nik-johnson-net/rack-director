@@ -114,6 +114,26 @@ enum ConfigCommands {
         /// Hardware profile: dell-r640, dell-r750, hp-dl380, supermicro-x12, generic
         #[arg(long)]
         profile: Option<String>,
+
+        /// BMC MAC address (or "auto" to generate)
+        #[arg(long)]
+        bmc_mac: Option<String>,
+
+        /// BMC Source (DHCP or Static)
+        #[arg(long, default_value = "DHCP")]
+        bmc_source: String,
+
+        /// Required if BMC Source is Static
+        #[arg(long)]
+        bmc_ip_address: Option<Ipv4Addr>,
+
+        /// Required if BMC Source is Static
+        #[arg(long)]
+        bmc_netmask: Option<Ipv4Addr>,
+
+        /// Required if BMC Source is Static
+        #[arg(long)]
+        bmc_gateway: Option<Ipv4Addr>,
     },
 
     /// Remove a server from config
@@ -171,7 +191,12 @@ async fn main() -> Result<()> {
             let server_config = config.get_server(&server)?;
             let mut state = ServerState::load_or_create(&server, &server_config)?;
             // Use NIC 0 for individual command
-            dhcp::discover(&conn, &mut state, 0, &output)?;
+            dhcp::discover(
+                &conn,
+                &mut state,
+                dhcp::DiscoverType::Nic { index: 0 },
+                &output,
+            )?;
             state.save()?;
         }
 
@@ -214,8 +239,25 @@ async fn main() -> Result<()> {
                 uuid,
                 arch,
                 profile,
+                bmc_mac,
+                bmc_source,
+                bmc_ip_address,
+                bmc_netmask,
+                bmc_gateway,
             } => {
-                config::create_server(&config_path, &name, &mac, &uuid, &arch, profile.as_deref())?;
+                config::create_server(
+                    &config_path,
+                    &name,
+                    &mac,
+                    &uuid,
+                    &arch,
+                    profile.as_deref(),
+                    bmc_mac.as_deref(),
+                    &bmc_source,
+                    bmc_ip_address.as_ref(),
+                    bmc_netmask.as_ref(),
+                    bmc_gateway.as_ref(),
+                )?;
                 output.success(&format!("Created server '{}'", name));
             }
 

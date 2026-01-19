@@ -6,24 +6,51 @@ use dhcproto::{
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use crate::ConnectionConfig;
 use crate::output::Output;
 use crate::server::ServerState;
+use crate::{ConnectionConfig, server::format_mac};
+
+pub enum DiscoverType {
+    Nic { index: usize },
+    Bmc,
+}
 
 /// Discover an IP address for a specific NIC
 pub fn discover(
     conn: &ConnectionConfig,
     state: &mut ServerState,
-    nic_index: usize,
+    kind: DiscoverType,
     output: &Output,
 ) -> Result<()> {
-    if nic_index >= state.mac_addresses.len() {
-        return Err(anyhow!("Invalid NIC index: {}", nic_index));
-    }
+    let mac;
+    let mac_string;
+    let arch;
 
-    output.step(&format!("DHCP DISCOVER (NIC {})", nic_index));
-    output.detail("MAC", &state.mac_string(Some(nic_index)));
-    output.detail("Architecture", &state.architecture);
+    match kind {
+        DiscoverType::Nic { index } => {
+            if index >= state.mac_addresses.len() {
+                return Err(anyhow!("Invalid NIC index: {}", index));
+            }
+
+            output.step(&format!("DHCP DISCOVER (NIC {})", index));
+            mac = &state.mac_addresses[index];
+            mac_string = state.mac_string(Some(index));
+            arch = state.architecture.as_str();
+        }
+        DiscoverType::Bmc => {
+            let bmc = match &state.bmc {
+                Some(bmc) => bmc,
+                None => return Err(anyhow!("Server does not have a BMC")),
+            };
+            output.step("DHCP DISCOVER (BMC)");
+            mac = &bmc.mac_address;
+            mac_string = format_mac(mac);
+            arch = "aarm";
+        }
+    };
+
+    output.detail("MAC", &mac_string);
+    output.detail("Architecture", arch);
 
     let socket = create_socket(conn.dhcp_port)?;
     let xid = generate_xid();
@@ -34,7 +61,7 @@ pub fn discover(
     let mut msg = Message::default();
     msg.set_xid(xid)
         .set_flags(Flags::default().set_broadcast())
-        .set_chaddr(&state.mac_addresses[nic_index]);
+        .set_chaddr(mac);
 
     msg.opts_mut()
         .insert(DhcpOption::MessageType(MessageType::Discover));
@@ -80,18 +107,25 @@ pub fn discover(
     output.detail("Server IP", &server_ip.to_string());
 
     // Store IP for this NIC
-    state.allocated_ips[nic_index] = Some(offered_ip);
-
-    // Also store in legacy fields for backward compatibility (use first NIC)
-    if nic_index == 0 {
-        state.allocated_ip = Some(offered_ip);
-        state.tftp_server = Some(server_ip);
-    }
-
-    output.success(&format!(
-        "DHCP DISCOVER complete for NIC {}: offered {}",
-        nic_index, offered_ip
-    ));
+    match kind {
+        DiscoverType::Nic { index } => {
+            state.allocated_ips[index] = Some(offered_ip);
+            output.success(&format!(
+                "DHCP DISCOVER complete for NIC {}: offered {}",
+                index, offered_ip
+            ));
+        }
+        DiscoverType::Bmc => match &mut state.bmc {
+            Some(bmc) => {
+                bmc.allocated_ip = Some(offered_ip);
+                output.success(&format!(
+                    "DHCP DISCOVER complete for NIC BMC: offered {}",
+                    offered_ip
+                ));
+            }
+            None => unreachable!(),
+        },
+    };
 
     Ok(())
 }
@@ -175,7 +209,7 @@ fn try_nic_with_timeout(
     let timeout = Duration::from_secs(10);
 
     // Try discover - if it times out or fails, return error
-    discover(conn, state, nic_index, output)?;
+    discover(conn, state, DiscoverType::Nic { index: nic_index }, output)?;
 
     // Check if we've exceeded our 10-second budget
     if start.elapsed() >= timeout {

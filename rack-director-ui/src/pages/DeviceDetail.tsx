@@ -42,6 +42,7 @@ import {
   type BmcConfig,
 } from "@/lib/client";
 import { ArrowLeft, CheckCircle, Clock, Pin } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -84,7 +85,9 @@ function DeviceDetail() {
   const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
 
   // BMC configuration state
+  const [bmcMode, setBmcMode] = useState<"dhcp" | "static">("dhcp");
   const [bmcConfig, setBmcConfig] = useState<BmcConfig>({
+    ip_address_source: "dhcp", // default to DHCP
     ip_address: "",
     netmask: "255.255.255.0",
     gateway: "",
@@ -140,11 +143,17 @@ function DeviceDetail() {
 
         // Initialize BMC configuration from device attributes
         if (deviceData.attributes?.bmc_config) {
+          // Use bmc_config if it exists
           setBmcConfig(deviceData.attributes.bmc_config);
+          setBmcMode(deviceData.attributes.bmc_config.ip_address_source === "static" ? "static" : "dhcp");
         } else if (deviceData.attributes?.bmc) {
-          // If BMC is discovered but no config exists, initialize with discovered IP
+          // If BMC is discovered but no config exists, create default config
+          const isDhcp = deviceData.attributes.bmc.ip_address_source.includes("DHCP");
+          setBmcMode(isDhcp ? "dhcp" : "static");
+
           const network = networksData.find(n => n.id === deviceData.attributes.network_interfaces?.[0]?.network_id);
           setBmcConfig({
+            ip_address_source: isDhcp ? "dhcp" : "static",
             ip_address: deviceData.attributes.bmc.ip_address || "",
             netmask: "255.255.255.0",
             gateway: network?.gateway || "",
@@ -215,9 +224,31 @@ function DeviceDetail() {
 
     try {
       // Update device attributes with new BMC config
+      // Always save a bmc_config object with ip_address_source
+      let configToSave: BmcConfig;
+
+      if (bmcMode === "dhcp") {
+        // DHCP mode: save only ip_address_source, username, and password
+        configToSave = {
+          ip_address_source: "dhcp",
+          username: bmcConfig.username,
+          password: bmcConfig.password,
+        };
+      } else {
+        // Static mode: save all fields
+        configToSave = {
+          ip_address_source: "static",
+          ip_address: bmcConfig.ip_address,
+          netmask: bmcConfig.netmask,
+          gateway: bmcConfig.gateway,
+          username: bmcConfig.username,
+          password: bmcConfig.password,
+        };
+      }
+
       const updatedAttributes = {
         ...device.attributes,
-        bmc_config: bmcConfig,
+        bmc_config: configToSave,
       };
 
       await updateDeviceAttributes(uuid, updatedAttributes);
@@ -540,99 +571,144 @@ function DeviceDetail() {
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Discovered BMC Info */}
-            <div className="p-3 bg-gray-50 rounded border">
+            <div className="p-3 bg-muted rounded-md border">
               <div className="text-sm font-medium mb-2">Discovered BMC</div>
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <span className="text-gray-600">MAC Address:</span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <span className="text-muted-foreground">MAC Address:</span>
                 <span className="font-mono">{device.attributes.bmc.mac_address}</span>
 
-                <span className="text-gray-600">Current IP:</span>
+                <span className="text-muted-foreground">Current IP:</span>
                 <span className="font-mono">{device.attributes.bmc.ip_address || "Not assigned"}</span>
 
-                <span className="text-gray-600">IP Source:</span>
+                <span className="text-muted-foreground">IP Source:</span>
                 <Badge variant={device.attributes.bmc.ip_address_source.includes("DHCP") ? "outline" : "secondary"}>
                   {device.attributes.bmc.ip_address_source}
                 </Badge>
               </div>
             </div>
 
-            {/* BMC Configuration Form */}
-            <div className="space-y-3">
-              <div className="text-sm font-medium">Static IP Configuration</div>
-
-              <div className="space-y-2">
-                <Label htmlFor="bmc-ip">IP Address</Label>
-                <Input
-                  id="bmc-ip"
-                  type="text"
-                  value={bmcConfig.ip_address}
-                  onChange={(e) => {
-                    setBmcConfig({ ...bmcConfig, ip_address: e.target.value });
-                    setBmcConfigChanged(true);
-                  }}
-                  placeholder="192.168.1.100"
-                  className="font-mono"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="bmc-netmask">Netmask</Label>
-                <Input
-                  id="bmc-netmask"
-                  type="text"
-                  value={bmcConfig.netmask}
-                  onChange={(e) => {
-                    setBmcConfig({ ...bmcConfig, netmask: e.target.value });
-                    setBmcConfigChanged(true);
-                  }}
-                  placeholder="255.255.255.0"
-                  className="font-mono"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="bmc-gateway">Gateway</Label>
-                <Input
-                  id="bmc-gateway"
-                  type="text"
-                  value={bmcConfig.gateway}
-                  onChange={(e) => {
-                    setBmcConfig({ ...bmcConfig, gateway: e.target.value });
-                    setBmcConfigChanged(true);
-                  }}
-                  placeholder="192.168.1.1"
-                  className="font-mono"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="bmc-password">Admin Password (optional)</Label>
-                <Input
-                  id="bmc-password"
-                  type="password"
-                  value={bmcConfig.password || ""}
-                  onChange={(e) => {
-                    setBmcConfig({ ...bmcConfig, password: e.target.value });
-                    setBmcConfigChanged(true);
-                  }}
-                  placeholder="Leave blank to keep current"
-                />
-              </div>
-
-              <Button
-                onClick={handleSaveBmcConfig}
-                disabled={savingBmc || !bmcConfigChanged}
-                className="w-full"
-              >
-                {savingBmc ? "Saving..." : "Save BMC Configuration"}
-              </Button>
-
-              {device.attributes.bmc_config && (
-                <div className="text-xs text-gray-500 text-center">
-                  BMC will be configured on next discovery cycle
+            {/* Pending Configuration Indicator */}
+            {device.attributes.bmc_config &&
+             device.attributes.bmc.ip_address_source &&
+             ((device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "static") ||
+              (!device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "dhcp")) && (
+              <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                <div className="flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-yellow-700" />
+                  <div className="text-sm text-yellow-800">
+                    <strong>Configuration Pending:</strong> BMC is currently using{" "}
+                    <strong>{device.attributes.bmc.ip_address_source.includes("DHCP") ? "DHCP" : "Static IP"}</strong>,
+                    but configured for{" "}
+                    <strong>{device.attributes.bmc_config.ip_address_source === "dhcp" ? "DHCP" : "Static IP"}</strong>.
+                    Changes will be applied on next discovery cycle.
+                  </div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+
+            {/* BMC Configuration Mode Selector */}
+            <Tabs value={bmcMode} onValueChange={(value) => {
+              setBmcMode(value as "dhcp" | "static");
+              setBmcConfigChanged(true);
+            }}>
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="dhcp">DHCP</TabsTrigger>
+                <TabsTrigger value="static">Static IP</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="dhcp" className="space-y-4">
+                <div className="p-4 bg-muted rounded-md text-center">
+                  <p className="text-sm text-muted-foreground">
+                    BMC will use DHCP to obtain its IP address automatically.
+                  </p>
+                </div>
+
+                <Button
+                  onClick={handleSaveBmcConfig}
+                  disabled={savingBmc || !bmcConfigChanged}
+                  className="w-full"
+                >
+                  {savingBmc ? "Saving..." : "Save BMC Configuration"}
+                </Button>
+              </TabsContent>
+
+              <TabsContent value="static" className="space-y-4">
+                <div className="space-y-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="bmc-ip">IP Address</Label>
+                    <Input
+                      id="bmc-ip"
+                      type="text"
+                      value={bmcConfig.ip_address}
+                      onChange={(e) => {
+                        setBmcConfig({ ...bmcConfig, ip_address: e.target.value });
+                        setBmcConfigChanged(true);
+                      }}
+                      placeholder="e.g., 192.168.1.100"
+                      className="font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="bmc-netmask">Netmask</Label>
+                    <Input
+                      id="bmc-netmask"
+                      type="text"
+                      value={bmcConfig.netmask}
+                      onChange={(e) => {
+                        setBmcConfig({ ...bmcConfig, netmask: e.target.value });
+                        setBmcConfigChanged(true);
+                      }}
+                      placeholder="e.g., 255.255.255.0"
+                      className="font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="bmc-gateway">Gateway</Label>
+                    <Input
+                      id="bmc-gateway"
+                      type="text"
+                      value={bmcConfig.gateway}
+                      onChange={(e) => {
+                        setBmcConfig({ ...bmcConfig, gateway: e.target.value });
+                        setBmcConfigChanged(true);
+                      }}
+                      placeholder="e.g., 192.168.1.1"
+                      className="font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="bmc-password">Admin Password (optional)</Label>
+                    <Input
+                      id="bmc-password"
+                      type="password"
+                      value={bmcConfig.password || ""}
+                      onChange={(e) => {
+                        setBmcConfig({ ...bmcConfig, password: e.target.value });
+                        setBmcConfigChanged(true);
+                      }}
+                      placeholder="Leave blank to keep current"
+                    />
+                  </div>
+
+                  <Button
+                    onClick={handleSaveBmcConfig}
+                    disabled={savingBmc || !bmcConfigChanged}
+                    className="w-full"
+                  >
+                    {savingBmc ? "Saving..." : "Save BMC Configuration"}
+                  </Button>
+
+                  {device.attributes.bmc_config && (
+                    <div className="text-xs text-muted-foreground text-center">
+                      BMC will be configured on next discovery cycle
+                    </div>
+                  )}
+                </div>
+              </TabsContent>
+            </Tabs>
           </CardContent>
         </Card>
       )}
