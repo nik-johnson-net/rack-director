@@ -56,18 +56,12 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
     .await??;
 
     // VALIDATION: TFTP download - Verify we got the bootloader content
-    assert!(
-        !bootfile_content.is_empty(),
-        "TFTP download should return non-empty bootfile"
-    );
+    let real_contents_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tftp/undionly.kpxe");
+    let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
-        bootfile_content.len(),
-        51,
-        "TFTP bootfile should be 51 bytes (our mock undionly.kpxe)"
-    );
-    assert!(
-        bootfile_content.starts_with(b"MOCK_IPXE_BIOS"),
-        "TFTP bootfile should start with 'MOCK_IPXE_BIOS' (our test fixture)"
+        bootfile_content, real_contents,
+        "TFTP downloads the correct file"
     );
 
     // Step 3: Second DHCP exchange (iPXE requesting boot script URL)
@@ -182,18 +176,12 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
     .await??;
 
     // VALIDATION: TFTP download - Verify we got the UEFI bootloader content
-    assert!(
-        !bootfile_content.is_empty(),
-        "TFTP download should return non-empty bootfile"
-    );
+    let real_contents_path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tftp/ipxe.efi");
+    let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
-        bootfile_content.len(),
-        182,
-        "TFTP bootfile should be 182 bytes (our mock ipxe.efi)"
-    );
-    assert!(
-        bootfile_content.starts_with(b"Mock iPXE EFI"),
-        "TFTP bootfile should start with 'Mock iPXE EFI' (our test fixture)"
+        bootfile_content, real_contents,
+        "TFTP downloads the correct file"
     );
 
     // Step 3: Second DHCP exchange (iPXE requesting boot script URL)
@@ -306,18 +294,12 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     .await??;
 
     // VALIDATION: TFTP download - Verify we got the ARM64 UEFI bootloader content
-    assert!(
-        !bootfile_content.is_empty(),
-        "TFTP download should return non-empty bootfile"
-    );
+    let real_contents_path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tftp/ipxe.efi");
+    let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
-        bootfile_content.len(),
-        182,
-        "TFTP bootfile should be 182 bytes (our mock ipxe.efi)"
-    );
-    assert!(
-        bootfile_content.starts_with(b"Mock iPXE EFI"),
-        "TFTP bootfile should start with 'Mock iPXE EFI' (our test fixture)"
+        bootfile_content, real_contents,
+        "TFTP downloads the correct file"
     );
 
     // Step 3: Second DHCP exchange (iPXE requesting boot script URL)
