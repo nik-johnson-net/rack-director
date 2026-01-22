@@ -1,9 +1,10 @@
 mod allocator;
 mod boot_config;
+mod device_resolution;
 mod handler;
 mod ip_discovery;
+pub mod message_builder;
 mod store;
-pub mod validation;
 
 use anyhow::Result;
 use rusqlite::Connection;

@@ -1,4 +1,6 @@
 use anyhow::Result;
+use dhcproto::v4::{self, Message};
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootMode {
@@ -134,6 +136,62 @@ impl BootConfigProvider {
         } else {
             Ok(None)
         }
+    }
+
+    /// Applies boot options to a DHCP message for first-stage PXE boot.
+    ///
+    /// This method adds the following DHCP options for TFTP-based boot:
+    /// - Option 66: TFTP Server Name (next_server)
+    /// - Option 67: Bootfile Name (filename)
+    /// - siaddr field: Next server IP address
+    ///
+    /// # Arguments
+    /// * `msg` - The DHCP message to modify
+    /// * `boot_opts` - The boot options to apply
+    ///
+    /// # Returns
+    /// * `Ok(())` - Options applied successfully
+    /// * `Err(_)` - Failed to parse next_server IP address
+    pub fn apply_boot_options_to_message(
+        &self,
+        msg: &mut Message,
+        boot_opts: &BootOptions,
+    ) -> Result<()> {
+        // Option 66 (TFTP Server Name)
+        if let Some(next_server) = &boot_opts.next_server {
+            msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
+                next_server.clone().into_bytes(),
+            ));
+        }
+
+        // Option 67 (Bootfile Name)
+        msg.opts_mut().insert(v4::DhcpOption::BootfileName(
+            boot_opts.filename.clone().into_bytes(),
+        ));
+
+        // siaddr field (next server IP)
+        if let Some(next_server) = &boot_opts.next_server
+            && let Ok(next_ip) = next_server.parse::<Ipv4Addr>()
+        {
+            msg.set_siaddr(next_ip);
+        }
+
+        Ok(())
+    }
+
+    /// Applies iPXE boot script options to a DHCP message for second-stage boot.
+    ///
+    /// This method adds the HTTP URL for the iPXE boot script:
+    /// - Option 67: Bootfile Name (HTTP URL for iPXE script)
+    ///
+    /// # Arguments
+    /// * `msg` - The DHCP message to modify
+    /// * `boot_opts` - The boot options containing the iPXE script URL
+    pub fn apply_ipxe_script_to_message(&self, msg: &mut Message, boot_opts: &BootOptions) {
+        // Option 67 (Bootfile Name) - HTTP URL for iPXE script
+        msg.opts_mut().insert(v4::DhcpOption::BootfileName(
+            boot_opts.filename.clone().into_bytes(),
+        ));
     }
 }
 
@@ -328,5 +386,136 @@ mod tests {
         assert!(result.is_some());
         let opts = result.unwrap();
         assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
+    }
+
+    // Helper method tests
+    #[test]
+    fn test_apply_boot_options_to_message() {
+        use dhcproto::v4::{Message, Opcode};
+
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
+
+        let boot_opts = BootOptions {
+            next_server: Some("10.0.0.1".to_string()),
+            filename: "undionly.kpxe".to_string(),
+        };
+
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .apply_boot_options_to_message(&mut msg, &boot_opts)
+            .unwrap();
+
+        // Verify TFTP Server Name (Option 66)
+        let tftp_server = msg
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::TFTPServerName(name) = opt {
+                    Some(String::from_utf8_lossy(name).to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("TFTP Server Name should be present");
+        assert_eq!(tftp_server, "10.0.0.1");
+
+        // Verify Bootfile Name (Option 67)
+        let bootfile = msg
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::BootfileName(name) = opt {
+                    Some(String::from_utf8_lossy(name).to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("Bootfile Name should be present");
+        assert_eq!(bootfile, "undionly.kpxe");
+
+        // Verify siaddr field
+        assert_eq!(msg.siaddr().to_string(), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_apply_boot_options_to_message_no_next_server() {
+        use dhcproto::v4::{Message, Opcode};
+
+        let provider =
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string(), false);
+
+        let boot_opts = BootOptions {
+            next_server: None,
+            filename: "boot.efi".to_string(),
+        };
+
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .apply_boot_options_to_message(&mut msg, &boot_opts)
+            .unwrap();
+
+        // TFTP Server Name should not be present
+        let tftp_server = msg
+            .opts()
+            .iter()
+            .find(|(_, opt)| matches!(opt, v4::DhcpOption::TFTPServerName(_)));
+        assert!(tftp_server.is_none());
+
+        // Bootfile Name should still be present
+        let bootfile = msg
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::BootfileName(name) = opt {
+                    Some(String::from_utf8_lossy(name).to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("Bootfile Name should be present");
+        assert_eq!(bootfile, "boot.efi");
+
+        // siaddr should remain unspecified
+        assert_eq!(msg.siaddr(), Ipv4Addr::UNSPECIFIED);
+    }
+
+    #[test]
+    fn test_apply_ipxe_script_to_message() {
+        use dhcproto::v4::{Message, Opcode};
+
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1:3000".to_string(),
+            false,
+        );
+
+        let boot_opts = BootOptions {
+            next_server: None,
+            filename: "http://10.0.0.1:3000/cnc/ipxe".to_string(),
+        };
+
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider.apply_ipxe_script_to_message(&mut msg, &boot_opts);
+
+        // Verify Bootfile Name (Option 67) contains HTTP URL
+        let bootfile = msg
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::BootfileName(name) = opt {
+                    Some(String::from_utf8_lossy(name).to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("Bootfile Name should be present");
+        assert_eq!(bootfile, "http://10.0.0.1:3000/cnc/ipxe");
     }
 }

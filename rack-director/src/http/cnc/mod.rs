@@ -1,3 +1,8 @@
+mod device_registration;
+mod install_script;
+mod ipxe_scripts;
+mod network_processing;
+
 use std::sync::Arc;
 
 use axum::{
@@ -11,7 +16,6 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::Host;
-use common::Ipv4Subnet;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -19,6 +23,10 @@ use std::net::SocketAddr;
 use crate::{director::BootTarget, director::NetworkInterface, http::AppState};
 
 use crate::http::error::Error;
+
+use ipxe_scripts::{
+    build_response, generate_boot_local_script, generate_kernel_script, generate_uuid_redirect,
+};
 
 #[derive(Deserialize)]
 struct IpxeQuery {
@@ -52,60 +60,14 @@ async fn ipxe_handler(
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
-    // Prefer MAC from query parameter, fall back to IP-based lookup for backward compatibility
-    let mac_address = match &params.mac {
-        Some(mac) if !mac.is_empty() => Some(mac.clone()),
-        _ => {
-            // Fallback: Look up MAC address from client IP (may not work in all network setups)
-            let client_ip = addr.ip().to_string();
-            if let Ok(leases) = state.dhcp_store.get_all_leases().await {
-                leases
-                    .iter()
-                    .find(|l| l.ip_address == client_ip)
-                    .map(|l| l.mac_address.clone())
-            } else {
-                None
-            }
-        }
-    };
+    // Resolve MAC address from parameter or DHCP lookup
+    let mac_address =
+        device_registration::resolve_mac_address(&state, params.mac.as_ref(), addr).await;
 
     // Register device if it doesn't exist and automatically start discovery
     if !state.director.device_exists(&uuid).await? {
-        // Check for pending device
-        if let Some(mac) = &mac_address
-            && let Ok(Some(_)) = state.director.find_pending_device_by_mac(mac).await
-        {
-            log::info!(
-                "Completing pending device for MAC {} with UUID {}",
-                mac,
-                uuid
-            );
-        }
-
-        // Register device (existing code)
-        if let Err(e) = state
-            .director
-            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-        {
-            warn!("Couldn't register device {uuid}: {e}");
-        } else {
-            // Complete pending device link (NEW)
-            if let Some(mac) = &mac_address
-                && let Err(e) = state.director.complete_pending_device(mac, &uuid).await
-            {
-                warn!("Couldn't complete pending device: {}", e);
-            }
-
-            // Automatically start discovery transition for newly registered devices
-            if let Err(e) = state
-                .director
-                .start_lifecycle_transition(&uuid, crate::lifecycle::DeviceLifecycle::Unprovisioned)
-                .await
-            {
-                warn!("Couldn't start discovery transition for {uuid}: {e}");
-            }
-        }
+        device_registration::register_and_start_discovery(&state, &uuid, mac_address.as_ref())
+            .await;
     }
 
     // Store network info from DHCP lease (reuse the MAC address lookup from above)
@@ -162,25 +124,6 @@ async fn ipxe_handler(
     Ok(build_response(ipxe_script))
 }
 
-fn generate_boot_local_script() -> String {
-    r#"#!ipxe
-# Boot to local disk for known device
-sanboot --no-describe --drive 0x80
-"#
-    .to_string()
-}
-
-fn generate_kernel_script(root_url: &str, ramdisk: &str, kernel: &str, cmdline: &str) -> String {
-    format!(
-        r#"#!ipxe
-# Boot custom linux image for new device intake
-kernel {root_url}/cnc/images/{kernel} {cmdline}
-initrd {root_url}/cnc/images/{ramdisk}
-boot
-"#
-    )
-}
-
 async fn install_script_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<IpxeQuery>,
@@ -193,83 +136,7 @@ async fn install_script_handler(
         return Err(Error::BadRequest("Empty uuid parameter".to_string()));
     }
 
-    // Get device
-    let device = state
-        .director
-        .get_device(&uuid)
-        .await
-        .map_err(Error::ServerInternalError)?;
-
-    // Get device role
-    let role = state
-        .roles_store
-        .get_device_role(&uuid)
-        .await
-        .map_err(Error::ServerInternalError)?
-        .ok_or_else(|| Error::NotFound("Device has no role assigned".to_string()))?;
-
-    // Get device architecture
-    let arch = device.architecture;
-
-    // Get OS architecture configuration
-    let os_arch = state
-        .os_store
-        .get_architecture(role.os_id, arch)
-        .await
-        .map_err(|e| Error::NotFound(format!("OS architecture not found: {}", e)))?;
-
-    // Get OS
-    let os = state
-        .os_store
-        .get(role.os_id)
-        .await
-        .map_err(Error::ServerInternalError)?;
-
-    // Check if install script exists
-    let script_path = os_arch
-        .install_script_path
-        .ok_or_else(|| Error::NotFound("No install script for this OS architecture".to_string()))?;
-
-    // Download install script template from storage
-    let script_bytes = state
-        .image_store
-        .download(&script_path)
-        .await
-        .map_err(|e| {
-            Error::ServerInternalError(anyhow::anyhow!("Failed to download script: {}", e))
-        })?;
-
-    let template = String::from_utf8(script_bytes).map_err(|e| {
-        Error::ServerInternalError(anyhow::anyhow!("Script is not valid UTF-8: {}", e))
-    })?;
-
-    // Get device network info
-    let network_info = get_device_network_info(&state, &uuid).await?;
-
-    // Get device attributes
-    let hostname = device
-        .attributes
-        .get("hostname")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let device_info = crate::templates::DeviceInfo {
-        uuid: uuid.clone(),
-        hostname,
-    };
-
-    // Render template with device context
-    let rendered =
-        crate::templates::render_install_script(&template, &device_info, &role, &os, &network_info)
-            .map_err(|e| {
-                Error::ServerInternalError(anyhow::anyhow!("Template rendering failed: {}", e))
-            })?;
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(rendered)
-        .expect("response building should never error"))
+    install_script::render_for_device(&state, &uuid).await
 }
 
 async fn agent_images_handler(
@@ -319,56 +186,6 @@ async fn agent_images_handler(
     ))
 }
 
-async fn get_device_network_info(
-    state: &Arc<AppState>,
-    uuid: &str,
-) -> Result<crate::templates::NetworkInfo, Error> {
-    // Try to find device's lease
-    let lease = state
-        .dhcp_store
-        .find_lease_by_device_uuid(uuid)
-        .map_err(Error::ServerInternalError)?;
-
-    if let Some(lease) = lease {
-        // Get DHCP config for gateway and DNS
-        let network = state.dhcp_store.get_network(lease.id).await?;
-        let dns_servers = network.dns_servers;
-
-        let subnet: Ipv4Subnet = network.subnet.parse().map_err(anyhow::Error::new)?;
-
-        Ok(crate::templates::NetworkInfo {
-            mac_address: lease.mac_address,
-            ip_address: lease.ip_address,
-            gateway: network.gateway,
-            dns_servers,
-            netmask: subnet.netmask().to_string(),
-        })
-    } else {
-        Err(Error::NotFound("Device has no DHCP lease".to_string()))
-    }
-}
-
-fn generate_uuid_script(root_url: &str) -> String {
-    format!(
-        r#"#!ipxe
-# Chain boot to send uuid and mac
-chain {root_url}/cnc/ipxe?uuid={{uuid}}&mac={{netX/mac}}
-"#
-    )
-}
-
-fn generate_uuid_redirect(root_url: &str) -> Response<String> {
-    build_response(generate_uuid_script(root_url))
-}
-
-fn build_response(script: String) -> Response<String> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(script)
-        .expect("response building should never error")
-}
-
 #[derive(Deserialize, Serialize)]
 struct UpdateAttributesQuery {
     uuid: String,
@@ -397,82 +214,27 @@ async fn update_attributes(
     if let Some(network_interfaces_value) = attributes.get("network_interfaces")
         && let Some(interfaces_array) = network_interfaces_value.as_array()
     {
-        let mut enriched_interfaces: Vec<NetworkInterface> = Vec::new();
-
-        for interface_value in interfaces_array {
-            // Parse the interface from JSON
-            match serde_json::from_value::<NetworkInterface>(interface_value.clone()) {
-                Ok(mut nic) => {
-                    // Look up DHCP lease for this MAC
-                    if let Ok(Some(lease)) =
-                        state.dhcp_store.get_lease_by_mac(&nic.mac_address).await
-                    {
-                        log::info!(
-                            "Backfilling IP {} and network_id {} for NIC {} (MAC {})",
-                            lease.ip_address,
-                            lease.network_id.unwrap_or(-1),
-                            nic.interface_name,
-                            nic.mac_address
-                        );
-                        nic.ip_address = Some(lease.ip_address);
-                        nic.network_id = lease.network_id;
-                    }
-                    enriched_interfaces.push(nic);
-                }
-                Err(e) => {
-                    warn!("Failed to parse network interface from JSON: {}", e);
-                }
-            }
-        }
-
-        // Detect duplicate MACs on the same network
-        for nic in &mut enriched_interfaces {
-            // Only check for duplicates if the interface has a network_id
-            if let Some(network_id) = nic.network_id {
-                match state
-                    .director
-                    .find_duplicate_macs_on_network(&nic.mac_address, network_id, &uuid)
-                    .await
-                {
-                    Ok(duplicates) if !duplicates.is_empty() => {
-                        // Get network name for warning message
-                        let network_name = match state.dhcp_store.get_network(network_id).await {
-                            Ok(network) => network.name,
-                            Err(_) => format!("network {}", network_id),
-                        };
-
-                        nic.disabled = true;
-                        nic.warning_label = Some(format!("Duplicate MAC on {}", network_name));
-
-                        // Log warning with all duplicate devices
-                        let duplicate_list: Vec<String> = duplicates
-                            .iter()
-                            .map(|(dev_uuid, iface)| format!("{}:{}", dev_uuid, iface))
-                            .collect();
-                        log::warn!(
-                            "Duplicate MAC {} detected on network '{}' for device {} interface {}. \
-                             Also found on: {}",
-                            nic.mac_address,
-                            network_name,
-                            uuid,
-                            nic.interface_name,
-                            duplicate_list.join(", ")
-                        );
-                    }
-                    Ok(_) => {
-                        // No duplicates - ensure interface is not disabled
-                        nic.disabled = false;
-                        nic.warning_label = None;
-                    }
+        // Parse interfaces from JSON
+        let interfaces: Vec<NetworkInterface> = interfaces_array
+            .iter()
+            .filter_map(
+                |value| match serde_json::from_value::<NetworkInterface>(value.clone()) {
+                    Ok(nic) => Some(nic),
                     Err(e) => {
-                        warn!(
-                            "Error checking for duplicate MAC {} on network {}: {}",
-                            nic.mac_address, network_id, e
-                        );
+                        warn!("Failed to parse network interface from JSON: {}", e);
+                        None
                     }
-                }
-            }
-        }
+                },
+            )
+            .collect();
+
+        // Enrich interfaces with DHCP lease information
+        let mut enriched_interfaces =
+            network_processing::enrich_interfaces_with_dhcp_info(&state, interfaces).await;
+
+        // Detect and mark duplicate MACs on the same network
+        network_processing::detect_and_mark_duplicates(&state, &uuid, &mut enriched_interfaces)
+            .await;
 
         // Update the device with IP-enriched network interfaces
         if !enriched_interfaces.is_empty()
@@ -488,19 +250,12 @@ async fn update_attributes(
         }
 
         // Complete any pending devices whose MACs match the device's interfaces
-        for nic in &enriched_interfaces {
-            if let Err(e) = state
-                .director
-                .complete_pending_device(&nic.mac_address, &uuid)
-                .await
-            {
-                log::debug!(
-                    "Could not complete pending device for MAC {}: {}",
-                    nic.mac_address,
-                    e
-                );
-            }
-        }
+        network_processing::complete_pending_devices_for_interfaces(
+            &state,
+            &uuid,
+            &enriched_interfaces,
+        )
+        .await;
     }
 
     Ok(NoContent)

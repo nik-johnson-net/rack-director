@@ -1,5 +1,4 @@
 use super::super::{AppState, error::Error as HttpError};
-use crate::dhcp::validation;
 use crate::dhcp::{DhcpNetwork, DhcpPool, Lease, StaticReservation};
 use axum::{
     Json, Router,
@@ -7,6 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{delete, get, post, put},
 };
+use common::Ipv4Subnet;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -238,8 +238,12 @@ async fn create_static_reservation(
     let network = state.dhcp_store.get_network(network_id).await?;
 
     // Validate the IP is within the subnet
-    validation::validate_ip_in_network(&req.ip_address, &network.subnet)
-        .map_err(|e| HttpError::BadRequest(e.to_string()))?;
+    let subnet: Ipv4Subnet = network.subnet.parse()?;
+    if !subnet.ip_in_range(req.ip_address.parse()?) {
+        return Err(HttpError::BadRequest(
+            "ip address not within network".to_string(),
+        ));
+    }
 
     let reservation = state
         .dhcp_store
@@ -298,9 +302,13 @@ async fn make_lease_static(
     // Determine the IP address to use (from request or lease)
     let ip_address = req.ip_address.as_deref().unwrap_or(&lease.ip_address);
 
-    // Validate IP is in subnet
-    validation::validate_ip_in_network(ip_address, &network.subnet)
-        .map_err(|e| HttpError::BadRequest(e.to_string()))?;
+    // Validate the IP is within the subnet
+    let subnet: Ipv4Subnet = network.subnet.parse()?;
+    if !subnet.ip_in_range(ip_address.parse()?) {
+        return Err(HttpError::BadRequest(
+            "ip address not within network".to_string(),
+        ));
+    }
 
     // Use hostname from request if provided, otherwise use lease hostname
     let hostname = req.hostname.or(lease.hostname);

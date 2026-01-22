@@ -3,7 +3,7 @@ use dhcproto::{
     Decodable, Encodable,
     decoder::Decoder,
     encoder::Encoder,
-    v4::{self, Architecture, Message, MessageType, Opcode},
+    v4::{self, Architecture, Message, MessageType},
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -13,6 +13,8 @@ use crate::director::Director;
 
 use super::allocator::IpAllocator;
 use super::boot_config::{BootConfigProvider, BootMode};
+use super::device_resolution;
+use super::message_builder;
 use super::store::{DhcpNetwork, DhcpStore, LeaseState, format_mac};
 
 #[derive(Clone)]
@@ -144,29 +146,20 @@ impl DhcpHandler {
             network.name
         );
 
-        // Check if device exists in devices table by MAC (device NIC)
-        let mut device_uuid = self.director.find_device_by_mac(&mac_str).await?;
-
-        // If not found, check if this MAC belongs to a BMC
-        if device_uuid.is_none()
-            && let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await?
-        {
-            log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
-            device_uuid = Some(bmc_device_uuid);
-        }
+        // Resolve device UUID (device NIC or BMC)
+        let device_uuid = device_resolution::resolve_device_uuid(&self.director, &mac_str).await?;
 
         // Check if this interface is disabled (e.g., due to duplicate MAC)
         if let Some(uuid) = &device_uuid {
-            let interfaces = self.director.get_network_interfaces(uuid).await?;
+            let (is_disabled, reason) =
+                device_resolution::is_interface_disabled(&self.director, uuid, &mac_str).await?;
 
-            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str)
-                && iface.disabled
-            {
+            if is_disabled {
                 log::warn!(
                     "Skipping DHCP DISCOVER for disabled interface {} on device {}. Reason: {}",
                     mac_str,
                     uuid,
-                    iface.warning_label.as_deref().unwrap_or("unknown")
+                    reason.as_deref().unwrap_or("unknown")
                 );
                 return Ok(None);
             }
@@ -226,36 +219,24 @@ impl DhcpHandler {
             network.name
         );
 
-        // Look up device UUID early for authorization checks (device NIC or BMC)
-        let mut device_uuid = self.director.find_device_by_mac(&mac_str).await?;
-
-        // If not found, check if this MAC belongs to a BMC
-        if device_uuid.is_none()
-            && let Some(bmc_device_uuid) = self.director.find_device_by_bmc_mac(&mac_str).await?
-        {
-            log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
-            device_uuid = Some(bmc_device_uuid);
-        }
+        // Resolve device UUID (device NIC or BMC)
+        let device_uuid = device_resolution::resolve_device_uuid(&self.director, &mac_str).await?;
 
         // Check if device is in pending_devices table
-        let is_pending_device = self
-            .director
-            .find_pending_device_by_mac(&mac_str)
-            .await?
-            .is_some();
+        let is_pending_device =
+            device_resolution::is_pending_device(&self.director, &mac_str).await?;
 
         // Check if this interface is disabled (e.g., due to duplicate MAC)
         if let Some(uuid) = &device_uuid {
-            let interfaces = self.director.get_network_interfaces(uuid).await?;
+            let (is_disabled, reason) =
+                device_resolution::is_interface_disabled(&self.director, uuid, &mac_str).await?;
 
-            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str)
-                && iface.disabled
-            {
+            if is_disabled {
                 log::warn!(
                     "Skipping DHCP REQUEST for disabled interface {} on device {}. Reason: {}",
                     mac_str,
                     uuid,
-                    iface.warning_label.as_deref().unwrap_or("unknown")
+                    reason.as_deref().unwrap_or("unknown")
                 );
                 return Ok(None);
             }
@@ -347,12 +328,8 @@ impl DhcpHandler {
     }
 
     fn build_offer(&self, req: &Message, ip: Ipv4Addr, network: &DhcpNetwork) -> Result<Message> {
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootReply);
-        msg.set_xid(req.xid());
+        let mut msg = message_builder::create_base_reply(req);
         msg.set_yiaddr(ip);
-        msg.set_chaddr(req.chaddr());
-        msg.set_flags(req.flags());
 
         // Standard DHCP options
         msg.opts_mut()
@@ -363,21 +340,7 @@ impl DhcpHandler {
             .insert(v4::DhcpOption::AddressLeaseTime(network.lease_duration));
 
         // Network configuration
-        let subnet_mask = self.calculate_subnet_mask(&network.subnet)?;
-        msg.opts_mut()
-            .insert(v4::DhcpOption::SubnetMask(subnet_mask));
-        msg.opts_mut()
-            .insert(v4::DhcpOption::Router(vec![network.gateway.parse()?]));
-
-        let dns_servers: Vec<Ipv4Addr> = network
-            .dns_servers
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        if !dns_servers.is_empty() {
-            msg.opts_mut()
-                .insert(v4::DhcpOption::DomainNameServer(dns_servers));
-        }
+        message_builder::add_network_options(&mut msg, network)?;
 
         Ok(msg)
     }
@@ -408,10 +371,8 @@ impl DhcpHandler {
                     boot_opts.filename
                 );
 
-                // Option 67 (Bootfile Name) - HTTP URL for iPXE script
-                msg.opts_mut().insert(v4::DhcpOption::BootfileName(
-                    boot_opts.filename.into_bytes(),
-                ));
+                self.boot_config
+                    .apply_ipxe_script_to_message(&mut msg, &boot_opts);
             } else {
                 log::info!("Skipping boot script for unknown device (autodiscover disabled)");
             }
@@ -430,24 +391,8 @@ impl DhcpHandler {
                     boot_opts.filename
                 );
 
-                // Option 66 (TFTP Server Name)
-                if let Some(next_server) = &boot_opts.next_server {
-                    msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
-                        next_server.clone().into_bytes(),
-                    ));
-                }
-
-                // Option 67 (Bootfile Name)
-                msg.opts_mut().insert(v4::DhcpOption::BootfileName(
-                    boot_opts.filename.into_bytes(),
-                ));
-
-                // siaddr field (next server IP)
-                if let Some(next_server) = &boot_opts.next_server
-                    && let Ok(next_ip) = next_server.parse::<Ipv4Addr>()
-                {
-                    msg.set_siaddr(next_ip);
-                }
+                self.boot_config
+                    .apply_boot_options_to_message(&mut msg, &boot_opts)?;
             } else {
                 log::info!("Skipping boot options for unknown device (autodiscover disabled)");
             }
@@ -457,19 +402,7 @@ impl DhcpHandler {
     }
 
     fn build_nak(&self, req: &Message) -> Result<Message> {
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootReply);
-        msg.set_xid(req.xid());
-        msg.set_chaddr(req.chaddr());
-        msg.set_flags(req.flags());
-
-        msg.opts_mut()
-            .insert(v4::DhcpOption::MessageType(MessageType::Nak));
-
-        msg.opts_mut()
-            .insert(v4::DhcpOption::ServerIdentifier(self.server_identifier));
-
-        Ok(msg)
+        Ok(message_builder::build_nak(req, self.server_identifier))
     }
 
     fn is_ipxe(&self, msg: &Message) -> bool {
@@ -506,62 +439,14 @@ impl DhcpHandler {
         // No architecture option: assume BIOS
         BootMode::BiosLegacy
     }
-
-    fn calculate_subnet_mask(&self, subnet: &str) -> Result<Ipv4Addr> {
-        // Parse CIDR notation (e.g., "10.0.0.0/24")
-        let parts: Vec<&str> = subnet.split('/').collect();
-        if parts.len() != 2 {
-            return Err(anyhow::anyhow!("Invalid subnet format: {}", subnet));
-        }
-
-        let prefix_len: u8 = parts[1].parse()?;
-        if prefix_len > 32 {
-            return Err(anyhow::anyhow!("Invalid prefix length: {}", prefix_len));
-        }
-
-        // Calculate netmask from prefix length
-        let mask = if prefix_len == 0 {
-            0u32
-        } else {
-            !0u32 << (32 - prefix_len)
-        };
-
-        Ok(Ipv4Addr::from(mask))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::storage::MemoryImageStore;
+    use dhcproto::v4::Opcode;
 
     use super::*;
-
-    #[test]
-    fn test_calculate_subnet_mask() {
-        let handler = create_test_handler();
-
-        assert_eq!(
-            handler
-                .calculate_subnet_mask("10.0.0.0/24")
-                .unwrap()
-                .to_string(),
-            "255.255.255.0"
-        );
-        assert_eq!(
-            handler
-                .calculate_subnet_mask("10.0.0.0/16")
-                .unwrap()
-                .to_string(),
-            "255.255.0.0"
-        );
-        assert_eq!(
-            handler
-                .calculate_subnet_mask("10.0.0.0/8")
-                .unwrap()
-                .to_string(),
-            "255.0.0.0"
-        );
-    }
 
     #[test]
     fn test_server_identifier_in_offer() {

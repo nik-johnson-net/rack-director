@@ -1,4 +1,7 @@
+use std::net::AddrParseError;
+
 use axum::{body::Body, response::IntoResponse};
+use common::Ipv4SubnetError;
 
 pub enum Error {
     BadRequest(String),
@@ -37,6 +40,18 @@ impl From<anyhow::Error> for Error {
 
 impl From<serde_json::Error> for Error {
     fn from(value: serde_json::Error) -> Self {
+        Self::ServerInternalError(value.into())
+    }
+}
+
+impl From<Ipv4SubnetError> for Error {
+    fn from(value: Ipv4SubnetError) -> Self {
+        Self::ServerInternalError(value.into())
+    }
+}
+
+impl From<AddrParseError> for Error {
+    fn from(value: AddrParseError) -> Self {
         Self::ServerInternalError(value.into())
     }
 }
