@@ -1,0 +1,17 @@
+[Unit]
+Description=Rack Agent - Hardware Discovery and Provisioning
+After=systemd-networkd-wait-online.service
+Requires=systemd-networkd.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rack-agent
+ExecStartPost=/usr/bin/systemctl --force reboot
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=300
+
+[Install]
+WantedBy=initrd.target

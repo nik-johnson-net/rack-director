@@ -1,21 +1,51 @@
 use std::env;
+use std::path::PathBuf;
+
+#[cfg(unix)]
+const DEFAULT_DATABASE_PATH: &str = "/var/lib/rack-director";
+#[cfg(windows)]
+const DEFAULT_DATABASE_PATH: &str = "C:\\Program Files\\Rack Director";
+
+#[cfg(unix)]
+const DEFAULT_INSTALL_PATH: &str = "/opt/rack-director";
+#[cfg(windows)]
+const DEFAULT_INSTALL_PATH: &str = "C:\\Program Files\\Rack Director";
+
+fn overridable_env<T: Into<String>>(env: &str, default: T) -> String {
+    let value = env::var(env).unwrap_or(default.into());
+    println!("cargo:rustc-env={}={}", env, value);
+    println!("cargo:rerun-if-env-changed={}", env);
+    value
+}
 
 fn main() {
     // Allow overriding database path via environment variable
-    let database_path = env::var("RACK_DIRECTOR_DATABASE_PATH")
-        .unwrap_or_else(|_| "/opt/rack-director".to_string());
-    println!(
-        "cargo:rustc-env=RACK_DIRECTOR_DATABASE_PATH={}",
-        database_path
+    let database_env = overridable_env(
+        "RACK_DIRECTOR_DATABASE_PATH",
+        DEFAULT_DATABASE_PATH.to_string(),
     );
-    println!("cargo:rerun-if-env-changed=RACK_DIRECTOR_DATABASE_PATH");
+    let database_path = PathBuf::from(database_env);
+    overridable_env(
+        "RACK_DIRECTOR_LOCAL_IMAGES_PATH",
+        database_path.join("images").to_string_lossy(),
+    );
 
     // Allow overriding install prefix via environment variable
-    let install_prefix = env::var("RACK_DIRECTOR_INSTALL_PREFIX")
-        .unwrap_or_else(|_| "/opt/rack-director".to_string());
-    println!(
-        "cargo:rustc-env=RACK_DIRECTOR_INSTALL_PREFIX={}",
-        install_prefix
+    let install_prefix_env = overridable_env(
+        "RACK_DIRECTOR_INSTALL_PREFIX",
+        DEFAULT_INSTALL_PATH.to_string(),
     );
-    println!("cargo:rerun-if-env-changed=RACK_DIRECTOR_INSTALL_PREFIX");
+    let install_path = PathBuf::from(install_prefix_env);
+    overridable_env(
+        "RACK_DIRECTOR_AGENT_IMAGES_PATH",
+        install_path.join("agent").to_string_lossy(),
+    );
+    overridable_env(
+        "RACK_DIRECTOR_TFTP_PATH",
+        install_path.join("tftp").to_string_lossy(),
+    );
+    overridable_env(
+        "RACK_DIRECTOR_UI_PATH",
+        install_path.join("ui").to_string_lossy(),
+    );
 }

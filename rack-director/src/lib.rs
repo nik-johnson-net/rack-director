@@ -19,19 +19,18 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use crate::director::Director;
 
 const DEFAULT_DATABASE_PATH: &str = env!("RACK_DIRECTOR_DATABASE_PATH");
-
-fn default_agent_images_path() -> String {
-    format!("{}/agent-image", env!("RACK_DIRECTOR_INSTALL_PREFIX"))
-}
+const DEFAULT_AGENT_IMAGES_PATH: &str = env!("RACK_DIRECTOR_AGENT_IMAGES_PATH");
+const DEFAULT_TFTP_PATH: &str = env!("RACK_DIRECTOR_TFTP_PATH");
+const DEFAULT_LOCAL_IMAGES_PATH: &str = env!("RACK_DIRECTOR_LOCAL_IMAGES_PATH");
 
 #[derive(Parser, Debug)]
 pub struct Args {
     // Path to the database file.
-    #[arg(long, default_value_t = DEFAULT_DATABASE_PATH.to_string())]
+    #[arg(long, default_value = DEFAULT_DATABASE_PATH)]
     db_path: String,
 
     // Path to the directory containing the TFTP files.
-    #[arg(long, default_value = "/usr/lib/rack-director/tftp")]
+    #[arg(long, default_value = DEFAULT_TFTP_PATH)]
     tftp_path: String,
 
     // DHCP server address (optional, defaults to 67)
@@ -69,7 +68,7 @@ pub struct Args {
 
     #[arg(
         long,
-        default_value = "/var/lib/rack-director/images",
+        default_value = DEFAULT_LOCAL_IMAGES_PATH,
         help = "Local storage path (when storage-type=local)"
     )]
     storage_path: String,
@@ -93,7 +92,7 @@ pub struct Args {
     // Agent images path (bundled with installation)
     #[arg(
         long,
-        default_value_t = default_agent_images_path(),
+        default_value = DEFAULT_AGENT_IMAGES_PATH,
         help = "Path to agent image files (vmlinuz, initramfs.img)"
     )]
     agent_images_path: String,

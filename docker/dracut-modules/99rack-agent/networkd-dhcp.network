@@ -1,0 +1,9 @@
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+LinkLocalAddressing=yes
+
+[DHCP]
+UseDomains=yes

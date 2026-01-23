@@ -1,8 +1,0 @@
-[Unit]
-Description=Run the rack-agent according to kernel commandline
-After=network.service
-
-[Service]
-Type=Oneshot
-ExecStart=/usr/local/sbin/rack-agent
-ExecStartPost=/usr/bin/systemctl reboot
