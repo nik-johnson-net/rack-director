@@ -32,7 +32,7 @@ struct Args {
 #[tokio::main]
 async fn main() {
     // First step is to configure the logger.
-    std_logger::Config::logfmt().init();
+    env_logger::init_from_env(env_logger::Env::default().filter_or("LOG", "info"));
 
     info!("Starting Rack Agent...");
     let args = Args::parse();

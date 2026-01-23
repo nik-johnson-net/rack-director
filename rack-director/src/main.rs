@@ -4,7 +4,7 @@ use rack_director::rack_director_start;
 #[tokio::main]
 async fn main() {
     // First step is to configure the logger.
-    std_logger::Config::logfmt().init();
+    env_logger::init_from_env(env_logger::Env::default().filter_or("LOG", "info"));
 
     let args = rack_director::Args::parse();
 
