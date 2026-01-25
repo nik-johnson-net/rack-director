@@ -15,7 +15,8 @@
 //! to determine which IP address would be used for outbound connections.
 
 use anyhow::Result;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use common::Ipv4Subnet;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 
 /// Discovers the server's outbound IP address by binding a UDP socket
 /// and connecting to a public IP address.
@@ -46,13 +47,22 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 /// println!("Server IP: {}", server_ip);
 /// ```
 pub fn discover_server_identifier() -> Result<Ipv4Addr> {
-    // Bind to any interface on any port
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    discover_outgoing_ip_for(SocketAddr::new(Ipv4Addr::new(8, 8, 8, 8).into(), 80))
+}
 
-    // Connect to a public IP (8.8.8.8:80). This doesn't send any packets
-    // for UDP, but causes the kernel to select the appropriate outbound
-    // interface and assign a local address.
-    socket.connect("8.8.8.8:80")?;
+/// Guess if the given subnet is a local network.
+pub fn is_subnet_local(subnet: Ipv4Subnet) -> Result<bool> {
+    let local_addr = discover_outgoing_ip_for(SocketAddrV4::new(subnet.addr, 80).into())?;
+    Ok(subnet.ip_in_range(local_addr))
+}
+
+fn discover_outgoing_ip_for(addr: SocketAddr) -> Result<Ipv4Addr> {
+    // Bind to any interface on any port
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?;
+
+    // This doesn't send any packets for UDP, but causes the kernel to select
+    // the appropriate outbound interface and assign a local address.
+    socket.connect(addr)?;
 
     // Get the local address assigned by the kernel
     let local_addr = socket.local_addr()?;

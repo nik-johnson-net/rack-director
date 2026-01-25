@@ -18,11 +18,12 @@ use super::store::DhcpNetwork;
 ///
 /// # Returns
 /// A new `Message` initialized with base reply fields
-pub fn create_base_reply(req: &Message) -> Message {
+pub fn create_base_reply(req: &Message, siaddr: &Ipv4Addr) -> Message {
     let mut msg = Message::default();
     msg.set_opcode(Opcode::BootReply);
     msg.set_xid(req.xid());
     msg.set_chaddr(req.chaddr());
+    msg.set_siaddr(siaddr.clone());
     msg.set_flags(req.flags());
     msg
 }
@@ -78,7 +79,7 @@ pub fn add_network_options(msg: &mut Message, network: &DhcpNetwork) -> Result<(
 /// # Returns
 /// A DHCP NAK message ready to send
 pub fn build_nak(req: &Message, server_identifier: Ipv4Addr) -> Message {
-    let mut msg = create_base_reply(req);
+    let mut msg = create_base_reply(req, &server_identifier);
 
     msg.opts_mut()
         .insert(v4::DhcpOption::MessageType(MessageType::Nak));
@@ -103,7 +104,7 @@ mod tests {
         req.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         req.set_flags(Flags::default().set_broadcast());
 
-        let reply = create_base_reply(&req);
+        let reply = create_base_reply(&req, &Ipv4Addr::LOCALHOST);
 
         assert_eq!(reply.opcode(), Opcode::BootReply);
         assert_eq!(reply.xid(), 0x12345678);

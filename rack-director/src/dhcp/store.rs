@@ -356,6 +356,105 @@ impl DhcpStore {
         Ok(network)
     }
 
+    /// Get a network by name
+    pub async fn get_network_by_name(&self, name: &str) -> Result<Option<DhcpNetwork>> {
+        let db = self.db.lock().await;
+
+        let mut stmt = db.prepare(
+            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+             FROM dhcp_networks WHERE name = ?",
+        )?;
+
+        let network = stmt
+            .query_row(params![name], |row| {
+                let dns_servers_json: String = row.get(4)?;
+                let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
+                    .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
+
+                Ok(DhcpNetwork {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    subnet: row.get(2)?,
+                    gateway: row.get(3)?,
+                    dns_servers,
+                    lease_duration: row.get(5)?,
+                    relay_agent_address: row.get(6)?,
+                    created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
+                    updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                })
+            })
+            .optional()?;
+
+        Ok(network)
+    }
+
+    /// Get a network by relay agent address string (checking both NULL and empty string for Default L2)
+    pub async fn get_network_by_relay_string(
+        &self,
+        relay_agent_address: Option<&str>,
+    ) -> Result<Option<DhcpNetwork>> {
+        let db = self.db.lock().await;
+
+        // Handle the three cases:
+        // 1. None or Some("") - Default L2 network (NULL or empty string)
+        // 2. Some(address) - Specific relay agent address
+        let network = match relay_agent_address {
+            None | Some("") => {
+                let mut stmt = db.prepare(
+                    "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+                     FROM dhcp_networks WHERE relay_agent_address IS NULL OR relay_agent_address = ''",
+                )?;
+
+                stmt.query_row([], |row| {
+                    let dns_servers_json: String = row.get(4)?;
+                    let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
+                        .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
+
+                    Ok(DhcpNetwork {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        subnet: row.get(2)?,
+                        gateway: row.get(3)?,
+                        dns_servers,
+                        lease_duration: row.get(5)?,
+                        relay_agent_address: row.get(6)?,
+                        created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
+                        updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    })
+                })
+                .optional()?
+            }
+            Some(addr) => {
+                let addr_string = addr.to_string();
+                let mut stmt = db.prepare(
+                    "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+                     FROM dhcp_networks WHERE relay_agent_address = ?",
+                )?;
+
+                stmt.query_row(params![addr_string], |row| {
+                    let dns_servers_json: String = row.get(4)?;
+                    let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
+                        .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
+
+                    Ok(DhcpNetwork {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        subnet: row.get(2)?,
+                        gateway: row.get(3)?,
+                        dns_servers,
+                        lease_duration: row.get(5)?,
+                        relay_agent_address: row.get(6)?,
+                        created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
+                        updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    })
+                })
+                .optional()?
+            }
+        };
+
+        Ok(network)
+    }
+
     /// List all networks
     pub async fn list_networks(&self) -> Result<Vec<DhcpNetwork>> {
         let db = self.db.lock().await;
@@ -771,6 +870,69 @@ mod tests {
         assert_eq!(network.name, "Default");
         assert_eq!(network.subnet, "10.0.0.0/24");
         assert_eq!(network.gateway, "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_get_network_by_name() {
+        let (store, _temp_dir) = create_test_store().await;
+
+        // Test existing network
+        let network = store.get_network_by_name("Default").await.unwrap();
+        assert!(network.is_some());
+        let network = network.unwrap();
+        assert_eq!(network.name, "Default");
+
+        // Test non-existent network
+        let network = store.get_network_by_name("NonExistent").await.unwrap();
+        assert!(network.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_network_by_relay_string() {
+        let (store, _temp_dir) = create_test_store().await;
+
+        // Create a network with a relay agent
+        store
+            .create_network(
+                "Relay Network",
+                "192.168.1.0/24",
+                "192.168.1.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                Some("10.0.0.2"),
+            )
+            .await
+            .unwrap();
+
+        // Test finding by specific relay agent address
+        let network = store
+            .get_network_by_relay_string(Some("10.0.0.2"))
+            .await
+            .unwrap();
+        assert!(network.is_some());
+        let network = network.unwrap();
+        assert_eq!(network.name, "Relay Network");
+        assert_eq!(network.relay_agent_address, Some("10.0.0.2".to_string()));
+
+        // Test finding Default L2 network (None)
+        let network = store.get_network_by_relay_string(None).await.unwrap();
+        assert!(network.is_some());
+        let network = network.unwrap();
+        assert_eq!(network.name, "Default");
+        assert!(network.relay_agent_address.is_none());
+
+        // Test finding Default L2 network (empty string)
+        let network = store.get_network_by_relay_string(Some("")).await.unwrap();
+        assert!(network.is_some());
+        let network = network.unwrap();
+        assert_eq!(network.name, "Default");
+
+        // Test non-existent relay agent
+        let network = store
+            .get_network_by_relay_string(Some("10.0.0.99"))
+            .await
+            .unwrap();
+        assert!(network.is_none());
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ mod store;
 
 use anyhow::Result;
 use rusqlite::Connection;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::{net::UdpSocket, task::JoinHandle};
@@ -24,7 +24,7 @@ use handler::DhcpHandler;
 
 pub struct DhcpServer {
     handler: DhcpHandler,
-    address: String,
+    address: SocketAddr,
 }
 
 pub struct StartResult {
@@ -40,7 +40,7 @@ impl DhcpServer {
         http_server: String,
         server_identifier: Ipv4Addr,
         enable_autodiscover: bool,
-        address: Option<String>,
+        address: Option<SocketAddr>,
     ) -> Result<Self> {
         let store = DhcpStore::new(db);
 
@@ -75,13 +75,16 @@ impl DhcpServer {
 
         Ok(Self {
             handler,
-            address: address.unwrap_or("0.0.0.0:67".to_string()),
+            address: address.unwrap_or_else(|| SocketAddr::new(server_identifier.into(), 67)),
         })
     }
 
     /// Start the DHCP server (long-running task)
     pub async fn serve(self) -> Result<StartResult> {
         let socket = Arc::new(UdpSocket::bind(&self.address).await?);
+        log::debug!("Enabling broadcast on DHCP socket");
+        socket.set_broadcast(true)?;
+
         let local_addr = socket.local_addr()?;
         log::info!("DHCP server listening on {}", local_addr);
 
@@ -143,10 +146,13 @@ mod tests {
             "http://10.0.0.1:3000".to_string(),
             server_identifier,
             false,
-            Some("0.0.0.0:6767".to_string()),
+            Some(SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 67)),
         )
         .await
         .unwrap();
-        assert_eq!(server.address, "0.0.0.0:6767".to_string());
+        assert_eq!(
+            server.address,
+            SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 67)
+        );
     }
 }

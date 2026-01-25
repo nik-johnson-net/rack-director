@@ -123,11 +123,15 @@ impl DhcpHandler {
         } else {
             // For localhost testing, we send unicast to the peer address
             // In production, this would be broadcast to 255.255.255.255:68
-            peer_addr
+            if peer_addr.ip().is_unspecified() {
+                SocketAddr::new(Ipv4Addr::BROADCAST.into(), 68)
+            } else {
+                peer_addr
+            }
         };
 
+        log::debug!("Sending DHCP response to {}", dest);
         socket.send_to(&buf, dest).await?;
-        log::debug!("Sent DHCP response to {}", dest);
 
         Ok(())
     }
@@ -328,7 +332,7 @@ impl DhcpHandler {
     }
 
     fn build_offer(&self, req: &Message, ip: Ipv4Addr, network: &DhcpNetwork) -> Result<Message> {
-        let mut msg = message_builder::create_base_reply(req);
+        let mut msg = message_builder::create_base_reply(req, &self.server_identifier);
         msg.set_yiaddr(ip);
 
         // Standard DHCP options

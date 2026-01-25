@@ -1,4 +1,5 @@
 use super::super::{AppState, error::Error as HttpError};
+use super::validation::{validate_create_network_request, validate_update_network_request};
 use crate::dhcp::{DhcpNetwork, DhcpPool, Lease, StaticReservation};
 use axum::{
     Json, Router,
@@ -61,7 +62,7 @@ pub struct UpdateNetworkRequest {
     pub gateway: Option<String>,
     pub dns_servers: Option<Vec<String>>,
     pub lease_duration: Option<u32>,
-    pub relay_agent_address: Option<Option<String>>,
+    pub relay_agent_address: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +116,12 @@ async fn create_network(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateNetworkRequest>,
 ) -> Result<(StatusCode, Json<DhcpNetwork>), HttpError> {
+    log::debug!("create network request: {:?}", req);
+    // Validate request
+    if let Err(errors) = validate_create_network_request(&req, &state.dhcp_store).await {
+        return Err(HttpError::ValidationError(errors));
+    }
+
     let network = state
         .dhcp_store
         .create_network(
@@ -136,6 +143,12 @@ async fn update_network(
     Path(id): Path<i64>,
     Json(req): Json<UpdateNetworkRequest>,
 ) -> Result<Json<DhcpNetwork>, HttpError> {
+    log::debug!("update network request: {:?}", req);
+    // Validate request
+    if let Err(errors) = validate_update_network_request(id, &req, &state.dhcp_store).await {
+        return Err(HttpError::ValidationError(errors));
+    }
+
     let network = state
         .dhcp_store
         .update_network(
@@ -145,7 +158,9 @@ async fn update_network(
             req.gateway.as_deref(),
             req.dns_servers.as_deref(),
             req.lease_duration,
-            req.relay_agent_address.as_ref().map(|opt| opt.as_deref()),
+            req.relay_agent_address
+                .as_deref()
+                .map(|opt| if opt.is_empty() { None } else { Some(opt) }),
         )
         .await?;
 

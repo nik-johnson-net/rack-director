@@ -3,6 +3,7 @@ mod dhcp;
 mod networks;
 mod operating_systems;
 mod roles;
+mod validation;
 
 use std::{path::PathBuf, sync::Arc};
 

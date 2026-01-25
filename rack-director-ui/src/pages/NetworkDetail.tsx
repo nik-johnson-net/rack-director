@@ -10,8 +10,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import PoolsTable from "@/components/networks/pools-table";
 import ReservationsTable from "@/components/networks/reservations-table";
 import LeasesTable from "@/components/networks/leases-table";
+import { useFieldErrors } from "@/hooks/useFieldErrors";
+import { FormFieldError } from "@/components/ui/form-field-error";
 import {
   updateNetwork,
+  ValidationError,
   type DhcpNetwork,
   type DhcpPool,
   type StaticReservation,
@@ -30,6 +33,7 @@ function NetworkDetail() {
   const navigate = useNavigate();
   const params = useParams<{ id: string }>();
   const networkId = parseInt(params.id!);
+  const { clearAllErrors, clearFieldError, setErrors, hasError, getError } = useFieldErrors();
 
   const [network, setNetwork] = useState(initialData.network);
   const [pools, setPools] = useState(initialData.pools);
@@ -53,6 +57,7 @@ function NetworkDetail() {
     e.preventDefault();
     setError(null);
     setSuccessMessage(null);
+    clearAllErrors();
     setIsSubmitting(true);
 
     try {
@@ -67,13 +72,19 @@ function NetworkDetail() {
         gateway,
         dns_servers: dnsArray,
         lease_duration: parseInt(leaseDuration),
-        relay_agent_address: relayAgent || undefined,
+        // Explicitly send null when empty to clear the relay agent
+        relay_agent_address: relayAgent,
       });
 
       setNetwork(updated);
       setSuccessMessage("Network updated successfully");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update network");
+      if (err instanceof ValidationError) {
+        setErrors(err.errors);
+        setError("Please fix the validation errors below");
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to update network");
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -155,30 +166,45 @@ function NetworkDetail() {
                     <Input
                       id="name"
                       value={name}
-                      onChange={(e) => setName(e.target.value)}
+                      onChange={(e) => {
+                        setName(e.target.value);
+                        clearFieldError("name");
+                      }}
                       placeholder="e.g., Main Network"
+                      aria-invalid={hasError("name")}
                       required
                     />
+                    <FormFieldError error={getError("name")} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="subnet">Subnet (CIDR) *</Label>
                     <Input
                       id="subnet"
                       value={subnet}
-                      onChange={(e) => setSubnet(e.target.value)}
+                      onChange={(e) => {
+                        setSubnet(e.target.value);
+                        clearFieldError("subnet");
+                      }}
                       placeholder="e.g., 192.168.1.0/24"
+                      aria-invalid={hasError("subnet")}
                       required
                     />
+                    <FormFieldError error={getError("subnet")} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="gateway">Gateway *</Label>
                     <Input
                       id="gateway"
                       value={gateway}
-                      onChange={(e) => setGateway(e.target.value)}
+                      onChange={(e) => {
+                        setGateway(e.target.value);
+                        clearFieldError("gateway");
+                      }}
                       placeholder="e.g., 192.168.1.1"
+                      aria-invalid={hasError("gateway")}
                       required
                     />
+                    <FormFieldError error={getError("gateway")} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="lease-duration">Lease Duration (seconds) *</Label>
@@ -186,20 +212,30 @@ function NetworkDetail() {
                       id="lease-duration"
                       type="number"
                       value={leaseDuration}
-                      onChange={(e) => setLeaseDuration(e.target.value)}
+                      onChange={(e) => {
+                        setLeaseDuration(e.target.value);
+                        clearFieldError("lease_duration");
+                      }}
                       placeholder="e.g., 86400"
+                      aria-invalid={hasError("lease_duration")}
                       required
                     />
+                    <FormFieldError error={getError("lease_duration")} />
                   </div>
                   <div className="space-y-2 sm:col-span-2">
                     <Label htmlFor="dns-servers">DNS Servers *</Label>
                     <Input
                       id="dns-servers"
                       value={dnsServers}
-                      onChange={(e) => setDnsServers(e.target.value)}
+                      onChange={(e) => {
+                        setDnsServers(e.target.value);
+                        clearFieldError("dns_servers");
+                      }}
                       placeholder="e.g., 8.8.8.8, 8.8.4.4"
+                      aria-invalid={hasError("dns_servers")}
                       required
                     />
+                    <FormFieldError error={getError("dns_servers")} />
                     <p className="text-xs text-muted-foreground">
                       Enter multiple DNS servers separated by commas
                     </p>
@@ -209,9 +245,14 @@ function NetworkDetail() {
                     <Input
                       id="relay-agent"
                       value={relayAgent}
-                      onChange={(e) => setRelayAgent(e.target.value)}
+                      onChange={(e) => {
+                        setRelayAgent(e.target.value);
+                        clearFieldError("relay_agent_address");
+                      }}
                       placeholder="Leave empty for Local L2"
+                      aria-invalid={hasError("relay_agent_address")}
                     />
+                    <FormFieldError error={getError("relay_agent_address")} />
                     <p className="text-xs text-muted-foreground">
                       Leave empty if this DHCP server is on the same L2 network. Otherwise, specify
                       the relay agent IP address.

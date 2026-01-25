@@ -10,7 +10,7 @@ mod storage;
 mod templates;
 mod tftp;
 
-use std::{io, sync::Arc};
+use std::{io, net::SocketAddr, sync::Arc};
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -34,8 +34,8 @@ pub struct Args {
     tftp_path: String,
 
     // DHCP server address (optional, defaults to 67)
-    #[arg(long, default_value = "0.0.0.0:67")]
-    dhcp_address: String,
+    #[arg(long)]
+    dhcp_address: Option<SocketAddr>,
 
     // HTTP server address
     #[arg(long, default_value = "0.0.0.0:3000")]
@@ -164,7 +164,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         http_server,
         server_identifier,
         args.enable_autodiscover,
-        Some(args.dhcp_address.clone()),
+        args.dhcp_address,
     )
     .await
     .unwrap();

@@ -4,6 +4,37 @@ export type Plan = {
 
 }
 
+export type ValidationErrors = Record<string, string>;
+
+export class ValidationError extends Error {
+  errors: ValidationErrors;
+
+  constructor(errors: ValidationErrors) {
+    super('Validation failed');
+    this.name = 'ValidationError';
+    this.errors = errors;
+  }
+}
+
+/**
+ * Generic error handler for API responses
+ * Parses validation errors from 400 responses
+ * Can be reused by all API client functions
+ */
+export async function handleApiError(response: Response, defaultMessage: string): Promise<never> {
+  if (response.status === 400) {
+    // Try to parse as validation error
+    const errorData = await response.json().catch(() => null);
+    if (errorData && errorData.errors) {
+      throw new ValidationError(errorData.errors);
+    }
+  }
+
+  // Fallback to generic error
+  console.error(`API error (${response.status}):`, response.statusText);
+  throw new Error(defaultMessage);
+}
+
 export type DeviceLifecycle = "new" | "unprovisioned" | "provisioned" | "removed" | "broken";
 
 export type NetworkInterface = {
@@ -719,18 +750,17 @@ export async function getNetwork(id: number): Promise<DhcpNetwork> {
 }
 
 export async function createNetwork(data: CreateDhcpNetworkRequest): Promise<DhcpNetwork> {
-  return fetch('/ui/dhcp/networks', {
+  const response = await fetch('/ui/dhcp/networks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error creating network:', response.statusText);
-      throw new Error('Failed to create network');
-    }
   });
+
+  if (response.ok) {
+    return response.json();
+  }
+
+  return handleApiError(response, 'Failed to create network');
 }
 
 export async function updateNetwork(id: number, data: UpdateDhcpNetworkRequest): Promise<DhcpNetwork> {
@@ -741,10 +771,8 @@ export async function updateNetwork(id: number, data: UpdateDhcpNetworkRequest):
   }).then((response) => {
     if (response.ok) {
       return response.json();
-    } else {
-      console.error('Error updating network:', response.statusText);
-      throw new Error('Failed to update network');
     }
+    return handleApiError(response, 'Failed to update network');
   });
 }
 

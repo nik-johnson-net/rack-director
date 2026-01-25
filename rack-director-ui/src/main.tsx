@@ -18,6 +18,7 @@ import Roles from './pages/Roles.tsx';
 import RoleNew from './pages/RoleNew.tsx';
 import RoleEdit from './pages/RoleEdit.tsx';
 import Networks from './pages/Networks.tsx';
+import NetworkNew from './pages/NetworkNew.tsx';
 import NetworkDetail from './pages/NetworkDetail.tsx';
 import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices } from './lib/client.ts';
 import Loading from './pages/Loading.tsx';
@@ -48,6 +49,7 @@ const router = createBrowserRouter([
       { path: "/roles/new", Component: RoleNew },
       { path: "/roles/:id", loader: ({ params }) => getRole(parseInt(params.id!)), Component: RoleEdit, HydrateFallback: Loading },
       { path: "/networks", loader: getNetworks, Component: Networks, HydrateFallback: Loading },
+      { path: "/networks/new", Component: NetworkNew },
       {
         path: "/networks/:id",
         loader: async ({ params }) => {

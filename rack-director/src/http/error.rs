@@ -1,18 +1,31 @@
+use std::collections::HashMap;
 use std::net::AddrParseError;
 
-use axum::{body::Body, response::IntoResponse};
+use axum::{Json, body::Body, http::StatusCode, response::IntoResponse};
 use common::Ipv4SubnetError;
+use serde::Serialize;
 
 pub enum Error {
     BadRequest(String),
+    #[allow(clippy::enum_variant_names)]
+    ValidationError(HashMap<String, String>),
     NotFound(String),
     #[allow(clippy::enum_variant_names)] // ServerInternalError is the HTTP response code name
     ServerInternalError(anyhow::Error),
 }
 
+#[derive(Serialize)]
+struct ValidationErrorResponse {
+    errors: HashMap<String, String>,
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         match self {
+            Error::ValidationError(errors) => {
+                let body = ValidationErrorResponse { errors };
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
             Error::BadRequest(reason) => axum::response::Response::builder()
                 .status(400)
                 .body(Body::from(reason))
