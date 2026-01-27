@@ -104,10 +104,11 @@ impl Packet {
                 bytes.extend_from_slice(data);
             }
             Packet::Ack { block } => {
-                write_u16(&mut bytes, 3);
+                write_u16(&mut bytes, 4);
                 write_u16(&mut bytes, *block);
             }
             Packet::Error { code, message } => {
+                write_u16(&mut bytes, 5);
                 write_u16(&mut bytes, code.into());
                 write_string(&mut bytes, message);
             }
@@ -197,7 +198,7 @@ fn write_u16(buf: &mut Vec<u8>, data: u16) {
 
 fn write_string(buf: &mut Vec<u8>, data: &String) {
     buf.extend_from_slice(data.as_bytes());
-    buf.push(b'0');
+    buf.push(b'\0');
 }
 
 #[cfg(test)]

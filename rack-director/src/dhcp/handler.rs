@@ -202,13 +202,8 @@ impl DhcpHandler {
             device_resolution::is_pending_device(&self.director, &mac_str).await?;
 
         // Build DHCP Offer
-        let offer = self.build_offer(
-            msg,
-            ip,
-            network,
-            device_uuid.as_deref(),
-            is_pending_device,
-        )?;
+        let offer =
+            self.build_offer(msg, ip, network, device_uuid.as_deref(), is_pending_device)?;
         log::info!(
             "DHCP OFFER {} to MAC {} on network '{}'",
             ip,
