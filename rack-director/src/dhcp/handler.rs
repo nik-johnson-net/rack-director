@@ -474,8 +474,11 @@ impl DhcpHandler {
         for (_code, opt) in msg.opts().iter() {
             if let v4::DhcpOption::ClientSystemArchitecture(arch) = opt {
                 return match arch {
-                    Architecture::Intelx86PC => BootMode::BiosLegacy, // Intel x86PC
-                    Architecture::BC | Architecture::X86_64 => BootMode::UefiBoot, // EFI IA32, EFI BC (x86-64), EFI Xscale
+                    Architecture::Intelx86PC | Architecture::X86_64 => BootMode::BiosLegacy, // Intel x86PC
+                    Architecture::BC
+                    | Architecture::Unknown(14)
+                    | Architecture::Unknown(15)
+                    | Architecture::Unknown(16) => BootMode::UefiBoot, // EFI IA32, EFI BC (x86-64), EFI Xscale
                     Architecture::Unknown(11) => BootMode::UefiArm64, // EFI ARM 64-bit (AArch64)
                     _ => {
                         // Unknown architecture, assume BIOS for safety
