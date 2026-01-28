@@ -3,6 +3,7 @@ import { useLoaderData, useNavigate, useParams } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
@@ -46,6 +47,7 @@ function NetworkDetail() {
   const [dnsServers, setDnsServers] = useState(network.dns_servers.join(", "));
   const [leaseDuration, setLeaseDuration] = useState(network.lease_duration.toString());
   const [relayAgent, setRelayAgent] = useState(network.relay_agent_address || "");
+  const [enableAutodiscovery, setEnableAutodiscovery] = useState(network.enable_autodiscovery);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +76,7 @@ function NetworkDetail() {
         lease_duration: parseInt(leaseDuration),
         // Explicitly send null when empty to clear the relay agent
         relay_agent_address: relayAgent,
+        enable_autodiscovery: enableAutodiscovery,
       });
 
       setNetwork(updated);
@@ -256,6 +259,21 @@ function NetworkDetail() {
                     <p className="text-xs text-muted-foreground">
                       Leave empty if this DHCP server is on the same L2 network. Otherwise, specify
                       the relay agent IP address.
+                    </p>
+                  </div>
+                  <div className="space-y-2 sm:col-span-2">
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="enableAutodiscovery"
+                        checked={enableAutodiscovery}
+                        onCheckedChange={(checked) => setEnableAutodiscovery(checked === true)}
+                      />
+                      <Label htmlFor="enableAutodiscovery" className="cursor-pointer">
+                        Enable Autodiscovery
+                      </Label>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      When enabled, unknown devices will receive PXE boot options. When disabled, only known devices and pending devices will boot.
                     </p>
                   </div>
                 </div>

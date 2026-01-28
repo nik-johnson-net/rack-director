@@ -167,6 +167,15 @@ impl DhcpClient {
             v4::Architecture::from(self.architecture as u16),
         ));
 
+        // Add Parameter Request List
+        msg.opts_mut().insert(DhcpOption::ParameterRequestList(vec![
+            OptionCode::SubnetMask,
+            OptionCode::Router,
+            OptionCode::DomainNameServer,
+            OptionCode::TFTPServerName,
+            OptionCode::BootfileName,
+        ]));
+
         // If this is iPXE, add User-Class option (Option 77)
         if is_ipxe {
             msg.opts_mut()

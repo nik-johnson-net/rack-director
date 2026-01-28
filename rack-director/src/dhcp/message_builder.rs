@@ -23,7 +23,7 @@ pub fn create_base_reply(req: &Message, siaddr: &Ipv4Addr) -> Message {
     msg.set_opcode(Opcode::BootReply);
     msg.set_xid(req.xid());
     msg.set_chaddr(req.chaddr());
-    msg.set_siaddr(siaddr.clone());
+    msg.set_siaddr(*siaddr);
     msg.set_flags(req.flags());
     msg
 }
@@ -124,6 +124,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             lease_duration: 3600,
             relay_agent_address: None,
+            enable_autodiscovery: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -189,6 +190,7 @@ mod tests {
             dns_servers: vec![],
             lease_duration: 3600,
             relay_agent_address: None,
+            enable_autodiscovery: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

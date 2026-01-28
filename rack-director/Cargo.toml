@@ -25,7 +25,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-reqwest = "0.12"
+reqwest = { version = "0.12", features = ["json"] }
 tempfile = { workspace = true }
 tftp_client = "0.1"
 tokio-test = { workspace = true }

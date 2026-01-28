@@ -197,8 +197,18 @@ impl DhcpHandler {
             )
             .await?;
 
+        // Check if device is in pending_devices table
+        let is_pending_device =
+            device_resolution::is_pending_device(&self.director, &mac_str).await?;
+
         // Build DHCP Offer
-        let offer = self.build_offer(msg, ip, network)?;
+        let offer = self.build_offer(
+            msg,
+            ip,
+            network,
+            device_uuid.as_deref(),
+            is_pending_device,
+        )?;
         log::info!(
             "DHCP OFFER {} to MAC {} on network '{}'",
             ip,
@@ -331,7 +341,14 @@ impl DhcpHandler {
         Ok(())
     }
 
-    fn build_offer(&self, req: &Message, ip: Ipv4Addr, network: &DhcpNetwork) -> Result<Message> {
+    fn build_offer(
+        &self,
+        req: &Message,
+        ip: Ipv4Addr,
+        network: &DhcpNetwork,
+        device_uuid: Option<&str>,
+        is_pending_device: bool,
+    ) -> Result<Message> {
         let mut msg = message_builder::create_base_reply(req, &self.server_identifier);
         msg.set_yiaddr(ip);
 
@@ -346,6 +363,15 @@ impl DhcpHandler {
         // Network configuration
         message_builder::add_network_options(&mut msg, network)?;
 
+        // PXEBoot configuration
+        self.detect_and_add_pxeboot_options(
+            &mut msg,
+            req,
+            device_uuid,
+            network,
+            is_pending_device,
+        )?;
+
         Ok(msg)
     }
 
@@ -357,26 +383,50 @@ impl DhcpHandler {
         device_uuid: Option<&str>,
         is_pending_device: bool,
     ) -> Result<Message> {
-        let mut msg = self.build_offer(req, ip, network)?;
+        let mut msg = self.build_offer(req, ip, network, device_uuid, is_pending_device)?;
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Ack));
 
-        // Check if this is iPXE making a second DHCP request
+        Ok(msg)
+    }
+
+    fn detect_and_add_pxeboot_options(
+        &self,
+        msg: &mut Message,
+        req: &Message,
+        device_uuid: Option<&str>,
+        network: &DhcpNetwork,
+        is_pending_device: bool,
+    ) -> Result<()> {
+        // Check if client requested boot options via option 55
+        let client_wants_boot_options = self.boot_config.client_requested_boot_options(req);
+
+        if !client_wants_boot_options {
+            // Client did not request boot options (e.g., already booted OS renewing lease)
+            // Log this for visibility and skip boot option processing
+            let mac = format_mac(req.chaddr());
+            let identifier = device_uuid.unwrap_or(&mac);
+            log::info!("Device {} did not ask for boot options", identifier);
+            return Ok(());
+        }
+
+        // Client requested boot options, check if this is iPXE making a second DHCP request
         let is_ipxe = self.is_ipxe(req);
 
         if is_ipxe {
             // iPXE second-stage boot: Return HTTP URL for boot script (if allowed)
-            if let Some(boot_opts) = self
-                .boot_config
-                .get_ipxe_boot_script_if_allowed(device_uuid, is_pending_device)?
-            {
+            if let Some(boot_opts) = self.boot_config.get_ipxe_boot_script_if_allowed(
+                network.enable_autodiscovery,
+                device_uuid,
+                is_pending_device,
+            )? {
                 log::debug!(
                     "iPXE detected, returning HTTP boot script: {}",
                     boot_opts.filename
                 );
 
                 self.boot_config
-                    .apply_ipxe_script_to_message(&mut msg, &boot_opts);
+                    .apply_ipxe_script_to_message(msg, &boot_opts);
             } else {
                 log::info!("Skipping boot script for unknown device (autodiscover disabled)");
             }
@@ -385,6 +435,7 @@ impl DhcpHandler {
             let boot_mode = self.detect_boot_mode(req);
             if let Some(boot_opts) = self.boot_config.get_boot_options_if_allowed(
                 boot_mode,
+                network.enable_autodiscovery,
                 device_uuid,
                 is_pending_device,
             )? {
@@ -396,13 +447,13 @@ impl DhcpHandler {
                 );
 
                 self.boot_config
-                    .apply_boot_options_to_message(&mut msg, &boot_opts)?;
+                    .apply_boot_options_to_message(msg, &boot_opts)?;
             } else {
                 log::info!("Skipping boot options for unknown device (autodiscover disabled)");
             }
         }
 
-        Ok(msg)
+        Ok(())
     }
 
     fn build_nak(&self, req: &Message) -> Result<Message> {
@@ -471,7 +522,13 @@ mod tests {
 
         // Build an OFFER response
         let offer = handler
-            .build_offer(&discover, "10.0.0.100".parse().unwrap(), &network)
+            .build_offer(
+                &discover,
+                "10.0.0.100".parse().unwrap(),
+                &network,
+                None,
+                false,
+            )
             .unwrap();
 
         // Verify the server identifier matches the handler's configured value
@@ -551,7 +608,7 @@ mod tests {
 
         let allocator = IpAllocator::new(store.clone());
         let boot_config =
-            BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string(), false);
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
 
         // Use a custom server identifier different from gateway
         let custom_server_id: Ipv4Addr = "192.168.1.50".parse().unwrap();
@@ -582,7 +639,13 @@ mod tests {
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
         let offer = handler
-            .build_offer(&discover, "10.0.0.100".parse().unwrap(), &network)
+            .build_offer(
+                &discover,
+                "10.0.0.100".parse().unwrap(),
+                &network,
+                None,
+                false,
+            )
             .unwrap();
 
         let server_id = offer
@@ -623,7 +686,7 @@ mod tests {
 
         let allocator = IpAllocator::new(store.clone());
         let boot_config =
-            BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string(), false);
+            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
         let server_identifier = "10.0.0.1".parse().unwrap();
 
         let handler = DhcpHandler::new(

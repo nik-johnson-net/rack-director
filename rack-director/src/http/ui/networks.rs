@@ -53,6 +53,8 @@ pub struct CreateNetworkRequest {
     pub dns_servers: Vec<String>,
     pub lease_duration: u32,
     pub relay_agent_address: Option<String>,
+    #[serde(default)]
+    pub enable_autodiscovery: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +65,7 @@ pub struct UpdateNetworkRequest {
     pub dns_servers: Option<Vec<String>>,
     pub lease_duration: Option<u32>,
     pub relay_agent_address: Option<String>,
+    pub enable_autodiscovery: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +134,7 @@ async fn create_network(
             &req.dns_servers,
             req.lease_duration,
             req.relay_agent_address.as_deref(),
+            req.enable_autodiscovery,
         )
         .await?;
 
@@ -161,6 +165,7 @@ async fn update_network(
             req.relay_agent_address
                 .as_deref()
                 .map(|opt| if opt.is_empty() { None } else { Some(opt) }),
+            req.enable_autodiscovery,
         )
         .await?;
 

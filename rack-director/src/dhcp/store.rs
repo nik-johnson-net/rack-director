@@ -73,6 +73,7 @@ pub struct DhcpNetwork {
     pub dns_servers: Vec<String>,
     pub lease_duration: u32,
     pub relay_agent_address: Option<String>,
+    pub enable_autodiscovery: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -295,7 +296,7 @@ impl DhcpStore {
     pub async fn get_network(&self, id: i64) -> Result<DhcpNetwork> {
         let db = self.db.lock().await;
         let mut stmt = db.prepare(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks WHERE id = ?",
         )?;
 
@@ -312,8 +313,9 @@ impl DhcpStore {
                 dns_servers,
                 lease_duration: row.get(5)?,
                 relay_agent_address: row.get(6)?,
-                created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
-                updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                enable_autodiscovery: row.get(7)?,
+                created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
             })
         })?;
 
@@ -329,7 +331,7 @@ impl DhcpStore {
         let relay_str = relay.map(|r| r.to_string());
 
         let mut stmt = db.prepare(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks WHERE relay_agent_address IS ? OR (relay_agent_address IS NULL AND ? IS NULL)",
         )?;
 
@@ -347,8 +349,9 @@ impl DhcpStore {
                     dns_servers,
                     lease_duration: row.get(5)?,
                     relay_agent_address: row.get(6)?,
-                    created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    enable_autodiscovery: row.get(7)?,
+                    created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
                 })
             })
             .optional()?;
@@ -361,7 +364,7 @@ impl DhcpStore {
         let db = self.db.lock().await;
 
         let mut stmt = db.prepare(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks WHERE name = ?",
         )?;
 
@@ -379,8 +382,9 @@ impl DhcpStore {
                     dns_servers,
                     lease_duration: row.get(5)?,
                     relay_agent_address: row.get(6)?,
-                    created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    enable_autodiscovery: row.get(7)?,
+                    created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
                 })
             })
             .optional()?;
@@ -401,7 +405,7 @@ impl DhcpStore {
         let network = match relay_agent_address {
             None | Some("") => {
                 let mut stmt = db.prepare(
-                    "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+                    "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
                      FROM dhcp_networks WHERE relay_agent_address IS NULL OR relay_agent_address = ''",
                 )?;
 
@@ -418,8 +422,9 @@ impl DhcpStore {
                         dns_servers,
                         lease_duration: row.get(5)?,
                         relay_agent_address: row.get(6)?,
-                        created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
-                        updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                        enable_autodiscovery: row.get(7)?,
+                        created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                        updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
                     })
                 })
                 .optional()?
@@ -427,7 +432,7 @@ impl DhcpStore {
             Some(addr) => {
                 let addr_string = addr.to_string();
                 let mut stmt = db.prepare(
-                    "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+                    "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
                      FROM dhcp_networks WHERE relay_agent_address = ?",
                 )?;
 
@@ -444,8 +449,9 @@ impl DhcpStore {
                         dns_servers,
                         lease_duration: row.get(5)?,
                         relay_agent_address: row.get(6)?,
-                        created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
-                        updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                        enable_autodiscovery: row.get(7)?,
+                        created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                        updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
                     })
                 })
                 .optional()?
@@ -459,7 +465,7 @@ impl DhcpStore {
     pub async fn list_networks(&self) -> Result<Vec<DhcpNetwork>> {
         let db = self.db.lock().await;
         let mut stmt = db.prepare(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at
+            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks ORDER BY name",
         )?;
 
@@ -477,8 +483,9 @@ impl DhcpStore {
                     dns_servers,
                     lease_duration: row.get(5)?,
                     relay_agent_address: row.get(6)?,
-                    created_at: parse_datetime(&row.get::<_, String>(7)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    enable_autodiscovery: row.get(7)?,
+                    created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
+                    updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -487,6 +494,7 @@ impl DhcpStore {
     }
 
     /// Create a new network
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_network(
         &self,
         name: &str,
@@ -495,15 +503,16 @@ impl DhcpStore {
         dns_servers: &[String],
         lease_duration: u32,
         relay_agent_address: Option<&str>,
+        enable_autodiscovery: bool,
     ) -> Result<DhcpNetwork> {
         let dns_servers_json = serde_json::to_string(dns_servers)?;
         let now = Utc::now().to_rfc3339();
 
         let db = self.db.lock().await;
         db.execute(
-            "INSERT INTO dhcp_networks (name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![name, subnet, gateway, dns_servers_json, lease_duration, relay_agent_address, now, now],
+            "INSERT INTO dhcp_networks (name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![name, subnet, gateway, dns_servers_json, lease_duration, relay_agent_address, enable_autodiscovery, now, now],
         )?;
 
         let id = db.last_insert_rowid();
@@ -523,6 +532,7 @@ impl DhcpStore {
         dns_servers: Option<&[String]>,
         lease_duration: Option<u32>,
         relay_agent_address: Option<Option<&str>>,
+        enable_autodiscovery: Option<bool>,
     ) -> Result<DhcpNetwork> {
         let now = Utc::now().to_rfc3339();
         let db = self.db.lock().await;
@@ -562,6 +572,12 @@ impl DhcpStore {
             db.execute(
                 "UPDATE dhcp_networks SET relay_agent_address = ?, updated_at = ? WHERE id = ?",
                 params![relay_agent_address, now, id],
+            )?;
+        }
+        if let Some(enable_autodiscovery) = enable_autodiscovery {
+            db.execute(
+                "UPDATE dhcp_networks SET enable_autodiscovery = ?, updated_at = ? WHERE id = ?",
+                params![enable_autodiscovery, now, id],
             )?;
         }
 
@@ -900,6 +916,7 @@ mod tests {
                 &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();

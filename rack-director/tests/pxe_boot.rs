@@ -10,10 +10,11 @@ use std::net::Ipv4Addr;
 async fn test_pxe_boot_x86_bios() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
+    handle.set_network_autodiscover(1, true).await?;
 
     // Step 1: First DHCP exchange (firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]; // Test MAC address
-    let dhcp_port = handle.dhcp_port;
+    let dhcp_port = handle.handle.dhcp_port;
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::X86Bios, dhcp_port)?;
@@ -43,7 +44,7 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
     );
 
     // Step 2: TFTP - Fetch the iPXE bootloader
-    let tftp_port = handle.tftp_port;
+    let tftp_port = handle.handle.tftp_port;
     let bootfile_content = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         use common::tftp_client::TftpClient;
         use std::net::SocketAddr;
@@ -65,7 +66,7 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
     );
 
     // Step 3: Second DHCP exchange (iPXE requesting boot script URL)
-    let dhcp_port = handle.dhcp_port;
+    let dhcp_port = handle.handle.dhcp_port;
     let (leased_ip2, ipxe_boot_options) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut dhcp_client = DhcpClient::new(mac, Architecture::X86Bios, dhcp_port)?;
         let offered_ip = dhcp_client.discover()?;
@@ -90,7 +91,7 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
 
     // Step 4: HTTP - Fetch iPXE script
     let http_client = reqwest::Client::new();
-    let ipxe_url = format!("http://127.0.0.1:{}/cnc/ipxe", handle.http_port);
+    let ipxe_url = format!("http://127.0.0.1:{}/cnc/ipxe", handle.handle.http_port);
     let response = http_client.get(&ipxe_url).send().await?;
 
     // VALIDATION: HTTP response - Verify status and content
@@ -130,10 +131,11 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
 async fn test_pxe_boot_x64_uefi() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
+    handle.set_network_autodiscover(1, true).await?;
 
     // Step 1: First DHCP exchange (UEFI firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x57]; // Different MAC
-    let dhcp_port = handle.dhcp_port;
+    let dhcp_port = handle.handle.dhcp_port;
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::X64Uefi, dhcp_port)?;
@@ -163,7 +165,7 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
     );
 
     // Step 2: TFTP - Fetch the iPXE bootloader
-    let tftp_port = handle.tftp_port;
+    let tftp_port = handle.handle.tftp_port;
     let bootfile_content = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         use common::tftp_client::TftpClient;
         use std::net::SocketAddr;
@@ -185,7 +187,7 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
     );
 
     // Step 3: Second DHCP exchange (iPXE requesting boot script URL)
-    let dhcp_port = handle.dhcp_port;
+    let dhcp_port = handle.handle.dhcp_port;
     let (leased_ip2, ipxe_boot_options) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut dhcp_client = DhcpClient::new(mac, Architecture::X64Uefi, dhcp_port)?;
         let offered_ip = dhcp_client.discover()?;
@@ -208,7 +210,7 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
 
     // Step 4: HTTP - Fetch iPXE script (iPXE bootloader would do this)
     let http_client = reqwest::Client::new();
-    let ipxe_url = format!("http://127.0.0.1:{}/cnc/ipxe", handle.http_port);
+    let ipxe_url = format!("http://127.0.0.1:{}/cnc/ipxe", handle.handle.http_port);
     let response = http_client.get(&ipxe_url).send().await?;
 
     // VALIDATION: HTTP response - Verify status and content
@@ -248,10 +250,11 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
 async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
+    handle.set_network_autodiscover(1, true).await?;
 
     // Step 1: First DHCP exchange (ARM64 UEFI firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x58]; // Different MAC
-    let dhcp_port = handle.dhcp_port;
+    let dhcp_port = handle.handle.dhcp_port;
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::Arm64Uefi, dhcp_port)?;
@@ -281,7 +284,7 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     );
 
     // Step 2: TFTP - Fetch the iPXE bootloader
-    let tftp_port = handle.tftp_port;
+    let tftp_port = handle.handle.tftp_port;
     let bootfile_content = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         use common::tftp_client::TftpClient;
         use std::net::SocketAddr;
@@ -303,7 +306,7 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     );
 
     // Step 3: Second DHCP exchange (iPXE requesting boot script URL)
-    let dhcp_port = handle.dhcp_port;
+    let dhcp_port = handle.handle.dhcp_port;
     let (leased_ip2, ipxe_boot_options) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut dhcp_client = DhcpClient::new(mac, Architecture::Arm64Uefi, dhcp_port)?;
         let offered_ip = dhcp_client.discover()?;
@@ -326,7 +329,7 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
 
     // Step 4: HTTP - Fetch iPXE script (iPXE bootloader would do this)
     let http_client = reqwest::Client::new();
-    let ipxe_url = format!("http://127.0.0.1:{}/cnc/ipxe", handle.http_port);
+    let ipxe_url = format!("http://127.0.0.1:{}/cnc/ipxe", handle.handle.http_port);
     let response = http_client.get(&ipxe_url).send().await?;
 
     // VALIDATION: HTTP response - Verify status and content

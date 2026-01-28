@@ -125,6 +125,7 @@ export type DhcpNetwork = {
   dns_servers: string[];
   lease_duration: number;
   relay_agent_address?: string;
+  enable_autodiscovery: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -156,6 +157,7 @@ export type CreateDhcpNetworkRequest = {
   dns_servers: string[];
   lease_duration: number;
   relay_agent_address?: string;
+  enable_autodiscovery?: boolean;
 }
 
 export type UpdateDhcpNetworkRequest = {
@@ -165,6 +167,7 @@ export type UpdateDhcpNetworkRequest = {
   dns_servers?: string[];
   lease_duration?: number;
   relay_agent_address?: string;
+  enable_autodiscovery?: boolean;
 }
 
 export type CreateDhcpPoolRequest = {

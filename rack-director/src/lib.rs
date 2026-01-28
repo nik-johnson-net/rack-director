@@ -96,10 +96,6 @@ pub struct Args {
         help = "Path to agent image files (vmlinuz, initramfs.img)"
     )]
     agent_images_path: String,
-
-    // Enable autodiscovery of unknown devices
-    #[arg(long, default_value_t = false)]
-    enable_autodiscover: bool,
 }
 
 pub struct RackDirectorHandle {
@@ -144,7 +140,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Initialize Director
     let public_url = args
         .http_public_url
-        .unwrap_or_else(|| server_identifier.to_string());
+        .unwrap_or_else(|| format!("http://{}", server_identifier));
     let director: Director = Director::new(db.clone(), image_store.clone(), &public_url);
 
     // Initialize DHCP server and store
@@ -163,7 +159,6 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         tftp_public,
         http_server,
         server_identifier,
-        args.enable_autodiscover,
         args.dhcp_address,
     )
     .await
@@ -346,5 +341,51 @@ mod tests {
         // but we can verify it returns a valid IPv4 address
         assert_ne!(result, std::net::Ipv4Addr::UNSPECIFIED);
         assert_ne!(result, std::net::Ipv4Addr::LOCALHOST);
+    }
+
+    #[test]
+    fn test_public_url_default_includes_http_prefix() {
+        // Test that when --http-public-url is not provided, the default URL
+        // includes the http:// prefix to prevent firmware clients from trying
+        // to fetch HTTP URLs via TFTP
+        let server_identifier = "192.168.30.18".parse::<std::net::Ipv4Addr>().unwrap();
+
+        // Simulate the logic from rack_director_start
+        let args_http_public_url: Option<String> = None;
+        let public_url =
+            args_http_public_url.unwrap_or_else(|| format!("http://{}", server_identifier));
+
+        assert!(
+            public_url.starts_with("http://"),
+            "Default public URL should start with 'http://', got: {}",
+            public_url
+        );
+        assert_eq!(public_url, "http://192.168.30.18");
+    }
+
+    #[test]
+    fn test_public_url_provided_unchanged() {
+        // Test that when --http-public-url is provided, it is used as-is
+        let server_identifier = "192.168.30.18".parse::<std::net::Ipv4Addr>().unwrap();
+
+        // Simulate the logic from rack_director_start
+        let args_http_public_url: Option<String> = Some("http://example.com:3000".to_string());
+        let public_url =
+            args_http_public_url.unwrap_or_else(|| format!("http://{}", server_identifier));
+
+        assert_eq!(public_url, "http://example.com:3000");
+    }
+
+    #[test]
+    fn test_public_url_provided_with_https() {
+        // Test that HTTPS URLs are preserved
+        let server_identifier = "192.168.30.18".parse::<std::net::Ipv4Addr>().unwrap();
+
+        // Simulate the logic from rack_director_start
+        let args_http_public_url: Option<String> = Some("https://example.com".to_string());
+        let public_url =
+            args_http_public_url.unwrap_or_else(|| format!("http://{}", server_identifier));
+
+        assert_eq!(public_url, "https://example.com");
     }
 }

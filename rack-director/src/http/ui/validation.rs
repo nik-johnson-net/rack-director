@@ -420,6 +420,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
         };
 
         assert!(validate_create_network_request(&req, &store).await.is_ok());
@@ -435,6 +436,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -456,6 +458,7 @@ mod tests {
                 &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -468,6 +471,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.3".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -490,6 +494,7 @@ mod tests {
                 &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -502,6 +507,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -531,6 +537,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: None,
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -555,6 +562,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -573,6 +581,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -591,6 +600,7 @@ mod tests {
             dns_servers: vec![],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -609,6 +619,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 0,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -627,6 +638,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("invalid".to_string()),
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -645,6 +657,7 @@ mod tests {
             dns_servers: vec![],
             lease_duration: 0,
             relay_agent_address: None,
+            enable_autodiscovery: false,
         };
 
         let result = validate_create_network_request(&req, &store).await;
@@ -671,6 +684,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -682,6 +696,7 @@ mod tests {
             dns_servers: None,
             lease_duration: Some(7200),
             relay_agent_address: None,
+            enable_autodiscovery: None,
         };
 
         assert!(
@@ -704,6 +719,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -716,6 +732,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.3"),
+                false,
             )
             .await
             .unwrap();
@@ -728,6 +745,7 @@ mod tests {
             dns_servers: None,
             lease_duration: None,
             relay_agent_address: None,
+            enable_autodiscovery: None,
         };
 
         let result = validate_update_network_request(network1.id, &req, &store).await;
@@ -753,6 +771,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -765,6 +784,7 @@ mod tests {
             dns_servers: None,
             lease_duration: None,
             relay_agent_address: None,
+            enable_autodiscovery: None,
         };
 
         assert!(
@@ -787,6 +807,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -799,6 +820,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.3"),
+                false,
             )
             .await
             .unwrap();
@@ -811,6 +833,7 @@ mod tests {
             dns_servers: None,
             lease_duration: None,
             relay_agent_address: Some("10.0.0.3".to_string()),
+            enable_autodiscovery: None,
         };
 
         let result = validate_update_network_request(network1.id, &req, &store).await;
@@ -832,6 +855,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -844,6 +868,7 @@ mod tests {
             dns_servers: None,
             lease_duration: None,
             relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: None,
         };
 
         assert!(
@@ -866,6 +891,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -878,6 +904,7 @@ mod tests {
             dns_servers: None,
             lease_duration: None,
             relay_agent_address: None,
+            enable_autodiscovery: None,
         };
 
         let result = validate_update_network_request(network.id, &req, &store).await;
@@ -899,6 +926,7 @@ mod tests {
                 &vec!["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
+                false,
             )
             .await
             .unwrap();
@@ -911,6 +939,7 @@ mod tests {
             dns_servers: Some(vec!["invalid".to_string()]),
             lease_duration: None,
             relay_agent_address: None,
+            enable_autodiscovery: None,
         };
 
         let result = validate_update_network_request(network.id, &req, &store).await;
