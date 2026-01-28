@@ -1,3 +1,6 @@
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
+use std::net::SocketAddrV4;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -19,20 +22,20 @@ pub struct StartResult {
 }
 
 pub struct Server<H: Handler> {
-    address: String,
+    address: SocketAddr,
     handler: H,
 }
 
 impl<H: Handler + Send + Sync + 'static> Server<H> {
     pub fn new(handler: H) -> Self {
         Self {
-            address: "0.0.0.0:69".to_owned(),
+            address: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 69).into(),
             handler,
         }
     }
 
     #[allow(unused)]
-    pub fn address(&mut self, addr: String) -> &mut Self {
+    pub fn address(&mut self, addr: SocketAddr) -> &mut Self {
         self.address = addr;
         self
     }
@@ -79,7 +82,7 @@ mod tests {
         handler: H,
     ) -> Result<(u16, JoinHandle<Result<()>>)> {
         let mut server = Server::new(handler);
-        server.address("127.0.0.1:0".to_string());
+        server.address(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into());
         let result = server.serve().await?;
         Ok((result.port, result.join_handle))
     }

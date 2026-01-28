@@ -10,7 +10,11 @@ mod storage;
 mod templates;
 mod tftp;
 
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{
+    io,
+    net::{SocketAddr, SocketAddrV4},
+    sync::Arc,
+};
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -39,11 +43,11 @@ pub struct Args {
 
     // HTTP server address
     #[arg(long, default_value = "0.0.0.0:3000")]
-    http_address: String,
+    http_address: SocketAddr,
 
     // TFTP server address
     #[arg(long, default_value = "0.0.0.0:69")]
-    tftp_address: String,
+    tftp_address: SocketAddr,
 
     // TFTP server public address (what DHCP advertises to clients)
     #[arg(long)]
@@ -140,16 +144,21 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Initialize Director
     let public_url = args
         .http_public_url
-        .unwrap_or_else(|| format!("http://{}", server_identifier));
+        .unwrap_or_else(|| format!("http://{}:{}", server_identifier, args.http_address.port()));
     let director: Director = Director::new(db.clone(), image_store.clone(), &public_url);
 
     // Initialize DHCP server and store
     let dhcp_store = dhcp::DhcpStore::new(db.clone());
 
     // Determine TFTP public address
-    let tftp_public = args
-        .tftp_public_address
-        .unwrap_or_else(|| public_url.clone());
+    let tftp_public = args.tftp_public_address.unwrap_or_else(|| {
+        if args.tftp_address.ip().is_unspecified() {
+            let addr = SocketAddrV4::new(server_identifier, args.tftp_address.port());
+            addr.to_string()
+        } else {
+            args.tftp_address.to_string()
+        }
+    });
 
     let http_server = public_url.clone();
 

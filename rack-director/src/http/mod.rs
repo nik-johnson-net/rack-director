@@ -31,7 +31,7 @@ pub struct StartResult {
     pub port: u16,
 }
 
-pub async fn start<T: AsRef<str>, P: Into<PathBuf>>(
+pub async fn start<T: Into<SocketAddr>, P: Into<PathBuf>>(
     director: Director,
     dhcp_store: DhcpStore,
     image_store: Arc<dyn ImageStore>,
@@ -55,7 +55,7 @@ pub async fn start<T: AsRef<str>, P: Into<PathBuf>>(
         .merge(api::routes(state));
 
     // run our app with hyper, listening globally on port 3000
-    let listener = tokio::net::TcpListener::bind(bind.as_ref()).await?;
+    let listener = tokio::net::TcpListener::bind(bind.into()).await?;
     let local_addr = listener.local_addr().expect("local_addr");
 
     log::info!("Starting http server on {}", local_addr);
