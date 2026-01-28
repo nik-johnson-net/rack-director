@@ -5,6 +5,8 @@ use log::debug;
 use crate::tftp::packet::{Error, Packet};
 use anyhow::Result;
 
+const DEFAULT_MAX_RETRIES: u8 = 4;
+
 pub trait Handler {
     type Reader: Reader + Send + Sync;
     fn create_reader(&self, filename: &str) -> impl Future<Output = Result<Self::Reader>> + Send;
@@ -30,6 +32,7 @@ enum TransferState<H: Handler> {
         block: u16,
         reader: H::Reader,
         data: Vec<u8>,
+        timeouts: u8,
     },
     Complete,
 }
@@ -39,6 +42,7 @@ pub struct State<H: Handler> {
     addr: SocketAddr,
     state: TransferState<H>,
     handler: Arc<H>,
+    max_timeouts: u8,
 }
 
 impl<H: Handler + 'static> State<H> {
@@ -48,6 +52,7 @@ impl<H: Handler + 'static> State<H> {
             addr,
             state: TransferState::Uninitialized,
             handler,
+            max_timeouts: DEFAULT_MAX_RETRIES,
         }
     }
 
@@ -66,9 +71,10 @@ impl<H: Handler + 'static> State<H> {
                 block,
                 reader,
                 data,
+                timeouts,
             } => match packet {
                 Packet::Ack { block: acked_block } => {
-                    handle_ack(reader, mode, block, data, acked_block).await
+                    handle_ack(reader, mode, block, data, timeouts, acked_block).await
                 }
                 Packet::Error { code, message } => {
                     log::info!(
@@ -107,15 +113,27 @@ impl<H: Handler + 'static> State<H> {
 
     pub async fn handle_timeout(&mut self) -> ControlFlow {
         debug!("TFTP: Timeout for {}", self.addr);
-        match &self.state {
+        match &mut self.state {
             TransferState::Uninitialized => {
                 log::warn!("TFTP: Timeout in Uninitialized state for {}", self.addr);
                 ControlFlow::Closed(None)
             }
-            TransferState::Reading { data, block, .. } => ControlFlow::Continue(Packet::Data {
-                block: *block,
-                data: data.clone(),
-            }),
+            TransferState::Reading {
+                data,
+                block,
+                timeouts,
+                ..
+            } => {
+                *timeouts += 1;
+                if *timeouts == self.max_timeouts {
+                    log::warn!("TFTP: Abandoning transfer for too many read timeouts");
+                    return ControlFlow::Closed(None);
+                }
+                ControlFlow::Continue(Packet::Data {
+                    block: *block,
+                    data: data.clone(),
+                })
+            }
             TransferState::Complete => {
                 log::warn!("TFTP: Timeout in Complete state for {}", self.addr);
                 ControlFlow::Closed(None)
@@ -174,6 +192,7 @@ async fn handle_read_request<H: Handler>(
         block: 0,
         reader,
         data: data.clone(),
+        timeouts: 0,
     };
     let reply = Packet::Data { block: 0, data };
     Ok(HandleResponse {
@@ -188,6 +207,7 @@ async fn handle_ack<H: Handler>(
     _mode: &str,
     block: &mut u16,
     data: &mut Vec<u8>,
+    timeouts: &mut u8,
     acked_block: u16,
 ) -> Result<HandleResponse<H>> {
     let next_block = block.wrapping_add(1);
@@ -201,6 +221,7 @@ async fn handle_ack<H: Handler>(
             });
         }
         // Otherwise, read the next block of data.
+        *timeouts = 0;
         *block = next_block;
         *data = reader.read().await?;
         data.clone()
@@ -299,5 +320,32 @@ mod tests {
             matches!(result, ControlFlow::Closed(None)),
             "Got response {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_exceeds_attempts() {
+        // Simulate TFTP read request
+        let mut state = State::new(
+            SocketAddr::from_str("127.0.0.1:55").unwrap(),
+            Arc::new(MockHandler::with_data(vec![0; 513])),
+        );
+
+        let result = state
+            .handle(Packet::Rrq {
+                filename: String::from("test.txt"),
+                mode: String::from("octet"),
+            })
+            .await;
+        assert!(matches!(result, ControlFlow::Continue(_)));
+
+        // First few timeouts
+        for _ in 1..DEFAULT_MAX_RETRIES {
+            let result = state.handle_timeout().await;
+            assert!(matches!(result, ControlFlow::Continue(_)));
+        }
+
+        // Last timeout should give up
+        let result = state.handle_timeout().await;
+        assert!(matches!(result, ControlFlow::Closed(_)));
     }
 }

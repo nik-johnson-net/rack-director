@@ -8,6 +8,8 @@ use crate::tftp::{
     state::{ControlFlow, State},
 };
 
+const DEFAULT_TIMEOUT_MILLIS: u64 = 2000;
+
 #[derive(Debug)]
 pub enum Error {
     ConnectionClosed,
@@ -73,7 +75,12 @@ impl<H: Handler + 'static> Connection<H> {
         let mut buf = [0; 512]; // TFTP packets can be up to 512 bytes
         // Start the main loop to handle incoming packets
         loop {
-            match timeout(Duration::from_millis(100), connection.socket.recv(&mut buf)).await {
+            match timeout(
+                Duration::from_millis(DEFAULT_TIMEOUT_MILLIS),
+                connection.socket.recv(&mut buf),
+            )
+            .await
+            {
                 // Received a packet
                 Ok(Ok(size)) => {
                     let packet =
