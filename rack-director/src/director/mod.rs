@@ -519,11 +519,22 @@ impl DirectorTftpHandler {
 impl Handler for DirectorTftpHandler {
     type Reader = DirectorTftpReader;
 
-    async fn create_reader(&self, filename: &str) -> anyhow::Result<Self::Reader> {
+    async fn create_reader(&self, filename: &str, block_size: u64) -> anyhow::Result<Self::Reader> {
         match filename {
             "ipxe.efi" | "undionly.kpxe" => {
-                let reader = DirectorTftpReader::open(&self.root.join(filename)).await?;
+                let reader =
+                    DirectorTftpReader::open(&self.root.join(filename), block_size).await?;
                 Ok(reader)
+            }
+            _ => Err(anyhow::anyhow!("Unsupported file: {}", filename)),
+        }
+    }
+
+    async fn filesize(&self, filename: &str) -> anyhow::Result<u64> {
+        match filename {
+            "ipxe.efi" | "undionly.kpxe" => {
+                let metadata = tokio::fs::metadata(&self.root.join(filename)).await?;
+                Ok(metadata.len())
             }
             _ => Err(anyhow::anyhow!("Unsupported file: {}", filename)),
         }
@@ -532,20 +543,22 @@ impl Handler for DirectorTftpHandler {
 
 pub struct DirectorTftpReader {
     file: BufReader<tokio::fs::File>,
+    block_size: u64,
 }
 
 impl DirectorTftpReader {
-    pub async fn open(path: &Path) -> anyhow::Result<Self> {
+    pub async fn open(path: &Path, block_size: u64) -> anyhow::Result<Self> {
         let file = tokio::fs::File::open(path).await?;
         Ok(DirectorTftpReader {
             file: BufReader::new(file),
+            block_size,
         })
     }
 }
 
 impl Reader for DirectorTftpReader {
     async fn read(&mut self) -> anyhow::Result<Vec<u8>> {
-        let mut chunk = vec![0; 512]; // Read in chunks of 512 bytes
+        let mut chunk = vec![0; self.block_size as usize]; // Read in chunks of 512 bytes
         let n = self.file.read(&mut chunk).await?;
         chunk.truncate(n); // Return only the bytes that were actually read
         Ok(chunk)

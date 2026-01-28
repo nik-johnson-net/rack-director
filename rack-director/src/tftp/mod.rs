@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 use crate::tftp::{connection::Connection, packet::Packet};
 
 mod connection;
+mod options;
 mod packet;
 mod state;
 pub use state::Handler;
@@ -124,11 +125,19 @@ mod tests {
     impl Handler for TestHandler {
         type Reader = TestReader;
 
-        async fn create_reader(&self, _filename: &str) -> Result<Self::Reader> {
+        async fn create_reader(&self, _filename: &str, block_size: u64) -> Result<Self::Reader> {
             Ok(TestReader {
-                data: self.data.chunks(512).map(|x| x.to_vec()).collect(),
+                data: self
+                    .data
+                    .chunks(block_size as usize)
+                    .map(|x| x.to_vec())
+                    .collect(),
                 next_block: 0,
             })
+        }
+
+        async fn filesize(&self, _filename: &str) -> Result<u64> {
+            Ok(self.data.len() as u64)
         }
     }
 
@@ -155,7 +164,11 @@ mod tests {
     impl Handler for ErrorHandler {
         type Reader = TestReader;
 
-        async fn create_reader(&self, _filename: &str) -> Result<Self::Reader> {
+        async fn create_reader(&self, _filename: &str, _block_size: u64) -> Result<Self::Reader> {
+            Err(anyhow::anyhow!("File not found"))
+        }
+
+        async fn filesize(&self, _filename: &str) -> Result<u64> {
             Err(anyhow::anyhow!("File not found"))
         }
     }
@@ -171,6 +184,7 @@ mod tests {
         let rrq = Packet::Rrq {
             filename: filename.to_string(),
             mode: "octet".to_string(),
+            options: Vec::new(),
         };
         let rrq_bytes = rrq.to_bytes();
 
@@ -330,6 +344,7 @@ mod tests {
         let rrq = Packet::Rrq {
             filename: "nonexistent.txt".to_string(),
             mode: "octet".to_string(),
+            options: Vec::new(),
         };
         let rrq_bytes = rrq.to_bytes();
 
