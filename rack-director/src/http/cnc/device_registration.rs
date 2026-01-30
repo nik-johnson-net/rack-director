@@ -1,6 +1,7 @@
 use crate::http::AppState;
 use log::warn;
 use std::{net::SocketAddr, sync::Arc};
+use uuid::Uuid;
 
 /// Resolves the MAC address for a device from query parameter or DHCP lookup.
 ///
@@ -54,7 +55,7 @@ pub async fn resolve_mac_address(
 /// * `mac_address` - Optional MAC address to link with pending devices
 pub async fn register_and_start_discovery(
     state: &Arc<AppState>,
-    device_uuid: &str,
+    device_uuid: &Uuid,
     mac_address: Option<&String>,
 ) {
     // Check for pending device
@@ -108,6 +109,11 @@ pub async fn register_and_start_discovery(
 mod tests {
     use super::*;
     use crate::database;
+    use uuid::Uuid;
+
+    fn test_uuid() -> Uuid {
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
+    }
     use crate::director::Director;
     use crate::storage::MemoryImageStore;
     use std::net::Ipv4Addr;
@@ -196,24 +202,24 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_start_discovery() {
         let (state, _temp_dir) = create_test_state().await;
-        let uuid = "test-device-uuid";
+        let uuid = test_uuid();
 
         // Verify device doesn't exist
-        assert!(!state.director.device_exists(uuid).await.unwrap());
+        assert!(!state.director.device_exists(&uuid).await.unwrap());
 
-        register_and_start_discovery(&state, uuid, None).await;
+        register_and_start_discovery(&state, &uuid, None).await;
 
         // Verify device was registered
-        assert!(state.director.device_exists(uuid).await.unwrap());
+        assert!(state.director.device_exists(&uuid).await.unwrap());
 
         // Verify lifecycle was started (device should be in New state)
-        let lifecycle = state.director.get_device_lifecycle(uuid).await.unwrap();
+        let lifecycle = state.director.get_device_lifecycle(&uuid).await.unwrap();
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
 
         // Verify discovery plan was created
         let plan = state
             .director
-            .get_active_plan_for_device(uuid)
+            .get_active_plan_for_device(&uuid)
             .await
             .unwrap();
         assert!(plan.is_some());
@@ -222,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_start_discovery_with_pending_device() {
         let (state, _temp_dir) = create_test_state().await;
-        let uuid = "test-device-uuid";
+        let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff".to_string();
 
         // Create pending device
@@ -236,10 +242,10 @@ mod tests {
             .unwrap();
         assert!(pending.is_some());
 
-        register_and_start_discovery(&state, uuid, Some(&mac)).await;
+        register_and_start_discovery(&state, &uuid, Some(&mac)).await;
 
         // Verify device was registered
-        assert!(state.director.device_exists(uuid).await.unwrap());
+        assert!(state.director.device_exists(&uuid).await.unwrap());
 
         // Verify pending device was completed (removed)
         let pending = state

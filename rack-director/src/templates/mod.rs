@@ -3,6 +3,7 @@ use crate::roles::Role;
 use anyhow::Result;
 use handlebars::Handlebars;
 use serde_json::json;
+use uuid::Uuid;
 
 /// Network information for a device
 #[derive(Debug, Clone)]
@@ -17,7 +18,7 @@ pub struct NetworkInfo {
 /// Device attributes for template rendering
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
-    pub uuid: String,
+    pub uuid: Uuid,
     pub hostname: Option<String>,
 }
 
@@ -51,7 +52,7 @@ pub fn render_install_script(
     // Build context with all available variables
     let context = json!({
         "device": {
-            "uuid": device.uuid,
+            "uuid": device.uuid.to_string(),
             "hostname": device.hostname.as_deref().unwrap_or("unknown"),
             "mac_address": network.mac_address,
             "ip_address": network.ip_address,
@@ -88,12 +89,13 @@ pub fn render_cmdline_args(template: &str, root_url: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::roles::DiskLayout;
+    use uuid::Uuid;
 
     #[test]
     fn test_render_simple_template() {
         let template = "hostname: {{ device.hostname }}";
         let device = DeviceInfo {
-            uuid: "test-uuid".to_string(),
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             hostname: Some("server01".to_string()),
         };
         let role = Role {
@@ -136,7 +138,7 @@ network:
   dns: {{ device.dns_servers }}
 "#;
         let device = DeviceInfo {
-            uuid: "test-uuid".to_string(),
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             hostname: Some("server01".to_string()),
         };
         let role = Role {
@@ -175,7 +177,7 @@ network:
     fn test_render_with_custom_config() {
         let template = "{{#each config.packages}}{{ this }} {{/each}}";
         let device = DeviceInfo {
-            uuid: "test-uuid".to_string(),
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             hostname: Some("server01".to_string()),
         };
         let role = Role {
@@ -220,7 +222,7 @@ d-i netcfg/get_gateway string {{ device.gateway }}
 d-i netcfg/get_nameservers string {{ device.dns_servers }}
 "#;
         let device = DeviceInfo {
-            uuid: "test-uuid".to_string(),
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             hostname: Some("debian-server".to_string()),
         };
         let role = Role {

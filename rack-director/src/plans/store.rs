@@ -4,6 +4,7 @@ use crate::plans::{Action, Plan, PlanStatus};
 use anyhow::Result;
 use rusqlite::Connection;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct PlansStore {
@@ -20,7 +21,7 @@ impl PlansStore {
         self.create_plan_internal(&conn, plan)
     }
 
-    pub async fn get_active_plan_for_device(&self, device_uuid: &str) -> Result<Option<Plan>> {
+    pub async fn get_active_plan_for_device(&self, device_uuid: &Uuid) -> Result<Option<Plan>> {
         let conn = self.conn.lock().await;
         self.get_active_plan_for_device_internal(&conn, device_uuid)
     }
@@ -51,10 +52,10 @@ impl PlansStore {
         }
 
         conn.execute(
-            "INSERT INTO plans (device_uuid, status, current_step, total_steps, actions, error_message, created_at) 
+            "INSERT INTO plans (device_uuid, status, current_step, total_steps, actions, error_message, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)",
             rusqlite::params![
-                plan.device_uuid,
+                plan.device_uuid.to_string(),
                 status_str,
                 plan.current_step,
                 plan.total_steps,
@@ -69,18 +70,18 @@ impl PlansStore {
     fn get_active_plan_for_device_internal(
         &self,
         conn: &Connection,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> Result<Option<Plan>> {
         let mut stmt = conn.prepare(
-            "SELECT id, device_uuid, status, current_step, total_steps, actions, error_message, 
-                    created_at, started_at, completed_at 
-             FROM plans 
-             WHERE device_uuid = ?1 AND status IN ('pending', 'running') 
-             ORDER BY created_at DESC 
+            "SELECT id, device_uuid, status, current_step, total_steps, actions, error_message,
+                    created_at, started_at, completed_at
+             FROM plans
+             WHERE device_uuid = ?1 AND status IN ('pending', 'running')
+             ORDER BY created_at DESC
              LIMIT 1",
         )?;
 
-        let mut plan_iter = stmt.query_map([device_uuid], |row| {
+        let mut plan_iter = stmt.query_map([device_uuid.to_string()], |row| {
             let actions_json: String = row.get(5)?;
             let actions: Vec<Action> = serde_json::from_str(&actions_json).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(

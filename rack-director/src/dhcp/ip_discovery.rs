@@ -51,6 +51,7 @@ pub fn discover_server_identifier() -> Result<Ipv4Addr> {
 }
 
 /// Guess if the given subnet is a local network.
+#[allow(dead_code)]
 pub fn is_subnet_local(subnet: Ipv4Subnet) -> Result<bool> {
     let local_addr = discover_outgoing_ip_for(SocketAddrV4::new(subnet.addr, 80).into())?;
     Ok(subnet.ip_in_range(local_addr))

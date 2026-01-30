@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use uuid::Uuid;
 
 use super::store::DhcpStore;
 
@@ -18,7 +19,7 @@ impl IpAllocator {
     pub async fn allocate_for_device_in_network(
         &self,
         mac: &str,
-        uuid: &str,
+        uuid: &Uuid,
         network_id: i64,
     ) -> Result<Ipv4Addr> {
         // 1. Check static reservation in this network

@@ -2,6 +2,7 @@ use crate::director::NetworkInterface;
 use crate::http::AppState;
 use log::warn;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Enriches network interfaces with IP addresses and network IDs from DHCP leases.
 ///
@@ -57,7 +58,7 @@ pub async fn enrich_interfaces_with_dhcp_info(
 /// for any interface with a duplicate MAC on the same network.
 pub async fn detect_and_mark_duplicates(
     state: &Arc<AppState>,
-    device_uuid: &str,
+    device_uuid: &Uuid,
     interfaces: &mut [NetworkInterface],
 ) {
     for nic in interfaces.iter_mut() {
@@ -125,7 +126,7 @@ pub async fn detect_and_mark_duplicates(
 /// to the provided device UUID.
 pub async fn complete_pending_devices_for_interfaces(
     state: &Arc<AppState>,
-    device_uuid: &str,
+    device_uuid: &Uuid,
     interfaces: &[NetworkInterface],
 ) {
     for nic in interfaces {
@@ -147,6 +148,11 @@ pub async fn complete_pending_devices_for_interfaces(
 mod tests {
     use super::*;
     use crate::database;
+    use uuid::Uuid;
+
+    fn test_uuid() -> Uuid {
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
+    }
     use crate::director::Director;
     use crate::storage::MemoryImageStore;
     use std::net::Ipv4Addr;
@@ -250,10 +256,10 @@ mod tests {
     async fn test_detect_and_mark_duplicates_no_duplicates() {
         let (state, _temp_dir) = create_test_state().await;
 
-        let uuid = "device-1";
+        let uuid = test_uuid();
         state
             .director
-            .register_device(uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -267,7 +273,7 @@ mod tests {
             warning_label: None,
         }];
 
-        detect_and_mark_duplicates(&state, uuid, &mut interfaces).await;
+        detect_and_mark_duplicates(&state, &uuid, &mut interfaces).await;
 
         assert_eq!(interfaces[0].disabled, false);
         assert_eq!(interfaces[0].warning_label, None);
@@ -277,7 +283,7 @@ mod tests {
     async fn test_complete_pending_devices_for_interfaces_no_pending() {
         let (state, _temp_dir) = create_test_state().await;
 
-        let uuid = "device-1";
+        let uuid = test_uuid();
         let interfaces = vec![NetworkInterface {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
@@ -289,7 +295,7 @@ mod tests {
         }];
 
         // Should not panic or error
-        complete_pending_devices_for_interfaces(&state, uuid, &interfaces).await;
+        complete_pending_devices_for_interfaces(&state, &uuid, &interfaces).await;
     }
 
     #[tokio::test]
@@ -297,12 +303,12 @@ mod tests {
         let (state, _temp_dir) = create_test_state().await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
-        let uuid = "device-1";
+        let uuid = test_uuid();
 
         // Register the device first (required due to foreign key constraint)
         state
             .director
-            .register_device(uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -327,7 +333,7 @@ mod tests {
             warning_label: None,
         }];
 
-        complete_pending_devices_for_interfaces(&state, uuid, &interfaces).await;
+        complete_pending_devices_for_interfaces(&state, &uuid, &interfaces).await;
 
         // Verify pending device was completed (removed)
         let pending = state

@@ -4,13 +4,14 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::lifecycle::DeviceLifecycle;
 use crate::operating_systems::Architecture;
 
 #[derive(Debug, Clone)]
 pub struct Device {
-    pub uuid: String,
+    pub uuid: Uuid,
     pub architecture: Architecture,
     pub lifecycle: Option<DeviceLifecycle>,
     pub role_id: Option<i64>,
@@ -41,7 +42,7 @@ pub struct NetworkInterface {
 pub struct PendingDevice {
     pub id: i64,
     pub mac_address: String,
-    pub device_uuid: Option<String>,
+    pub device_uuid: Option<Uuid>,
     pub network_id: i64,
     pub created_at: String,
     pub completed_at: Option<String>,
@@ -57,39 +58,41 @@ impl DirectorStore {
         Self { conn }
     }
 
-    pub async fn register_device(&self, uuid: &str, architecture: Architecture) -> Result<()> {
+    pub async fn register_device(&self, uuid: &Uuid, architecture: Architecture) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', ?2)",
-            params![uuid, architecture.as_str()],
+            params![uuid.to_string(), architecture.as_str()],
         )?;
         Ok(())
     }
 
-    pub async fn device_exists(&self, uuid: &str) -> Result<bool> {
+    pub async fn device_exists(&self, uuid: &Uuid) -> Result<bool> {
         let conn = self.conn.lock().await;
         let res = conn
-            .query_one("SELECT 1 FROM devices WHERE uuid = ?1", [uuid], |r| {
-                r.get(0)
-            })
+            .query_one(
+                "SELECT 1 FROM devices WHERE uuid = ?1",
+                [uuid.to_string()],
+                |r| r.get(0),
+            )
             .optional()
             .map(|op: Option<i32>| op.is_some())?;
         Ok(res)
     }
 
-    pub async fn update_device_last_seen(&self, uuid: &str) -> Result<()> {
+    pub async fn update_device_last_seen(&self, uuid: &Uuid) -> Result<()> {
         let conn = self.conn.lock().await;
 
         conn.execute(
             "UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
-            [uuid],
+            [uuid.to_string()],
         )?;
         Ok(())
     }
 
     pub async fn update_attributes(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         attributes: serde_json::Map<String, serde_json::Value>,
     ) -> Result<()> {
         // Get existing attributes
@@ -105,20 +108,23 @@ impl DirectorStore {
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
-            [&serde_json::to_string(&merged_attributes)?, uuid],
+            [
+                &serde_json::to_string(&merged_attributes)?,
+                &uuid.to_string(),
+            ],
         )?;
 
         Ok(())
     }
 
-    pub async fn get_device(&self, uuid: &str) -> Result<Device> {
+    pub async fn get_device(&self, uuid: &Uuid) -> Result<Device> {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
             "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1"
         )?;
-        let device = stmt.query_row(params![uuid], |row| {
-            let uuid: String = row.get(0)?;
+        let device = stmt.query_row(params![uuid.to_string()], |row| {
+            let uuid = row.get(0)?;
             let architecture_str: String = row.get(1)?;
             let lifecycle_str: Option<String> = row.get(2)?;
             let role_id: Option<i64> = row.get(3)?;
@@ -164,7 +170,7 @@ impl DirectorStore {
             "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices"
         )?;
         let rows = stmt.query_map([], |row| {
-            let uuid: String = row.get(0)?;
+            let uuid = row.get(0)?;
             let architecture_str: String = row.get(1)?;
             let lifecycle_str: Option<String> = row.get(2)?;
             let role_id: Option<i64> = row.get(3)?;
@@ -210,7 +216,7 @@ impl DirectorStore {
 
     /// Find device UUID by MAC address from device attributes
     /// Searches both legacy mac_address field and network_interfaces array
-    pub async fn find_device_by_mac(&self, mac: &str) -> Result<Option<String>> {
+    pub async fn find_device_by_mac(&self, mac: &str) -> Result<Option<Uuid>> {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
@@ -223,39 +229,40 @@ impl DirectorStore {
         )?;
 
         let result = stmt
-            .query_row(params![mac, mac], |row| row.get::<_, String>(0))
+            .query_row(params![mac, mac], |row| row.get(0))
             .optional()?;
 
         Ok(result)
     }
 
     /// Set hostname in device attributes
-    pub async fn set_hostname(&self, uuid: &str, hostname: &str) -> Result<()> {
+    pub async fn set_hostname(&self, uuid: &Uuid, hostname: &str) -> Result<()> {
         let conn = self.conn.lock().await;
 
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.hostname', ?) WHERE uuid = ?",
-            params![hostname, uuid],
+            params![hostname, uuid.to_string()],
         )?;
 
         Ok(())
     }
 
     /// Set MAC address in device attributes
-    pub async fn set_mac_address(&self, uuid: &str, mac: &str) -> Result<()> {
+    pub async fn set_mac_address(&self, uuid: &Uuid, mac: &str) -> Result<()> {
         let conn = self.conn.lock().await;
+        let uuid_str = uuid.to_string();
 
         // First, update the legacy mac_address field
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.mac_address', ?) WHERE uuid = ?",
-            params![mac, uuid],
+            params![mac, &uuid_str],
         )?;
 
         // Then, if network_interfaces array exists, update the primary NIC's MAC address
         let has_interfaces: bool = conn
             .query_row(
                 "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
-                params![uuid],
+                params![&uuid_str],
                 |row| {
                     let json_type: Option<String> = row.get(0)?;
                     Ok(json_type == Some("array".to_string()))
@@ -271,7 +278,7 @@ impl DirectorStore {
                     "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?), '$.network_interfaces')
                      WHERE json_extract(value, '$.is_primary') = 1
                      LIMIT 1",
-                    params![uuid],
+                    params![&uuid_str],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;
@@ -280,7 +287,7 @@ impl DirectorStore {
                 let path = format!("$.network_interfaces[{}].mac_address", index);
                 conn.execute(
                     "UPDATE devices SET attributes = json_set(attributes, ?, ?) WHERE uuid = ?",
-                    params![path, mac, uuid],
+                    params![path, mac, &uuid_str],
                 )?;
             }
         }
@@ -290,13 +297,15 @@ impl DirectorStore {
 
     /// Set IP address in device attributes (called by DHCP when lease becomes active)
     /// Updates either BMC IP or network interface IP based on the MAC address
-    pub async fn set_ip_address(&self, uuid: &str, ip: &str, mac: &str) -> Result<()> {
+    pub async fn set_ip_address(&self, uuid: &Uuid, ip: &str, mac: &str) -> Result<()> {
+        let uuid_str = uuid.to_string();
+
         // Check if this MAC belongs to the BMC
         let is_bmc: bool = {
             let conn = self.conn.lock().await;
             conn.query_row(
                 "SELECT COALESCE(json_extract(attributes, '$.bmc.mac_address') = ?, 0) FROM devices WHERE uuid = ?",
-                params![mac, uuid],
+                params![mac, &uuid_str],
                 |row| row.get::<_, bool>(0),
             )
             .optional()?
@@ -308,7 +317,7 @@ impl DirectorStore {
             let conn = self.conn.lock().await;
             conn.execute(
                 "UPDATE devices SET attributes = json_set(attributes, '$.bmc.ip_address', ?) WHERE uuid = ?",
-                params![ip, uuid],
+                params![ip, &uuid_str],
             )?;
             return Ok(());
         }
@@ -341,7 +350,7 @@ impl DirectorStore {
     }
 
     /// Get network interfaces from device attributes
-    pub async fn get_network_interfaces(&self, uuid: &str) -> Result<Vec<NetworkInterface>> {
+    pub async fn get_network_interfaces(&self, uuid: &Uuid) -> Result<Vec<NetworkInterface>> {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
@@ -349,7 +358,9 @@ impl DirectorStore {
         )?;
 
         let result = stmt
-            .query_row(params![uuid], |row| row.get::<_, Option<String>>(0))
+            .query_row(params![uuid.to_string()], |row| {
+                row.get::<_, Option<String>>(0)
+            })
             .optional()?;
 
         match result {
@@ -366,7 +377,7 @@ impl DirectorStore {
     /// Set network interfaces in device attributes
     pub async fn set_network_interfaces(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         interfaces: &[NetworkInterface],
     ) -> Result<()> {
         let conn = self.conn.lock().await;
@@ -375,7 +386,7 @@ impl DirectorStore {
 
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', json(?)) WHERE uuid = ?",
-            params![json_str, uuid],
+            params![json_str, uuid.to_string()],
         )?;
 
         Ok(())
@@ -383,7 +394,7 @@ impl DirectorStore {
 
     /// Find device UUID by MAC address in either legacy mac_address field or network_interfaces array
     #[cfg(test)]
-    pub async fn find_device_by_any_mac(&self, mac: &str) -> Result<Option<String>> {
+    pub async fn find_device_by_any_mac(&self, mac: &str) -> Result<Option<Uuid>> {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
@@ -396,7 +407,7 @@ impl DirectorStore {
         )?;
 
         let result = stmt
-            .query_row(params![mac, mac], |row| row.get::<_, String>(0))
+            .query_row(params![mac, mac], |row| row.get(0))
             .optional()?;
 
         Ok(result)
@@ -450,7 +461,7 @@ impl DirectorStore {
     pub async fn complete_pending_device(
         &self,
         mac_address: &str,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
 
@@ -458,7 +469,7 @@ impl DirectorStore {
             "UPDATE pending_devices
              SET device_uuid = ?1, completed_at = CURRENT_TIMESTAMP
              WHERE mac_address = ?2 AND completed_at IS NULL",
-            params![device_uuid, mac_address],
+            params![device_uuid.to_string(), mac_address],
         )?;
 
         Ok(())
@@ -505,7 +516,7 @@ impl DirectorStore {
     ///
     /// Searches all devices for a BMC with the given MAC address in their attributes.
     /// Returns the device UUID if a match is found.
-    pub async fn find_device_by_bmc_mac(&self, mac: &str) -> Result<Option<String>> {
+    pub async fn find_device_by_bmc_mac(&self, mac: &str) -> Result<Option<Uuid>> {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
@@ -513,9 +524,7 @@ impl DirectorStore {
              WHERE json_extract(attributes, '$.bmc.mac_address') = ?",
         )?;
 
-        let result = stmt
-            .query_row(params![mac], |row| row.get::<_, String>(0))
-            .optional()?;
+        let result = stmt.query_row(params![mac], |row| row.get(0)).optional()?;
 
         Ok(result)
     }
@@ -530,8 +539,8 @@ impl DirectorStore {
         &self,
         mac: &str,
         network_id: i64,
-        exclude_device: &str,
-    ) -> Result<Vec<(String, String)>> {
+        exclude_device: &Uuid,
+    ) -> Result<Vec<(Uuid, String)>> {
         let conn = self.conn.lock().await;
 
         let mut stmt = conn.prepare(
@@ -544,11 +553,14 @@ impl DirectorStore {
              )",
         )?;
 
-        let rows = stmt.query_map(params![exclude_device, mac, network_id], |row| {
-            let uuid: String = row.get(0)?;
-            let attributes_json: Option<String> = row.get(1)?;
-            Ok((uuid, attributes_json))
-        })?;
+        let rows = stmt.query_map(
+            params![exclude_device.to_string(), mac, network_id],
+            |row| {
+                let uuid = row.get(0)?;
+                let attributes_json: Option<String> = row.get(1)?;
+                Ok((uuid, attributes_json))
+            },
+        )?;
 
         let mut duplicates = Vec::new();
 
@@ -569,7 +581,7 @@ impl DirectorStore {
                         && interface.mac_address == mac
                         && interface.network_id == Some(network_id)
                     {
-                        duplicates.push((uuid.clone(), interface.interface_name.clone()));
+                        duplicates.push((uuid, interface.interface_name.clone()));
                     }
                 }
             }
@@ -580,12 +592,17 @@ impl DirectorStore {
 }
 
 /// Extract last UUID segment (after final hyphen) for hostname generation
-pub fn extract_uuid_last_segment(uuid: &str) -> String {
-    uuid.split('-').next_back().unwrap_or("unknown").to_string()
+pub fn extract_uuid_last_segment(uuid: &Uuid) -> String {
+    let uuid_str = uuid.to_string();
+    uuid_str
+        .split('-')
+        .next_back()
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// Generate hostname from UUID: "node-{last_segment}"
-pub fn generate_hostname_from_uuid(uuid: &str) -> String {
+pub fn generate_hostname_from_uuid(uuid: &Uuid) -> String {
     format!("node-{}", extract_uuid_last_segment(uuid))
 }
 
@@ -593,6 +610,12 @@ pub fn generate_hostname_from_uuid(uuid: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use uuid::Uuid;
+
+    fn test_uuid(suffix: u16) -> Uuid {
+        Uuid::parse_str(&format!("550e8400-e29b-41d4-a716-4466554400{:02x}", suffix))
+            .expect("test UUID should be valid")
+    }
 
     async fn create_test_store() -> (DirectorStore, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
@@ -603,40 +626,32 @@ mod tests {
 
     #[test]
     fn test_extract_uuid_last_segment() {
-        assert_eq!(
-            extract_uuid_last_segment("550e8400-e29b-41d4-a716-446655440010"),
-            "446655440010"
-        );
-        assert_eq!(extract_uuid_last_segment("simple-uuid"), "uuid");
-        assert_eq!(extract_uuid_last_segment("no-hyphens"), "hyphens");
-        assert_eq!(extract_uuid_last_segment("single"), "single");
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440010").unwrap();
+        assert_eq!(extract_uuid_last_segment(&uuid), "446655440010");
     }
 
     #[test]
     fn test_generate_hostname_from_uuid() {
-        assert_eq!(
-            generate_hostname_from_uuid("550e8400-e29b-41d4-a716-446655440010"),
-            "node-446655440010"
-        );
-        assert_eq!(generate_hostname_from_uuid("simple-uuid"), "node-uuid");
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440010").unwrap();
+        assert_eq!(generate_hostname_from_uuid(&uuid), "node-446655440010");
     }
 
     #[tokio::test]
     async fn test_set_hostname() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440020";
+        let uuid = test_uuid(0x20);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set hostname
-        store.set_hostname(uuid, "test-hostname").await.unwrap();
+        store.set_hostname(&uuid, "test-hostname").await.unwrap();
 
         // Verify
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device.attributes.get("hostname").unwrap().as_str().unwrap(),
             "test-hostname"
@@ -646,22 +661,22 @@ mod tests {
     #[tokio::test]
     async fn test_set_mac_address() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440021";
+        let uuid = test_uuid(0x21);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set MAC address
         store
-            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .set_mac_address(&uuid, "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
 
         // Verify
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device
                 .attributes
@@ -676,47 +691,50 @@ mod tests {
     #[tokio::test]
     async fn test_set_ip_address() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440023";
+        let uuid = test_uuid(0x23);
         let mac = "aa:bb:cc:dd:ee:ff";
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set IP address for a MAC (creates new interface)
-        store.set_ip_address(uuid, "10.0.0.150", mac).await.unwrap();
+        store
+            .set_ip_address(&uuid, "10.0.0.150", mac)
+            .await
+            .unwrap();
 
         // Verify interface was created with correct IP
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].mac_address, mac);
         assert_eq!(interfaces[0].ip_address, Some("10.0.0.150".to_string()));
         assert!(interfaces[0].is_primary); // Should be primary as it's the first interface
 
         // Verify legacy ip_address field is NOT set
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert!(device.attributes.get("ip_address").is_none());
     }
 
     #[tokio::test]
     async fn test_hostname_generation_on_register() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440022";
+        let uuid = test_uuid(0x22);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Generate and set hostname
-        let hostname = generate_hostname_from_uuid(uuid);
-        store.set_hostname(uuid, &hostname).await.unwrap();
+        let hostname = generate_hostname_from_uuid(&uuid);
+        store.set_hostname(&uuid, &hostname).await.unwrap();
 
         // Verify
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device.attributes.get("hostname").unwrap().as_str().unwrap(),
             "node-446655440022"
@@ -726,19 +744,19 @@ mod tests {
     #[tokio::test]
     async fn test_update_attributes_preserves_existing() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440024";
+        let uuid = test_uuid(0x24);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set initial attributes (hostname via set_hostname to simulate real flow)
-        store.set_hostname(uuid, "server-01").await.unwrap();
+        store.set_hostname(&uuid, "server-01").await.unwrap();
 
         // Verify initial state
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device.attributes.get("hostname").unwrap().as_str().unwrap(),
             "server-01"
@@ -759,10 +777,13 @@ mod tests {
             serde_json::Value::String("ABC12345".to_string()),
         );
 
-        store.update_attributes(uuid, hardware_attrs).await.unwrap();
+        store
+            .update_attributes(&uuid, hardware_attrs)
+            .await
+            .unwrap();
 
         // Verify ALL attributes are present (both old and new)
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
 
         // Original attribute should be preserved
         assert_eq!(
@@ -807,11 +828,11 @@ mod tests {
     #[tokio::test]
     async fn test_update_attributes_overwrites_existing_keys() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440025";
+        let uuid = test_uuid(0x25);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -825,7 +846,7 @@ mod tests {
             "manufacturer".to_string(),
             serde_json::Value::String("Unknown".to_string()),
         );
-        store.update_attributes(uuid, initial_attrs).await.unwrap();
+        store.update_attributes(&uuid, initial_attrs).await.unwrap();
 
         // Update with overlapping keys
         let mut new_attrs = serde_json::Map::new();
@@ -837,10 +858,10 @@ mod tests {
             "product_name".to_string(),
             serde_json::Value::String("PowerEdge".to_string()),
         );
-        store.update_attributes(uuid, new_attrs).await.unwrap();
+        store.update_attributes(&uuid, new_attrs).await.unwrap();
 
         // Verify overlapping key is updated, non-overlapping keys are preserved
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
 
         assert_eq!(
             device.attributes.get("hostname").unwrap().as_str().unwrap(),
@@ -874,23 +895,23 @@ mod tests {
     #[tokio::test]
     async fn test_update_attributes_empty_map() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440026";
+        let uuid = test_uuid(0x26);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set initial attributes
-        store.set_hostname(uuid, "test-host").await.unwrap();
+        store.set_hostname(&uuid, "test-host").await.unwrap();
 
         // Update with empty map (should preserve existing)
         let empty_attrs = serde_json::Map::new();
-        store.update_attributes(uuid, empty_attrs).await.unwrap();
+        store.update_attributes(&uuid, empty_attrs).await.unwrap();
 
         // Verify existing attributes are preserved
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device.attributes.get("hostname").unwrap().as_str().unwrap(),
             "test-host"
@@ -903,27 +924,27 @@ mod tests {
     #[tokio::test]
     async fn test_get_network_interfaces_empty() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440030";
+        let uuid = test_uuid(0x30);
 
         // Register device without any NICs
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Get interfaces should return empty vec
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 0);
     }
 
     #[tokio::test]
     async fn test_get_network_interfaces_single() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440031";
+        let uuid = test_uuid(0x31);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -938,12 +959,12 @@ mod tests {
             warning_label: None,
         }];
         store
-            .set_network_interfaces(uuid, &interfaces)
+            .set_network_interfaces(&uuid, &interfaces)
             .await
             .unwrap();
 
         // Retrieve and verify
-        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        let retrieved = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].interface_name, "eth0");
         assert_eq!(retrieved[0].mac_address, "aa:bb:cc:dd:ee:01");
@@ -954,11 +975,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_network_interfaces_multiple() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440032";
+        let uuid = test_uuid(0x32);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -993,12 +1014,12 @@ mod tests {
             },
         ];
         store
-            .set_network_interfaces(uuid, &interfaces)
+            .set_network_interfaces(&uuid, &interfaces)
             .await
             .unwrap();
 
         // Retrieve and verify
-        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        let retrieved = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(retrieved.len(), 3);
         assert_eq!(retrieved[0].interface_name, "eth0");
         assert_eq!(retrieved[1].interface_name, "eth1");
@@ -1011,11 +1032,11 @@ mod tests {
     #[tokio::test]
     async fn test_set_network_interfaces_overwrites() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440033";
+        let uuid = test_uuid(0x33);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1029,7 +1050,7 @@ mod tests {
             disabled: false,
             warning_label: None,
         }];
-        store.set_network_interfaces(uuid, &initial).await.unwrap();
+        store.set_network_interfaces(&uuid, &initial).await.unwrap();
 
         // Overwrite with different interfaces
         let updated = vec![
@@ -1052,10 +1073,10 @@ mod tests {
                 warning_label: None,
             },
         ];
-        store.set_network_interfaces(uuid, &updated).await.unwrap();
+        store.set_network_interfaces(&uuid, &updated).await.unwrap();
 
         // Verify it was overwritten
-        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        let retrieved = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(retrieved.len(), 2);
         assert_eq!(retrieved[0].interface_name, "ens0");
         assert_eq!(retrieved[1].interface_name, "ens1");
@@ -1064,23 +1085,23 @@ mod tests {
     #[tokio::test]
     async fn test_find_device_by_mac_legacy_field() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440034";
+        let uuid = test_uuid(0x34);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set MAC using legacy method
         store
-            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .set_mac_address(&uuid, "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
 
         // Find by MAC should work
         let found = store.find_device_by_mac("aa:bb:cc:dd:ee:ff").await.unwrap();
-        assert_eq!(found, Some(uuid.to_string()));
+        assert_eq!(found, Some(uuid));
 
         // Non-existent MAC should return None
         let not_found = store.find_device_by_mac("00:00:00:00:00:00").await.unwrap();
@@ -1090,11 +1111,11 @@ mod tests {
     #[tokio::test]
     async fn test_find_device_by_mac_in_interfaces_array() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440035";
+        let uuid = test_uuid(0x35);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1120,17 +1141,17 @@ mod tests {
             },
         ];
         store
-            .set_network_interfaces(uuid, &interfaces)
+            .set_network_interfaces(&uuid, &interfaces)
             .await
             .unwrap();
 
         // Find by primary MAC
         let found1 = store.find_device_by_mac("aa:bb:cc:dd:ee:01").await.unwrap();
-        assert_eq!(found1, Some(uuid.to_string()));
+        assert_eq!(found1, Some(uuid));
 
         // Find by secondary MAC
         let found2 = store.find_device_by_mac("aa:bb:cc:dd:ee:02").await.unwrap();
-        assert_eq!(found2, Some(uuid.to_string()));
+        assert_eq!(found2, Some(uuid));
 
         // Non-existent MAC should return None
         let not_found = store.find_device_by_mac("00:00:00:00:00:00").await.unwrap();
@@ -1140,17 +1161,17 @@ mod tests {
     #[tokio::test]
     async fn test_find_device_by_any_mac() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440036";
+        let uuid = test_uuid(0x36);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set both legacy MAC and interfaces array
         store
-            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .set_mac_address(&uuid, "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
 
@@ -1175,7 +1196,7 @@ mod tests {
             },
         ];
         store
-            .set_network_interfaces(uuid, &interfaces)
+            .set_network_interfaces(&uuid, &interfaces)
             .await
             .unwrap();
 
@@ -1184,35 +1205,35 @@ mod tests {
             .find_device_by_any_mac("aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
-        assert_eq!(found_legacy, Some(uuid.to_string()));
+        assert_eq!(found_legacy, Some(uuid));
 
         // Find by interface MAC
         let found_iface = store
             .find_device_by_any_mac("aa:bb:cc:dd:ee:02")
             .await
             .unwrap();
-        assert_eq!(found_iface, Some(uuid.to_string()));
+        assert_eq!(found_iface, Some(uuid));
     }
 
     #[tokio::test]
     async fn test_set_mac_address_legacy_only() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440037";
+        let uuid = test_uuid(0x37);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set MAC address without interfaces array
         store
-            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .set_mac_address(&uuid, "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
 
         // Verify legacy field is set
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device
                 .attributes
@@ -1224,18 +1245,18 @@ mod tests {
         );
 
         // Verify interfaces array is still empty
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 0);
     }
 
     #[tokio::test]
     async fn test_set_mac_address_updates_primary_interface() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440038";
+        let uuid = test_uuid(0x38);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1261,18 +1282,18 @@ mod tests {
             },
         ];
         store
-            .set_network_interfaces(uuid, &interfaces)
+            .set_network_interfaces(&uuid, &interfaces)
             .await
             .unwrap();
 
         // Update MAC address
         store
-            .set_mac_address(uuid, "11:22:33:44:55:66")
+            .set_mac_address(&uuid, "11:22:33:44:55:66")
             .await
             .unwrap();
 
         // Verify legacy field is updated
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device
                 .attributes
@@ -1284,7 +1305,7 @@ mod tests {
         );
 
         // Verify primary interface MAC is updated
-        let updated_interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let updated_interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(updated_interfaces[0].mac_address, "11:22:33:44:55:66");
         // Secondary interface should be unchanged
         assert_eq!(updated_interfaces[1].mac_address, "aa:bb:cc:dd:ee:02");
@@ -1293,38 +1314,41 @@ mod tests {
     #[tokio::test]
     async fn test_set_ip_address_creates_interface_when_missing() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440039";
+        let uuid = test_uuid(0x39);
         let mac = "aa:bb:cc:dd:ee:ff";
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set IP address without pre-existing interfaces array
-        store.set_ip_address(uuid, "10.0.0.100", mac).await.unwrap();
+        store
+            .set_ip_address(&uuid, "10.0.0.100", mac)
+            .await
+            .unwrap();
 
         // Verify interface was created
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].mac_address, mac);
         assert_eq!(interfaces[0].ip_address, Some("10.0.0.100".to_string()));
         assert!(interfaces[0].is_primary);
 
         // Verify legacy field is NOT set
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert!(device.attributes.get("ip_address").is_none());
     }
 
     #[tokio::test]
     async fn test_set_ip_address_updates_by_mac() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440040";
+        let uuid = test_uuid(0x40);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1350,18 +1374,18 @@ mod tests {
             },
         ];
         store
-            .set_network_interfaces(uuid, &interfaces)
+            .set_network_interfaces(&uuid, &interfaces)
             .await
             .unwrap();
 
         // Update IP address for eth1 (non-primary) by MAC
         store
-            .set_ip_address(uuid, "192.168.1.50", "aa:bb:cc:dd:ee:02")
+            .set_ip_address(&uuid, "192.168.1.50", "aa:bb:cc:dd:ee:02")
             .await
             .unwrap();
 
         // Verify eth1 IP is updated
-        let updated_interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let updated_interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(
             updated_interfaces[1].ip_address,
             Some("192.168.1.50".to_string())
@@ -1373,32 +1397,32 @@ mod tests {
         );
 
         // Verify legacy field is NOT set
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert!(device.attributes.get("ip_address").is_none());
     }
 
     #[tokio::test]
     async fn test_backward_compatibility_legacy_device() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440041";
+        let uuid = test_uuid(0x41);
 
         // Register device and set up as a legacy device (no network_interfaces)
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
         store
-            .set_mac_address(uuid, "aa:bb:cc:dd:ee:ff")
+            .set_mac_address(&uuid, "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
         store
-            .set_ip_address(uuid, "10.0.0.100", "aa:bb:cc:dd:ee:ff")
+            .set_ip_address(&uuid, "10.0.0.100", "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
 
         // Verify legacy mac_address field still works
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
             device
                 .attributes
@@ -1414,10 +1438,10 @@ mod tests {
 
         // Verify find_device_by_mac still works
         let found = store.find_device_by_mac("aa:bb:cc:dd:ee:ff").await.unwrap();
-        assert_eq!(found, Some(uuid.to_string()));
+        assert_eq!(found, Some(uuid));
 
         // Verify network_interfaces was created with the IP
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].mac_address, "aa:bb:cc:dd:ee:ff");
         assert_eq!(interfaces[0].ip_address, Some("10.0.0.100".to_string()));
@@ -1426,12 +1450,12 @@ mod tests {
     #[tokio::test]
     async fn test_set_ip_address_for_bmc() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440042";
+        let uuid = test_uuid(0x42);
         let bmc_mac = "aa:bb:cc:dd:ee:aa";
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1441,19 +1465,19 @@ mod tests {
             r#"UPDATE devices SET attributes = json_set(attributes, '$.bmc',
                json('{"mac_address":"aa:bb:cc:dd:ee:aa","ip_address":null,"ip_address_source":"Unknown"}')
             ) WHERE uuid = ?"#,
-            params![uuid],
+            params![uuid.to_string()],
         )
         .unwrap();
         drop(conn);
 
         // Set IP address for BMC MAC
         store
-            .set_ip_address(uuid, "10.0.1.50", bmc_mac)
+            .set_ip_address(&uuid, "10.0.1.50", bmc_mac)
             .await
             .unwrap();
 
         // Verify BMC IP was updated
-        let device = store.get_device(uuid).await.unwrap();
+        let device = store.get_device(&uuid).await.unwrap();
         let bmc = device.attributes.get("bmc").unwrap();
         assert_eq!(
             bmc.get("ip_address").unwrap().as_str().unwrap(),
@@ -1461,18 +1485,18 @@ mod tests {
         );
 
         // Verify network_interfaces was NOT created
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 0);
     }
 
     #[tokio::test]
     async fn test_get_network_interfaces_invalid_json() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440042";
+        let uuid = test_uuid(0x42);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1480,12 +1504,12 @@ mod tests {
         let conn = store.conn.lock().await;
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', 'invalid') WHERE uuid = ?",
-            params![uuid],
+            params![uuid.to_string()],
         ).unwrap();
         drop(conn);
 
         // Should return empty vec instead of error
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 0);
     }
 
@@ -1494,11 +1518,11 @@ mod tests {
     #[tokio::test]
     async fn test_network_interface_disabled_fields_serialization() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440043";
+        let uuid = test_uuid(0x43);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1514,12 +1538,12 @@ mod tests {
         };
 
         store
-            .set_network_interfaces(uuid, &[interface.clone()])
+            .set_network_interfaces(&uuid, &[interface.clone()])
             .await
             .unwrap();
 
         // Retrieve and verify all fields
-        let retrieved = store.get_network_interfaces(uuid).await.unwrap();
+        let retrieved = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].network_id, Some(1));
         assert_eq!(retrieved[0].disabled, true);
@@ -1532,11 +1556,11 @@ mod tests {
     #[tokio::test]
     async fn test_network_interface_backward_compatibility() {
         let (store, _temp) = create_test_store().await;
-        let uuid = "550e8400-e29b-41d4-a716-446655440044";
+        let uuid = test_uuid(0x44);
 
         // Register device
         store
-            .register_device(uuid, Architecture::X86_64)
+            .register_device(&uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1546,13 +1570,13 @@ mod tests {
             r#"UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces',
                json('[{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:01","ip_address":"10.0.0.100","is_primary":true}]')
             ) WHERE uuid = ?"#,
-            params![uuid],
+            params![uuid.to_string()],
         )
         .unwrap();
         drop(conn);
 
         // Should deserialize with default values for new fields
-        let interfaces = store.get_network_interfaces(uuid).await.unwrap();
+        let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].network_id, None);
         assert_eq!(interfaces[0].disabled, false);
@@ -1562,16 +1586,16 @@ mod tests {
     #[tokio::test]
     async fn test_find_duplicate_macs_on_network_no_duplicates() {
         let (store, _temp) = create_test_store().await;
-        let uuid1 = "550e8400-e29b-41d4-a716-446655440045";
-        let uuid2 = "550e8400-e29b-41d4-a716-446655440046";
+        let uuid1 = test_uuid(0x45);
+        let uuid2 = test_uuid(0x46);
 
         // Register two devices
         store
-            .register_device(uuid1, Architecture::X86_64)
+            .register_device(&uuid1, Architecture::X86_64)
             .await
             .unwrap();
         store
-            .register_device(uuid2, Architecture::X86_64)
+            .register_device(&uuid2, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1597,17 +1621,17 @@ mod tests {
         };
 
         store
-            .set_network_interfaces(uuid1, &[interface1])
+            .set_network_interfaces(&uuid1, &[interface1])
             .await
             .unwrap();
         store
-            .set_network_interfaces(uuid2, &[interface2])
+            .set_network_interfaces(&uuid2, &[interface2])
             .await
             .unwrap();
 
         // Should find no duplicates
         let duplicates = store
-            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:01", 1, uuid1)
+            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:01", 1, &uuid1)
             .await
             .unwrap();
         assert_eq!(duplicates.len(), 0);
@@ -1616,52 +1640,55 @@ mod tests {
     #[tokio::test]
     async fn test_find_duplicate_macs_on_network_finds_duplicate() {
         let (store, _temp) = create_test_store().await;
-        let uuid1 = "550e8400-e29b-41d4-a716-446655440047";
-        let uuid2 = "550e8400-e29b-41d4-a716-446655440048";
+        let uuid1 = test_uuid(0x47);
+        let uuid2 = test_uuid(0x48);
 
         // Register two devices
         store
-            .register_device(uuid1, Architecture::X86_64)
+            .register_device(&uuid1, Architecture::X86_64)
             .await
             .unwrap();
         store
-            .register_device(uuid2, Architecture::X86_64)
+            .register_device(&uuid2, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set SAME MAC on same network
+        let mac = "aa:bb:cc:dd:ee:99";
+        let network_id = 1i64;
+
         let interface1 = NetworkInterface {
             interface_name: "eth0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:99".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
-            network_id: Some(1),
+            network_id: Some(network_id),
             disabled: false,
             warning_label: None,
         };
 
         let interface2 = NetworkInterface {
             interface_name: "ens0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:99".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("10.0.0.101".to_string()),
             is_primary: true,
-            network_id: Some(1),
+            network_id: Some(network_id),
             disabled: false,
             warning_label: None,
         };
 
         store
-            .set_network_interfaces(uuid1, &[interface1])
+            .set_network_interfaces(&uuid1, &[interface1])
             .await
             .unwrap();
         store
-            .set_network_interfaces(uuid2, &[interface2])
+            .set_network_interfaces(&uuid2, &[interface2])
             .await
             .unwrap();
 
         // Should find duplicate when checking from uuid1
         let duplicates = store
-            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:99", 1, uuid1)
+            .find_duplicate_macs_on_network(mac, network_id, &uuid1)
             .await
             .unwrap();
         assert_eq!(duplicates.len(), 1);
@@ -1670,7 +1697,7 @@ mod tests {
 
         // Should find duplicate when checking from uuid2
         let duplicates = store
-            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:99", 1, uuid2)
+            .find_duplicate_macs_on_network(mac, network_id, &uuid2)
             .await
             .unwrap();
         assert_eq!(duplicates.len(), 1);
@@ -1681,33 +1708,36 @@ mod tests {
     #[tokio::test]
     async fn test_find_duplicate_macs_on_different_networks() {
         let (store, _temp) = create_test_store().await;
-        let uuid1 = "550e8400-e29b-41d4-a716-446655440049";
-        let uuid2 = "550e8400-e29b-41d4-a716-446655440050";
+        let uuid1 = test_uuid(0x49);
+        let uuid2 = test_uuid(0x4A);
 
         // Register two devices
         store
-            .register_device(uuid1, Architecture::X86_64)
+            .register_device(&uuid1, Architecture::X86_64)
             .await
             .unwrap();
         store
-            .register_device(uuid2, Architecture::X86_64)
+            .register_device(&uuid2, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set SAME MAC on DIFFERENT networks
+        let mac = "aa:bb:cc:dd:ee:88";
+        let network_id = 1i64;
+
         let interface1 = NetworkInterface {
             interface_name: "eth0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:88".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
-            network_id: Some(1),
+            network_id: Some(network_id),
             disabled: false,
             warning_label: None,
         };
 
         let interface2 = NetworkInterface {
             interface_name: "eth0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:88".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("192.168.1.100".to_string()),
             is_primary: true,
             network_id: Some(2),
@@ -1716,24 +1746,24 @@ mod tests {
         };
 
         store
-            .set_network_interfaces(uuid1, &[interface1])
+            .set_network_interfaces(&uuid1, &[interface1])
             .await
             .unwrap();
         store
-            .set_network_interfaces(uuid2, &[interface2])
+            .set_network_interfaces(&uuid2, &[interface2])
             .await
             .unwrap();
 
-        // Should NOT find duplicate on network 1
+        // Should NOT find duplicate on network 1 (only uuid1 is on network 1)
         let duplicates = store
-            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:88", 1, uuid1)
+            .find_duplicate_macs_on_network(mac, network_id, &uuid1)
             .await
             .unwrap();
         assert_eq!(duplicates.len(), 0);
 
-        // Should NOT find duplicate on network 2
+        // Should NOT find duplicate on network 2 (only uuid2 is on network 2)
         let duplicates = store
-            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:88", 2, uuid2)
+            .find_duplicate_macs_on_network(mac, 2i64, &uuid2)
             .await
             .unwrap();
         assert_eq!(duplicates.len(), 0);
@@ -1742,71 +1772,74 @@ mod tests {
     #[tokio::test]
     async fn test_find_duplicate_macs_multiple_duplicates() {
         let (store, _temp) = create_test_store().await;
-        let uuid1 = "550e8400-e29b-41d4-a716-446655440051";
-        let uuid2 = "550e8400-e29b-41d4-a716-446655440052";
-        let uuid3 = "550e8400-e29b-41d4-a716-446655440053";
+        let uuid1 = test_uuid(0x51);
+        let uuid2 = test_uuid(0x52);
+        let uuid3 = test_uuid(0x53);
 
         // Register three devices
         store
-            .register_device(uuid1, Architecture::X86_64)
+            .register_device(&uuid1, Architecture::X86_64)
             .await
             .unwrap();
         store
-            .register_device(uuid2, Architecture::X86_64)
+            .register_device(&uuid2, Architecture::X86_64)
             .await
             .unwrap();
         store
-            .register_device(uuid3, Architecture::X86_64)
+            .register_device(&uuid3, Architecture::X86_64)
             .await
             .unwrap();
 
         // All three have same MAC on same network
+        let mac = "aa:bb:cc:dd:ee:77";
+        let network_id = 1i64;
+
         let interface1 = NetworkInterface {
             interface_name: "eth0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:77".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
-            network_id: Some(1),
+            network_id: Some(network_id),
             disabled: false,
             warning_label: None,
         };
 
         let interface2 = NetworkInterface {
             interface_name: "ens0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:77".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("10.0.0.101".to_string()),
             is_primary: true,
-            network_id: Some(1),
+            network_id: Some(network_id),
             disabled: false,
             warning_label: None,
         };
 
         let interface3 = NetworkInterface {
             interface_name: "enp0s3".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:77".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("10.0.0.102".to_string()),
             is_primary: true,
-            network_id: Some(1),
+            network_id: Some(network_id),
             disabled: false,
             warning_label: None,
         };
 
         store
-            .set_network_interfaces(uuid1, &[interface1])
+            .set_network_interfaces(&uuid1, &[interface1])
             .await
             .unwrap();
         store
-            .set_network_interfaces(uuid2, &[interface2])
+            .set_network_interfaces(&uuid2, &[interface2])
             .await
             .unwrap();
         store
-            .set_network_interfaces(uuid3, &[interface3])
+            .set_network_interfaces(&uuid3, &[interface3])
             .await
             .unwrap();
 
         // Should find 2 duplicates when checking from uuid1
         let mut duplicates = store
-            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:77", 1, uuid1)
+            .find_duplicate_macs_on_network(mac, network_id, &uuid1)
             .await
             .unwrap();
         assert_eq!(duplicates.len(), 2);
@@ -1822,23 +1855,26 @@ mod tests {
     #[tokio::test]
     async fn test_find_duplicate_macs_no_network_id() {
         let (store, _temp) = create_test_store().await;
-        let uuid1 = "550e8400-e29b-41d4-a716-446655440054";
-        let uuid2 = "550e8400-e29b-41d4-a716-446655440055";
+        let uuid1 = test_uuid(0x54);
+        let uuid2 = test_uuid(0x55);
 
         // Register two devices
         store
-            .register_device(uuid1, Architecture::X86_64)
+            .register_device(&uuid1, Architecture::X86_64)
             .await
             .unwrap();
         store
-            .register_device(uuid2, Architecture::X86_64)
+            .register_device(&uuid2, Architecture::X86_64)
             .await
             .unwrap();
 
         // Set same MAC but without network_id (legacy interface)
+        let mac = "aa:bb:cc:dd:ee:66";
+        let network_id = 1i64;
+
         let interface1 = NetworkInterface {
             interface_name: "eth0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:66".to_string(),
+            mac_address: mac.to_string(),
             ip_address: None,
             is_primary: true,
             network_id: None,
@@ -1848,26 +1884,26 @@ mod tests {
 
         let interface2 = NetworkInterface {
             interface_name: "eth0".to_string(),
-            mac_address: "aa:bb:cc:dd:ee:66".to_string(),
+            mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             is_primary: true,
-            network_id: Some(1),
+            network_id: Some(network_id),
             disabled: false,
             warning_label: None,
         };
 
         store
-            .set_network_interfaces(uuid1, &[interface1])
+            .set_network_interfaces(&uuid1, &[interface1])
             .await
             .unwrap();
         store
-            .set_network_interfaces(uuid2, &[interface2])
+            .set_network_interfaces(&uuid2, &[interface2])
             .await
             .unwrap();
 
         // Should NOT find uuid1 (no network_id) when searching network 1
         let duplicates = store
-            .find_duplicate_macs_on_network("aa:bb:cc:dd:ee:66", 1, uuid2)
+            .find_duplicate_macs_on_network(mac, network_id, &uuid2)
             .await
             .unwrap();
         assert_eq!(duplicates.len(), 0);

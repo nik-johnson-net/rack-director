@@ -8,6 +8,7 @@ use axum::{
     routing::{delete, get, patch, post},
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     http::AppState,
@@ -148,7 +149,7 @@ async fn get_all_devices(
                 .map(|s| s.to_string());
 
             DeviceResponse {
-                uuid: device.uuid,
+                uuid: device.uuid.to_string(),
                 architecture: device.architecture,
                 lifecycle: device.lifecycle,
                 role_id: device.role_id,
@@ -170,7 +171,7 @@ async fn get_all_devices(
 
 async fn get_device_by_uuid(
     State(state): State<Arc<AppState>>,
-    Path(uuid): Path<String>,
+    Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceResponse>, StatusCode> {
     // Get device from Director (single source of truth)
     let device = match state.director.get_device(&uuid).await {
@@ -198,7 +199,7 @@ async fn get_device_by_uuid(
         .map(|s| s.to_string());
 
     Ok(Json(DeviceResponse {
-        uuid: device.uuid,
+        uuid: device.uuid.to_string(),
         architecture: device.architecture,
         lifecycle: device.lifecycle,
         role_id: device.role_id,
@@ -214,7 +215,7 @@ async fn get_device_by_uuid(
 
 async fn update_device_attributes(
     State(state): State<Arc<AppState>>,
-    Path(uuid): Path<String>,
+    Path(uuid): Path<Uuid>,
     extract::Json(payload): extract::Json<UpdateAttributesRequest>,
 ) -> Result<StatusCode, StatusCode> {
     // Update device attributes
@@ -233,7 +234,7 @@ async fn update_device_attributes(
 
 async fn get_device_lifecycle(
     State(state): State<Arc<AppState>>,
-    Path(uuid): Path<String>,
+    Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceLifecycle>, StatusCode> {
     match state.director.get_device_lifecycle(&uuid).await {
         Ok(Some(lifecycle)) => Ok(Json(lifecycle)),
@@ -244,7 +245,7 @@ async fn get_device_lifecycle(
 
 async fn start_lifecycle_transition(
     State(state): State<Arc<AppState>>,
-    Path(uuid): Path<String>,
+    Path(uuid): Path<Uuid>,
     extract::Json(payload): extract::Json<StartTransitionRequest>,
 ) -> Result<Json<StartTransitionResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Parse the target state
@@ -284,7 +285,7 @@ async fn start_lifecycle_transition(
 
 async fn get_device_transitions(
     State(state): State<Arc<AppState>>,
-    Path(uuid): Path<String>,
+    Path(uuid): Path<Uuid>,
     Query(params): Query<DeviceTransitionsQuery>,
 ) -> Result<Json<Vec<LifecycleTransition>>, StatusCode> {
     let include_completed = params.include_completed.unwrap_or(false);
@@ -301,7 +302,7 @@ async fn get_device_transitions(
 
 async fn get_active_transition(
     State(state): State<Arc<AppState>>,
-    Path(uuid): Path<String>,
+    Path(uuid): Path<Uuid>,
 ) -> Result<Json<Option<LifecycleTransition>>, StatusCode> {
     match state.director.get_active_transition_for_device(&uuid).await {
         Ok(transition) => Ok(Json(transition)),
@@ -311,7 +312,7 @@ async fn get_active_transition(
 
 async fn get_device_status(
     State(state): State<Arc<AppState>>,
-    Path(uuid): Path<String>,
+    Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceStatusResponse>, StatusCode> {
     let current_lifecycle = match state.director.get_device_lifecycle(&uuid).await {
         Ok(lifecycle) => lifecycle.map(String::from),
@@ -324,7 +325,7 @@ async fn get_device_status(
     };
 
     Ok(Json(DeviceStatusResponse {
-        device_uuid: uuid,
+        device_uuid: uuid.to_string(),
         current_lifecycle,
         active_transition,
     }))
@@ -431,7 +432,7 @@ async fn get_pending_devices(
                 .map(|d| PendingDeviceResponse {
                     id: d.id,
                     mac_address: d.mac_address,
-                    device_uuid: d.device_uuid,
+                    device_uuid: d.device_uuid.map(|u| u.to_string()),
                     network_id: d.network_id,
                     created_at: d.created_at,
                     completed_at: d.completed_at,
@@ -466,6 +467,12 @@ async fn delete_pending_device(
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
+    fn test_uuid(suffix: u16) -> Uuid {
+        Uuid::parse_str(&format!("550e8400-e29b-41d4-a716-4466554400{:02x}", suffix))
+            .expect("test UUID should be valid")
+    }
     use crate::{database, director::Director, storage::MemoryImageStore};
 
     use super::*;
@@ -519,19 +526,19 @@ mod tests {
     #[tokio::test]
     async fn test_get_device_lifecycle() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440010";
+        let test_uuid = test_uuid(0x10);
 
         // Register device
         state
             .director
-            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
         let app = routes(state);
 
         let request = Request::builder()
-            .uri(format!("/ui/devices/{}/lifecycle", test_uuid))
+            .uri(format!("/ui/devices/{}/lifecycle", test_uuid.to_string()))
             .body(Body::empty())
             .unwrap();
 
@@ -542,12 +549,12 @@ mod tests {
     #[tokio::test]
     async fn test_start_lifecycle_transition() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440011";
+        let test_uuid = test_uuid(0x11);
 
         // Register device
         state
             .director
-            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -559,7 +566,10 @@ mod tests {
 
         let request = Request::builder()
             .method("POST")
-            .uri(format!("/ui/devices/{}/lifecycle/transition", test_uuid))
+            .uri(format!(
+                "/ui/devices/{}/lifecycle/transition",
+                test_uuid.to_string()
+            ))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
@@ -571,19 +581,19 @@ mod tests {
     #[tokio::test]
     async fn test_get_device_status() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440012";
+        let test_uuid = test_uuid(0x12);
 
         // Register device
         state
             .director
-            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
         let app = routes(state);
 
         let request = Request::builder()
-            .uri(format!("/ui/devices/{}/status", test_uuid))
+            .uri(format!("/ui/devices/{}/status", test_uuid.to_string()))
             .body(Body::empty())
             .unwrap();
 

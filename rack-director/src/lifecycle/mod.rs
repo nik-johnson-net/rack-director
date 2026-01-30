@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 pub mod store;
 pub use store::LifecycleStore;
@@ -78,7 +79,7 @@ impl From<TransitionType> for String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LifecycleTransition {
     pub id: Option<i64>,
-    pub device_uuid: String,
+    pub device_uuid: Uuid,
     pub from_state: DeviceLifecycle,
     pub to_state: DeviceLifecycle,
     pub plan_id: Option<i64>,
@@ -90,7 +91,7 @@ pub struct LifecycleTransition {
 
 impl LifecycleTransition {
     pub fn new(
-        device_uuid: String,
+        device_uuid: Uuid,
         from_state: DeviceLifecycle,
         to_state: DeviceLifecycle,
         plan_id: Option<i64>,
@@ -189,6 +190,11 @@ impl LifecycleManager {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
+    fn test_uuid() -> Uuid {
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").expect("test UUID should be valid")
+    }
     use super::*;
 
     #[test]
@@ -302,7 +308,7 @@ mod tests {
 
         let transition = LifecycleTransition {
             id: Some(1),
-            device_uuid: "test-uuid".to_string(),
+            device_uuid: test_uuid(),
             from_state: DeviceLifecycle::New,
             to_state: DeviceLifecycle::Unprovisioned,
             plan_id: Some(42),
@@ -426,7 +432,7 @@ mod tests {
 
         let transition = LifecycleTransition {
             id: Some(1),
-            device_uuid: "test-uuid".to_string(),
+            device_uuid: test_uuid(),
             from_state: DeviceLifecycle::New,
             to_state: DeviceLifecycle::Unprovisioned,
             plan_id: Some(42),

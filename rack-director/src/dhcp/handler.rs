@@ -8,6 +8,7 @@ use dhcproto::{
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use uuid::Uuid;
 
 use crate::director::Director;
 
@@ -190,7 +191,7 @@ impl DhcpHandler {
             .create_or_update_lease_with_network(
                 &mac_str,
                 &ip,
-                device_uuid.as_deref(),
+                device_uuid.as_ref(),
                 LeaseState::Offered,
                 network.lease_duration,
                 network.id,
@@ -202,8 +203,7 @@ impl DhcpHandler {
             device_resolution::is_pending_device(&self.director, &mac_str).await?;
 
         // Build DHCP Offer
-        let offer =
-            self.build_offer(msg, ip, network, device_uuid.as_deref(), is_pending_device)?;
+        let offer = self.build_offer(msg, ip, network, device_uuid.as_ref(), is_pending_device)?;
         log::info!(
             "DHCP OFFER {} to MAC {} on network '{}'",
             ip,
@@ -296,7 +296,7 @@ impl DhcpHandler {
                 msg,
                 lease_ip,
                 network,
-                device_uuid.as_deref(),
+                device_uuid.as_ref(),
                 is_pending_device,
             )?;
             log::info!(
@@ -341,7 +341,7 @@ impl DhcpHandler {
         req: &Message,
         ip: Ipv4Addr,
         network: &DhcpNetwork,
-        device_uuid: Option<&str>,
+        device_uuid: Option<&Uuid>,
         is_pending_device: bool,
     ) -> Result<Message> {
         let mut msg = message_builder::create_base_reply(req, &self.server_identifier);
@@ -375,7 +375,7 @@ impl DhcpHandler {
         req: &Message,
         ip: Ipv4Addr,
         network: &DhcpNetwork,
-        device_uuid: Option<&str>,
+        device_uuid: Option<&Uuid>,
         is_pending_device: bool,
     ) -> Result<Message> {
         let mut msg = self.build_offer(req, ip, network, device_uuid, is_pending_device)?;
@@ -389,7 +389,7 @@ impl DhcpHandler {
         &self,
         msg: &mut Message,
         req: &Message,
-        device_uuid: Option<&str>,
+        device_uuid: Option<&Uuid>,
         network: &DhcpNetwork,
         is_pending_device: bool,
     ) -> Result<()> {
@@ -400,7 +400,7 @@ impl DhcpHandler {
             // Client did not request boot options (e.g., already booted OS renewing lease)
             // Log this for visibility and skip boot option processing
             let mac = format_mac(req.chaddr());
-            let identifier = device_uuid.unwrap_or(&mac);
+            let identifier = device_uuid.map(|u| u.to_string()).unwrap_or(mac);
             log::info!("Device {} did not ask for boot options", identifier);
             return Ok(());
         }

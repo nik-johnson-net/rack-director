@@ -4,6 +4,7 @@ use crate::lifecycle::{DeviceLifecycle, LifecycleTransition};
 use anyhow::Result;
 use rusqlite::Connection;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct LifecycleStore {
@@ -15,14 +16,17 @@ impl LifecycleStore {
         Self { conn }
     }
 
-    pub async fn get_device_lifecycle(&self, device_uuid: &str) -> Result<Option<DeviceLifecycle>> {
+    pub async fn get_device_lifecycle(
+        &self,
+        device_uuid: &Uuid,
+    ) -> Result<Option<DeviceLifecycle>> {
         let conn = self.conn.lock().await;
         self.get_device_lifecycle_internal(&conn, device_uuid)
     }
 
     pub async fn update_device_lifecycle(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
         lifecycle: DeviceLifecycle,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
@@ -36,7 +40,7 @@ impl LifecycleStore {
 
     pub async fn get_active_transition_for_device(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> Result<Option<LifecycleTransition>> {
         let conn = self.conn.lock().await;
         self.get_active_transition_for_device_internal(&conn, device_uuid)
@@ -54,7 +58,7 @@ impl LifecycleStore {
 
     pub async fn get_transitions_for_device(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
         include_completed: bool,
     ) -> Result<Vec<LifecycleTransition>> {
         let conn = self.conn.lock().await;
@@ -72,11 +76,11 @@ impl LifecycleStore {
     fn get_device_lifecycle_internal(
         &self,
         conn: &Connection,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> Result<Option<DeviceLifecycle>> {
         let mut stmt = conn.prepare("SELECT lifecycle FROM devices WHERE uuid = ?1")?;
 
-        let mut rows = stmt.query_map([device_uuid], |row| {
+        let mut rows = stmt.query_map([device_uuid.to_string()], |row| {
             let lifecycle_str: String = row.get(0)?;
             Ok(DeviceLifecycle::from(lifecycle_str))
         })?;
@@ -91,14 +95,14 @@ impl LifecycleStore {
     fn update_device_lifecycle_internal(
         &self,
         conn: &Connection,
-        device_uuid: &str,
+        device_uuid: &Uuid,
         lifecycle: DeviceLifecycle,
     ) -> Result<()> {
         let lifecycle_str: String = lifecycle.into();
 
         conn.execute(
             "UPDATE devices SET lifecycle = ?1 WHERE uuid = ?2",
-            [&lifecycle_str, device_uuid],
+            [&lifecycle_str, &device_uuid.to_string()],
         )?;
 
         Ok(())
@@ -113,10 +117,10 @@ impl LifecycleStore {
         let to_state_str: String = transition.to_state.clone().into();
 
         conn.execute(
-            "INSERT INTO lifecycle_transitions (device_uuid, from_state, to_state, plan_id, created_at) 
+            "INSERT INTO lifecycle_transitions (device_uuid, from_state, to_state, plan_id, created_at)
              VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
             rusqlite::params![
-                transition.device_uuid,
+                transition.device_uuid.to_string(),
                 from_state_str,
                 to_state_str,
                 transition.plan_id
@@ -129,18 +133,19 @@ impl LifecycleStore {
     fn get_active_transition_for_device_internal(
         &self,
         conn: &Connection,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> Result<Option<LifecycleTransition>> {
         let mut stmt = conn.prepare(
             "SELECT id, device_uuid, from_state, to_state, plan_id, created_at, completed_at, success, error_message
-             FROM lifecycle_transitions 
-             WHERE device_uuid = ?1 AND success IS NULL 
-             ORDER BY created_at DESC 
+             FROM lifecycle_transitions
+             WHERE device_uuid = ?1 AND success IS NULL
+             ORDER BY created_at DESC
              LIMIT 1"
         )?;
 
-        let mut transition_iter =
-            stmt.query_map([device_uuid], |row| self.map_row_to_transition(row))?;
+        let mut transition_iter = stmt.query_map([device_uuid.to_string()], |row| {
+            self.map_row_to_transition(row)
+        })?;
 
         if let Some(transition_result) = transition_iter.next() {
             return Ok(Some(transition_result?));
@@ -167,25 +172,26 @@ impl LifecycleStore {
     fn get_transitions_for_device_internal(
         &self,
         conn: &Connection,
-        device_uuid: &str,
+        device_uuid: &Uuid,
         include_completed: bool,
     ) -> Result<Vec<LifecycleTransition>> {
         let query = if include_completed {
             "SELECT id, device_uuid, from_state, to_state, plan_id, created_at, completed_at, success, error_message
-             FROM lifecycle_transitions 
-             WHERE device_uuid = ?1 
+             FROM lifecycle_transitions
+             WHERE device_uuid = ?1
              ORDER BY created_at DESC"
         } else {
             "SELECT id, device_uuid, from_state, to_state, plan_id, created_at, completed_at, success, error_message
-             FROM lifecycle_transitions 
-             WHERE device_uuid = ?1 AND success IS NULL 
+             FROM lifecycle_transitions
+             WHERE device_uuid = ?1 AND success IS NULL
              ORDER BY created_at DESC"
         };
 
         let mut stmt = conn.prepare(query)?;
 
-        let transition_iter =
-            stmt.query_map([device_uuid], |row| self.map_row_to_transition(row))?;
+        let transition_iter = stmt.query_map([device_uuid.to_string()], |row| {
+            self.map_row_to_transition(row)
+        })?;
 
         let mut transitions = Vec::new();
         for transition_result in transition_iter {

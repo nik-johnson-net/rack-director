@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct DhcpStore {
@@ -16,7 +17,7 @@ pub struct Lease {
     pub id: i64,
     pub mac_address: String,
     pub ip_address: String,
-    pub device_uuid: Option<String>,
+    pub device_uuid: Option<Uuid>,
     pub lease_start: DateTime<Utc>,
     pub lease_end: DateTime<Utc>,
     pub state: LeaseState,
@@ -110,12 +111,13 @@ impl DhcpStore {
         &self,
         mac: &str,
         ip: &Ipv4Addr,
-        device_uuid: Option<&str>,
+        device_uuid: Option<&Uuid>,
         state: LeaseState,
         lease_duration: u32,
         network_id: i64,
     ) -> Result<()> {
         let ip_str = ip.to_string();
+        let device_uuid_str = device_uuid.map(|u| u.to_string());
         let now = Utc::now();
         let lease_end = now + Duration::seconds(lease_duration as i64);
 
@@ -135,7 +137,7 @@ impl DhcpStore {
             params![
                 mac,
                 ip_str,
-                device_uuid,
+                device_uuid_str,
                 now.to_rfc3339(),
                 lease_end.to_rfc3339(),
                 state.to_string(),
@@ -259,7 +261,7 @@ impl DhcpStore {
     }
 
     /// Find lease by device UUID (synchronous for use in non-async contexts)
-    pub fn find_lease_by_device_uuid(&self, device_uuid: &str) -> Result<Option<Lease>> {
+    pub fn find_lease_by_device_uuid(&self, device_uuid: &Uuid) -> Result<Option<Lease>> {
         // Get the db without using async
         let db = self
             .db
@@ -272,7 +274,7 @@ impl DhcpStore {
         )?;
 
         let lease = stmt
-            .query_row(params![device_uuid], |row| {
+            .query_row(params![device_uuid.to_string()], |row| {
                 Ok(Lease {
                     id: row.get(0)?,
                     mac_address: row.get(1)?,

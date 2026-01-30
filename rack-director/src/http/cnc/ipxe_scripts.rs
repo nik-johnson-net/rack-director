@@ -53,7 +53,7 @@ pub fn generate_uuid_script(root_url: &str) -> String {
     format!(
         r#"#!ipxe
 # Chain boot to send uuid and mac
-chain {root_url}/cnc/ipxe?uuid={{uuid}}&mac={{netX/mac}}
+chain {root_url}/cnc/ipxe?uuid=${{uuid}}&mac=${{netX/mac}}
 "#
     )
 }
@@ -113,7 +113,7 @@ mod tests {
     fn test_generate_uuid_script() {
         let script = generate_uuid_script("http://example.com");
         assert!(script.contains("#!ipxe"));
-        assert!(script.contains("chain http://example.com/cnc/ipxe?uuid={uuid}&mac={netX/mac}"));
+        assert!(script.contains("chain http://example.com/cnc/ipxe?uuid=${uuid}&mac=${netX/mac}"));
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
             "text/plain"
         );
         let body = response.into_body();
-        assert!(body.contains("chain http://example.com/cnc/ipxe?uuid={uuid}&mac={netX/mac}"));
+        assert!(body.contains("chain http://example.com/cnc/ipxe?uuid=${uuid}&mac=${netX/mac}"));
     }
 
     #[test]

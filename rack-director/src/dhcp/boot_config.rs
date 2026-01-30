@@ -1,6 +1,7 @@
 use anyhow::Result;
 use dhcproto::v4::{self, DhcpOption, Message, OptionCode};
 use std::net::Ipv4Addr;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootMode {
@@ -128,7 +129,7 @@ impl BootConfigProvider {
     pub fn should_provide_boot_options(
         &self,
         network_autodiscover: bool,
-        device_uuid: Option<&str>,
+        device_uuid: Option<&Uuid>,
         is_pending_device: bool,
     ) -> bool {
         network_autodiscover || device_uuid.is_some() || is_pending_device
@@ -154,7 +155,7 @@ impl BootConfigProvider {
         &self,
         mode: BootMode,
         network_autodiscover: bool,
-        device_uuid: Option<&str>,
+        device_uuid: Option<&Uuid>,
         is_pending_device: bool,
     ) -> Result<Option<BootOptions>> {
         if self.should_provide_boot_options(network_autodiscover, device_uuid, is_pending_device) {
@@ -182,7 +183,7 @@ impl BootConfigProvider {
     pub fn get_ipxe_boot_script_if_allowed(
         &self,
         network_autodiscover: bool,
-        device_uuid: Option<&str>,
+        device_uuid: Option<&Uuid>,
         is_pending_device: bool,
     ) -> Result<Option<BootOptions>> {
         if self.should_provide_boot_options(network_autodiscover, device_uuid, is_pending_device) {
@@ -252,6 +253,11 @@ impl BootConfigProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    fn test_uuid() -> Uuid {
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
+    }
 
     #[test]
     fn test_bios_boot_options() {
@@ -294,7 +300,7 @@ mod tests {
     fn test_should_provide_boot_options_autodiscover_enabled_known_device() {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        assert!(provider.should_provide_boot_options(true, Some("device-uuid-123"), false));
+        assert!(provider.should_provide_boot_options(true, Some(&test_uuid()), false));
     }
 
     #[test]
@@ -309,7 +315,7 @@ mod tests {
     fn test_should_provide_boot_options_autodiscover_disabled_known_device() {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        assert!(provider.should_provide_boot_options(false, Some("device-uuid-123"), false));
+        assert!(provider.should_provide_boot_options(false, Some(&test_uuid()), false));
     }
 
     #[test]
@@ -349,7 +355,7 @@ mod tests {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
         let result = provider
-            .get_boot_options_if_allowed(BootMode::UefiBoot, false, Some("device-uuid-456"), false)
+            .get_boot_options_if_allowed(BootMode::UefiBoot, false, Some(&test_uuid()), false)
             .unwrap();
         assert!(result.is_some());
         let opts = result.unwrap();
@@ -385,7 +391,7 @@ mod tests {
         let provider =
             BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
         let result = provider
-            .get_ipxe_boot_script_if_allowed(false, Some("device-uuid-789"), false)
+            .get_ipxe_boot_script_if_allowed(false, Some(&test_uuid()), false)
             .unwrap();
         assert!(result.is_some());
         let opts = result.unwrap();

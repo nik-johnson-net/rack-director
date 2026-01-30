@@ -6,6 +6,7 @@ use axum::{
 };
 use common::Ipv4Subnet;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Renders an install script template for a specific device.
 ///
@@ -25,7 +26,7 @@ use std::sync::Arc;
 /// * `Err(Error)` - Error if device not found, missing role, template issues, etc.
 pub async fn render_for_device(
     state: &Arc<AppState>,
-    device_uuid: &str,
+    device_uuid: &Uuid,
 ) -> Result<Response<String>, Error> {
     // Get device
     let device = state
@@ -88,7 +89,7 @@ pub async fn render_for_device(
         .map(|s| s.to_string());
 
     let device_info = templates::DeviceInfo {
-        uuid: device_uuid.to_string(),
+        uuid: *device_uuid,
         hostname,
     };
 
@@ -121,7 +122,7 @@ pub async fn render_for_device(
 /// * `Err(Error::ServerInternalError)` - If network lookup fails
 pub async fn get_device_network_info(
     state: &Arc<AppState>,
-    device_uuid: &str,
+    device_uuid: &Uuid,
 ) -> Result<templates::NetworkInfo, Error> {
     // Try to find device's lease
     let lease = state
@@ -158,6 +159,11 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
+    use uuid::Uuid;
+
+    fn test_uuid() -> Uuid {
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
+    }
 
     async fn create_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
@@ -195,14 +201,14 @@ mod tests {
     async fn test_get_device_network_info_no_lease() {
         let (state, _temp_dir) = create_test_state().await;
 
-        let uuid = "test-device-uuid";
+        let uuid = test_uuid();
         state
             .director
-            .register_device(uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
-        let result = get_device_network_info(&state, uuid).await;
+        let result = get_device_network_info(&state, &uuid).await;
         assert!(result.is_err());
         match result {
             Err(Error::NotFound(msg)) => {
@@ -216,12 +222,12 @@ mod tests {
     async fn test_get_device_network_info_with_lease() {
         let (state, _temp_dir) = create_test_state().await;
 
-        let uuid = "test-device-uuid";
+        let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff";
 
         state
             .director
-            .register_device(uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -232,7 +238,7 @@ mod tests {
             .create_or_update_lease_with_network(
                 mac,
                 &ip,
-                Some(uuid),
+                Some(&uuid),
                 crate::dhcp::LeaseState::Active,
                 3600,
                 1,
@@ -240,7 +246,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = get_device_network_info(&state, uuid).await;
+        let result = get_device_network_info(&state, &uuid).await;
         let network_info = match result {
             Ok(info) => info,
             Err(_) => panic!("Expected Ok, got Err"),
@@ -255,14 +261,14 @@ mod tests {
     async fn test_render_for_device_no_role() {
         let (state, _temp_dir) = create_test_state().await;
 
-        let uuid = "test-device-uuid";
+        let uuid = test_uuid();
         state
             .director
-            .register_device(uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
-        let result = render_for_device(&state, uuid).await;
+        let result = render_for_device(&state, &uuid).await;
         assert!(result.is_err());
         match result {
             Err(Error::NotFound(msg)) => {

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 pub mod store;
 pub use store::PlansStore;
@@ -62,7 +63,7 @@ impl Action {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
     pub id: Option<i64>,
-    pub device_uuid: String,
+    pub device_uuid: Uuid,
     pub status: PlanStatus,
     pub current_step: i32,
     pub total_steps: i32,
@@ -74,7 +75,7 @@ pub struct Plan {
 }
 
 impl Plan {
-    pub fn new(device_uuid: String, actions: Vec<Action>) -> Self {
+    pub fn new(device_uuid: Uuid, actions: Vec<Action>) -> Self {
         Plan {
             id: None,
             device_uuid,
@@ -151,6 +152,7 @@ pub enum ActionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_plan_creation() {
@@ -158,9 +160,10 @@ mod tests {
             Action::new("install_os".to_string(), HashMap::new()),
             Action::new("configure_network".to_string(), HashMap::new()),
         ];
-        let plan = Plan::new("test-uuid".to_string(), actions);
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        let plan = Plan::new(uuid, actions);
 
-        assert_eq!(plan.device_uuid, "test-uuid");
+        assert_eq!(plan.device_uuid, uuid);
         assert_eq!(plan.status, PlanStatus::Pending);
         assert_eq!(plan.current_step, 0);
         assert_eq!(plan.total_steps, 2);
@@ -174,7 +177,10 @@ mod tests {
             Action::new("step1".to_string(), HashMap::new()),
             Action::new("step2".to_string(), HashMap::new()),
         ];
-        let mut plan = Plan::new("test-uuid".to_string(), actions);
+        let mut plan = Plan::new(
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            actions,
+        );
 
         // Start the plan
         plan.start();
@@ -196,7 +202,10 @@ mod tests {
     #[test]
     fn test_plan_failure() {
         let actions = vec![Action::new("failing_action".to_string(), HashMap::new())];
-        let mut plan = Plan::new("test-uuid".to_string(), actions);
+        let mut plan = Plan::new(
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            actions,
+        );
 
         plan.start();
         let result = plan.mark_action_failed("Something went wrong".to_string());
@@ -213,7 +222,10 @@ mod tests {
             Action::new("first".to_string(), HashMap::new()),
             Action::new("second".to_string(), HashMap::new()),
         ];
-        let plan = Plan::new("test-uuid".to_string(), actions);
+        let plan = Plan::new(
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            actions,
+        );
 
         let current = plan.get_current_action();
         assert!(current.is_some());

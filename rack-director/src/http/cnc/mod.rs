@@ -19,6 +19,7 @@ use axum_extra::extract::Host;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use uuid::Uuid;
 
 use crate::{director::BootTarget, director::NetworkInterface, http::AppState};
 
@@ -30,7 +31,7 @@ use ipxe_scripts::{
 
 #[derive(Deserialize)]
 struct IpxeQuery {
-    uuid: Option<String>,
+    uuid: Option<Uuid>,
     mac: Option<String>,
 }
 
@@ -54,9 +55,8 @@ async fn ipxe_handler(
 ) -> Result<Response<String>, Error> {
     let root_url = format!("http://{host}");
 
-    let uuid = match params.uuid {
-        Some(uuid) if !uuid.is_empty() => uuid,
-        Some(_) => return Err(Error::BadRequest("UUID cannot be empty".to_string())),
+    let uuid: Uuid = match params.uuid {
+        Some(uuid) => uuid,
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
@@ -132,10 +132,6 @@ async fn install_script_handler(
         .uuid
         .ok_or_else(|| Error::BadRequest("Missing uuid parameter".to_string()))?;
 
-    if uuid.is_empty() {
-        return Err(Error::BadRequest("Empty uuid parameter".to_string()));
-    }
-
     install_script::render_for_device(&state, &uuid).await
 }
 
@@ -188,7 +184,7 @@ async fn agent_images_handler(
 
 #[derive(Deserialize, Serialize)]
 struct UpdateAttributesQuery {
-    uuid: String,
+    uuid: Uuid,
     attributes: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -263,12 +259,12 @@ async fn update_attributes(
 
 #[derive(Deserialize, Serialize)]
 struct ActionStatusQuery {
-    uuid: String,
+    uuid: Uuid,
 }
 
 #[derive(Deserialize, Serialize)]
 struct ActionFailedQuery {
-    uuid: String,
+    uuid: Uuid,
     error_message: String,
 }
 
@@ -335,7 +331,7 @@ async fn action_failed(
 #[axum::debug_handler]
 async fn get_bmc_config(
     State(state): State<Arc<AppState>>,
-    extract::Path(uuid): extract::Path<String>,
+    extract::Path(uuid): extract::Path<Uuid>,
 ) -> Result<extract::Json<BmcConfig>, StatusCode> {
     // Get device
     let device = match state.director.get_device(&uuid).await {
@@ -389,6 +385,12 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tower::util::ServiceExt;
+    use uuid::Uuid;
+
+    fn test_uuid(suffix: u16) -> Uuid {
+        Uuid::parse_str(&format!("550e8400-e29b-41d4-a716-4466554400{:02x}", suffix))
+            .expect("test UUID should be valid")
+    }
 
     async fn setup_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
@@ -461,12 +463,12 @@ mod tests {
     #[tokio::test]
     async fn test_ipxe_known_device() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440001";
+        let uuid = test_uuid(1);
 
         {
             state
                 .director
-                .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -477,7 +479,7 @@ mod tests {
 
         let request = Request::builder()
             .header("Host", "localhost")
-            .uri(format!("/cnc/ipxe?uuid={test_uuid}"))
+            .uri(format!("/cnc/ipxe?uuid={}", uuid))
             .body(Body::empty())
             .unwrap();
 
@@ -512,7 +514,7 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
-        assert!(body_str.contains("chain http://localhost/cnc/ipxe?uuid={uuid}&mac={netX/mac}"));
+        assert!(body_str.contains("chain http://localhost/cnc/ipxe?uuid=${uuid}&mac=${netX/mac}"));
     }
 
     #[tokio::test]
@@ -535,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn test_ipxe_handler_with_mac_parameter() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440010";
+        let test_uuid = test_uuid(0x10);
         let test_mac = "aa:bb:cc:dd:ee:ff";
 
         // Create a pending device for this MAC
@@ -568,7 +570,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Device should be registered
-        assert!(state.director.device_exists(test_uuid).await.unwrap());
+        assert!(state.director.device_exists(&test_uuid).await.unwrap());
 
         // Pending device should be completed (removed from pending_devices table)
         let pending_id = state
@@ -582,7 +584,7 @@ mod tests {
     #[tokio::test]
     async fn test_action_success() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440003";
+        let test_uuid = test_uuid(0x03);
 
         // Create a test plan
         let actions = vec![
@@ -592,12 +594,12 @@ mod tests {
                 std::collections::HashMap::new(),
             ),
         ];
-        let plan = crate::plans::Plan::new(test_uuid.to_string(), actions);
+        let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
         state
             .director
-            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
         state.director.create_plan(&plan).await.unwrap();
@@ -606,9 +608,7 @@ mod tests {
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
         ));
 
-        let payload = ActionStatusQuery {
-            uuid: test_uuid.to_string(),
-        };
+        let payload = ActionStatusQuery { uuid: test_uuid };
 
         let request = Request::builder()
             .method("POST")
@@ -624,19 +624,19 @@ mod tests {
     #[tokio::test]
     async fn test_action_failed() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440004";
+        let test_uuid = test_uuid(0x04);
 
         // Create a test plan
         let actions = vec![crate::plans::Action::new(
             "install_os".to_string(),
             std::collections::HashMap::new(),
         )];
-        let plan = crate::plans::Plan::new(test_uuid.to_string(), actions);
+        let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
         state
             .director
-            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
         state.director.create_plan(&plan).await.unwrap();
@@ -646,7 +646,7 @@ mod tests {
         ));
 
         let payload = ActionFailedQuery {
-            uuid: test_uuid.to_string(),
+            uuid: test_uuid,
             error_message: "Installation failed".to_string(),
         };
 
@@ -664,12 +664,12 @@ mod tests {
     #[tokio::test]
     async fn test_action_success_no_plan() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440005";
+        let test_uuid = test_uuid(0x05);
 
         // Register device but don't create a plan
         state
             .director
-            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -677,9 +677,7 @@ mod tests {
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
         ));
 
-        let payload = ActionStatusQuery {
-            uuid: test_uuid.to_string(),
-        };
+        let payload = ActionStatusQuery { uuid: test_uuid };
 
         let request = Request::builder()
             .method("POST")
@@ -695,10 +693,10 @@ mod tests {
     #[tokio::test]
     async fn test_automatic_discovery_on_new_device() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440099";
+        let test_uuid = test_uuid(0x99);
 
         // Verify device doesn't exist yet
-        assert!(!state.director.device_exists(test_uuid).await.unwrap());
+        assert!(!state.director.device_exists(&test_uuid).await.unwrap());
 
         let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
@@ -715,12 +713,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Device should now exist
-        assert!(state.director.device_exists(test_uuid).await.unwrap());
+        assert!(state.director.device_exists(&test_uuid).await.unwrap());
 
         // Device should be in "new" state
         let lifecycle = state
             .director
-            .get_device_lifecycle(test_uuid)
+            .get_device_lifecycle(&test_uuid)
             .await
             .unwrap();
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
@@ -728,7 +726,7 @@ mod tests {
         // Device should have an active discovery plan with 2 actions
         let active_plan = state
             .director
-            .get_active_plan_for_device(test_uuid)
+            .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_some());
@@ -752,24 +750,27 @@ mod tests {
     #[tokio::test]
     async fn test_discovery_completion_flow() {
         let (state, _temp_dir) = setup_test_state().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440098";
+        let test_uuid = test_uuid(0x98);
 
         // Register device and start discovery transition
         state
             .director
-            .register_device(test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
         state
             .director
-            .start_lifecycle_transition(test_uuid, crate::lifecycle::DeviceLifecycle::Unprovisioned)
+            .start_lifecycle_transition(
+                &test_uuid,
+                crate::lifecycle::DeviceLifecycle::Unprovisioned,
+            )
             .await
             .unwrap();
 
         // Simulate agent updating attributes
         let update_payload = UpdateAttributesQuery {
-            uuid: test_uuid.to_string(),
+            uuid: test_uuid,
             attributes: {
                 let mut attrs = serde_json::Map::new();
                 attrs.insert(
@@ -799,16 +800,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify attributes were updated
-        let device = state.director.get_device(test_uuid).await.unwrap();
+        let device = state.director.get_device(&test_uuid).await.unwrap();
         assert_eq!(
             device.attributes.get("manufacturer").unwrap().as_str(),
             Some("Dell Inc.")
         );
 
         // Simulate agent reporting success for first action (discover_hardware)
-        let success_payload = ActionStatusQuery {
-            uuid: test_uuid.to_string(),
-        };
+        let success_payload = ActionStatusQuery { uuid: test_uuid };
 
         let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
@@ -827,7 +826,7 @@ mod tests {
         // Verify device is still in New state (configure_bmc action still pending)
         let lifecycle = state
             .director
-            .get_device_lifecycle(test_uuid)
+            .get_device_lifecycle(&test_uuid)
             .await
             .unwrap();
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
@@ -846,7 +845,7 @@ mod tests {
         // Verify device transitioned to Unprovisioned after both actions complete
         let lifecycle = state
             .director
-            .get_device_lifecycle(test_uuid)
+            .get_device_lifecycle(&test_uuid)
             .await
             .unwrap();
         assert_eq!(
@@ -857,7 +856,7 @@ mod tests {
         // Verify no active plan
         let active_plan = state
             .director
-            .get_active_plan_for_device(test_uuid)
+            .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_none());

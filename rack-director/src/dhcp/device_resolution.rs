@@ -1,4 +1,5 @@
 use anyhow::Result;
+use uuid::Uuid;
 
 use crate::director::Director;
 
@@ -16,7 +17,7 @@ use crate::director::Director;
 /// * `Ok(Some(uuid))` - Device found, returns the UUID
 /// * `Ok(None)` - Device not found
 /// * `Err(_)` - Database or lookup error
-pub async fn resolve_device_uuid(director: &Director, mac_str: &str) -> Result<Option<String>> {
+pub async fn resolve_device_uuid(director: &Director, mac_str: &str) -> Result<Option<Uuid>> {
     // Check if device exists in devices table by MAC (device NIC)
     let mut device_uuid = director.find_device_by_mac(mac_str).await?;
 
@@ -47,7 +48,7 @@ pub async fn resolve_device_uuid(director: &Director, mac_str: &str) -> Result<O
 /// * `Err(_)` - Database or lookup error
 pub async fn is_interface_disabled(
     director: &Director,
-    device_uuid: &str,
+    device_uuid: &Uuid,
     mac_str: &str,
 ) -> Result<(bool, Option<String>)> {
     let interfaces = director.get_network_interfaces(device_uuid).await?;
@@ -114,7 +115,8 @@ mod tests {
     async fn test_is_interface_disabled_no_device() {
         let director = create_test_director().await;
         // Non-existent device UUID should return Ok((false, None))
-        let result = is_interface_disabled(&director, "non-existent-uuid", "aa:bb:cc:dd:ee:ff")
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        let result = is_interface_disabled(&director, &test_uuid, "aa:bb:cc:dd:ee:ff")
             .await
             .unwrap();
         assert_eq!(result, (false, None));

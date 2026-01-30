@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::director::store::DirectorStore;
 use crate::director::store::generate_hostname_from_uuid;
@@ -68,7 +69,7 @@ impl Director {
 
     pub async fn register_device(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         architecture: Architecture,
     ) -> anyhow::Result<()> {
         log::info!("Registering device {uuid}");
@@ -79,12 +80,12 @@ impl Director {
         Ok(())
     }
 
-    pub async fn device_exists(&self, uuid: &str) -> anyhow::Result<bool> {
+    pub async fn device_exists(&self, uuid: &Uuid) -> anyhow::Result<bool> {
         let exists = self.store.device_exists(uuid).await?;
         Ok(exists)
     }
 
-    pub async fn next_boot_target(&self, uuid: &str) -> anyhow::Result<BootTarget> {
+    pub async fn next_boot_target(&self, uuid: &Uuid) -> anyhow::Result<BootTarget> {
         self.store
             .update_device_last_seen(uuid)
             .await
@@ -104,7 +105,7 @@ impl Director {
 
     async fn get_boot_target_for_action(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         action: &crate::plans::Action,
     ) -> anyhow::Result<BootTarget> {
         match action.action_type.as_str() {
@@ -184,7 +185,7 @@ impl Director {
 
     pub async fn update_attributes(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         attributes: serde_json::Map<String, serde_json::Value>,
     ) -> anyhow::Result<()> {
         self.store.update_attributes(uuid, attributes).await?;
@@ -198,14 +199,14 @@ impl Director {
     #[cfg(test)]
     pub async fn get_active_plan_for_device(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> anyhow::Result<Option<Plan>> {
         self.plans_store
             .get_active_plan_for_device(device_uuid)
             .await
     }
 
-    pub async fn mark_action_success(&self, device_uuid: &str) -> anyhow::Result<()> {
+    pub async fn mark_action_success(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
         // Get the current active plan
         let mut plan = match self
             .plans_store
@@ -250,7 +251,7 @@ impl Director {
 
     pub async fn mark_action_failed(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
         error_message: &str,
     ) -> anyhow::Result<()> {
         // Get the current active plan
@@ -290,7 +291,7 @@ impl Director {
 
     pub async fn start_lifecycle_transition(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
         to_state: DeviceLifecycle,
     ) -> anyhow::Result<i64> {
         // Get current device lifecycle
@@ -327,16 +328,12 @@ impl Director {
 
         // Create plan for this transition
         let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
-        let plan = Plan::new(device_uuid.to_string(), actions);
+        let plan = Plan::new(*device_uuid, actions);
         let plan_id = self.create_plan(&plan).await?;
 
         // Create lifecycle transition
-        let transition = LifecycleTransition::new(
-            device_uuid.to_string(),
-            current_lifecycle,
-            to_state,
-            Some(plan_id),
-        );
+        let transition =
+            LifecycleTransition::new(*device_uuid, current_lifecycle, to_state, Some(plan_id));
 
         let transition_id = self.lifecycle_store.create_transition(&transition).await?;
 
@@ -345,14 +342,14 @@ impl Director {
 
     pub async fn get_device_lifecycle(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> anyhow::Result<Option<DeviceLifecycle>> {
         self.lifecycle_store.get_device_lifecycle(device_uuid).await
     }
 
     pub async fn get_active_transition_for_device(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> anyhow::Result<Option<LifecycleTransition>> {
         self.lifecycle_store
             .get_active_transition_for_device(device_uuid)
@@ -361,7 +358,7 @@ impl Director {
 
     pub async fn get_device_transitions(
         &self,
-        device_uuid: &str,
+        device_uuid: &Uuid,
         include_completed: bool,
     ) -> anyhow::Result<Vec<LifecycleTransition>> {
         self.lifecycle_store
@@ -415,7 +412,7 @@ impl Director {
         Ok(())
     }
 
-    pub async fn get_device(&self, uuid: &str) -> anyhow::Result<Device> {
+    pub async fn get_device(&self, uuid: &Uuid) -> anyhow::Result<Device> {
         self.store.get_device(uuid).await
     }
 
@@ -423,17 +420,17 @@ impl Director {
         self.store.get_all_devices().await
     }
 
-    pub async fn find_device_by_mac(&self, mac: &str) -> anyhow::Result<Option<String>> {
+    pub async fn find_device_by_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         self.store.find_device_by_mac(mac).await
     }
 
-    pub async fn set_device_mac_address(&self, uuid: &str, mac: &str) -> anyhow::Result<()> {
+    pub async fn set_device_mac_address(&self, uuid: &Uuid, mac: &str) -> anyhow::Result<()> {
         self.store.set_mac_address(uuid, mac).await
     }
 
     pub async fn set_device_ip_address(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         ip: &str,
         mac: &str,
     ) -> anyhow::Result<()> {
@@ -442,14 +439,14 @@ impl Director {
 
     pub async fn get_network_interfaces(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
     ) -> anyhow::Result<Vec<NetworkInterface>> {
         self.store.get_network_interfaces(uuid).await
     }
 
     pub async fn set_network_interfaces(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         interfaces: &[NetworkInterface],
     ) -> anyhow::Result<()> {
         self.store.set_network_interfaces(uuid, interfaces).await
@@ -459,8 +456,8 @@ impl Director {
         &self,
         mac: &str,
         network_id: i64,
-        exclude_device: &str,
-    ) -> anyhow::Result<Vec<(String, String)>> {
+        exclude_device: &Uuid,
+    ) -> anyhow::Result<Vec<(Uuid, String)>> {
         self.store
             .find_duplicate_macs_on_network(mac, network_id, exclude_device)
             .await
@@ -486,7 +483,7 @@ impl Director {
     pub async fn complete_pending_device(
         &self,
         mac_address: &str,
-        device_uuid: &str,
+        device_uuid: &Uuid,
     ) -> anyhow::Result<()> {
         self.store
             .complete_pending_device(mac_address, device_uuid)
@@ -501,7 +498,7 @@ impl Director {
         self.store.delete_pending_device(id).await
     }
 
-    pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<String>> {
+    pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         self.store.find_device_by_bmc_mac(mac).await
     }
 }
@@ -599,11 +596,11 @@ mod tests {
     #[tokio::test]
     async fn test_single_active_plan_constraint() {
         let (director, _temp_dir) = setup_test_director().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440006";
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440006").unwrap();
 
         // Register device
         director
-            .register_device(test_uuid, Architecture::X86_64)
+            .register_device(&test_uuid, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -612,12 +609,12 @@ mod tests {
             "install_os".to_string(),
             std::collections::HashMap::new(),
         )];
-        let first_plan = crate::plans::Plan::new(test_uuid.to_string(), first_actions);
+        let first_plan = crate::plans::Plan::new(test_uuid, first_actions);
         director.create_plan(&first_plan).await.unwrap();
 
         // Verify first plan is active
         let active_plan = director
-            .get_active_plan_for_device(test_uuid)
+            .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_some());
@@ -631,7 +628,7 @@ mod tests {
             "configure_network".to_string(),
             std::collections::HashMap::new(),
         )];
-        let second_plan = crate::plans::Plan::new(test_uuid.to_string(), second_actions);
+        let second_plan = crate::plans::Plan::new(test_uuid, second_actions);
         let result = director.create_plan(&second_plan).await;
 
         // Verify the second plan creation was rejected
@@ -645,7 +642,7 @@ mod tests {
 
         // Verify the first plan is still active and unchanged
         let active_plan = director
-            .get_active_plan_for_device(test_uuid)
+            .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_some());
@@ -663,9 +660,9 @@ mod tests {
         assert_eq!(devices.len(), 0);
 
         // Register a device
-        let test_uuid1 = "550e8400-e29b-41d4-a716-446655440001";
+        let test_uuid1 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
         director
-            .register_device(test_uuid1, Architecture::X86_64)
+            .register_device(&test_uuid1, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -681,9 +678,9 @@ mod tests {
         );
 
         // Register another device with attributes
-        let test_uuid2 = "550e8400-e29b-41d4-a716-446655440002";
+        let test_uuid2 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap();
         director
-            .register_device(test_uuid2, Architecture::X86_64)
+            .register_device(&test_uuid2, Architecture::X86_64)
             .await
             .unwrap();
 
@@ -693,7 +690,7 @@ mod tests {
             serde_json::Value::String("test-server".to_string()),
         );
         director
-            .update_attributes(test_uuid2, attributes.clone())
+            .update_attributes(&test_uuid2, attributes.clone())
             .await
             .unwrap();
 
@@ -718,20 +715,20 @@ mod tests {
     #[tokio::test]
     async fn test_discovery_transition() {
         let (director, _temp_dir) = setup_test_director().await;
-        let test_uuid = "550e8400-e29b-41d4-a716-446655440007";
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440007").unwrap();
 
         // Register device - it should start in "new" state
         director
-            .register_device(test_uuid, Architecture::X86_64)
+            .register_device(&test_uuid, Architecture::X86_64)
             .await
             .unwrap();
 
-        let lifecycle = director.get_device_lifecycle(test_uuid).await.unwrap();
+        let lifecycle = director.get_device_lifecycle(&test_uuid).await.unwrap();
         assert_eq!(lifecycle, Some(DeviceLifecycle::New));
 
         // Start discovery transition (New -> Unprovisioned)
         let transition_id = director
-            .start_lifecycle_transition(test_uuid, DeviceLifecycle::Unprovisioned)
+            .start_lifecycle_transition(&test_uuid, DeviceLifecycle::Unprovisioned)
             .await
             .unwrap();
 
@@ -739,7 +736,7 @@ mod tests {
 
         // Verify the transition was created
         let active_transition = director
-            .get_active_transition_for_device(test_uuid)
+            .get_active_transition_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_transition.is_some());
@@ -749,7 +746,7 @@ mod tests {
 
         // Verify a discovery plan was created with 2 actions
         let active_plan = director
-            .get_active_plan_for_device(test_uuid)
+            .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_some());
@@ -759,7 +756,7 @@ mod tests {
         assert_eq!(plan.actions[1].action_type, "configure_bmc");
 
         // Verify the device gets the right boot target for first action (discover_hardware)
-        let boot_target = director.next_boot_target(test_uuid).await.unwrap();
+        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
         match boot_target {
             BootTarget::NetBoot {
                 ramdisk,
@@ -775,11 +772,11 @@ mod tests {
         }
 
         // Simulate discovery action completion
-        director.mark_action_success(test_uuid).await.unwrap();
+        director.mark_action_success(&test_uuid).await.unwrap();
 
         // Verify second action (configure_bmc) is now current
         let active_plan = director
-            .get_active_plan_for_device(test_uuid)
+            .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_some());
@@ -787,7 +784,7 @@ mod tests {
         assert_eq!(plan.current_step, 1);
 
         // Verify the device gets BMC config boot target for second action
-        let boot_target = director.next_boot_target(test_uuid).await.unwrap();
+        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
         match boot_target {
             BootTarget::NetBoot {
                 ramdisk: _,
@@ -800,29 +797,29 @@ mod tests {
         }
 
         // Simulate BMC configuration completion
-        director.mark_action_success(test_uuid).await.unwrap();
+        director.mark_action_success(&test_uuid).await.unwrap();
 
         // Verify plan is now complete
         let active_plan = director
-            .get_active_plan_for_device(test_uuid)
+            .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_none(), "Plan should be complete");
 
         // Verify device transitioned to Unprovisioned
-        let lifecycle = director.get_device_lifecycle(test_uuid).await.unwrap();
+        let lifecycle = director.get_device_lifecycle(&test_uuid).await.unwrap();
         assert_eq!(lifecycle, Some(DeviceLifecycle::Unprovisioned));
 
         // Verify transition is marked as successful
         let transitions = director
-            .get_device_transitions(test_uuid, true)
+            .get_device_transitions(&test_uuid, true)
             .await
             .unwrap();
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].success, Some(true));
 
         // After discovery, device should boot to local disk
-        let boot_target = director.next_boot_target(test_uuid).await.unwrap();
+        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
         match boot_target {
             BootTarget::LocalDisk => {} // Expected
             _ => panic!("Expected LocalDisk after discovery completion"),
