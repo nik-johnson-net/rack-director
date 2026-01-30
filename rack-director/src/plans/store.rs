@@ -55,7 +55,7 @@ impl PlansStore {
             "INSERT INTO plans (device_uuid, status, current_step, total_steps, actions, error_message, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)",
             rusqlite::params![
-                plan.device_uuid.to_string(),
+                plan.device_uuid,
                 status_str,
                 plan.current_step,
                 plan.total_steps,
@@ -81,7 +81,7 @@ impl PlansStore {
              LIMIT 1",
         )?;
 
-        let mut plan_iter = stmt.query_map([device_uuid.to_string()], |row| {
+        let mut plan_iter = stmt.query_map([device_uuid], |row| {
             let actions_json: String = row.get(5)?;
             let actions: Vec<Action> = serde_json::from_str(&actions_json).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(

@@ -117,7 +117,6 @@ impl DhcpStore {
         network_id: i64,
     ) -> Result<()> {
         let ip_str = ip.to_string();
-        let device_uuid_str = device_uuid.map(|u| u.to_string());
         let now = Utc::now();
         let lease_end = now + Duration::seconds(lease_duration as i64);
 
@@ -137,7 +136,7 @@ impl DhcpStore {
             params![
                 mac,
                 ip_str,
-                device_uuid_str,
+                device_uuid,
                 now.to_rfc3339(),
                 lease_end.to_rfc3339(),
                 state.to_string(),
@@ -274,7 +273,7 @@ impl DhcpStore {
         )?;
 
         let lease = stmt
-            .query_row(params![device_uuid.to_string()], |row| {
+            .query_row(params![device_uuid], |row| {
                 Ok(Lease {
                     id: row.get(0)?,
                     mac_address: row.get(1)?,

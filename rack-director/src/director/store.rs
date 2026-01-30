@@ -62,7 +62,7 @@ impl DirectorStore {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', ?2)",
-            params![uuid.to_string(), architecture.as_str()],
+            params![uuid, architecture.as_str()],
         )?;
         Ok(())
     }
@@ -72,7 +72,7 @@ impl DirectorStore {
         let res = conn
             .query_one(
                 "SELECT 1 FROM devices WHERE uuid = ?1",
-                [uuid.to_string()],
+                params![uuid],
                 |r| r.get(0),
             )
             .optional()
@@ -85,7 +85,7 @@ impl DirectorStore {
 
         conn.execute(
             "UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
-            [uuid.to_string()],
+            params![uuid],
         )?;
         Ok(())
     }
@@ -108,10 +108,7 @@ impl DirectorStore {
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
-            [
-                &serde_json::to_string(&merged_attributes)?,
-                &uuid.to_string(),
-            ],
+            params![serde_json::to_string(&merged_attributes)?, uuid,],
         )?;
 
         Ok(())
@@ -123,7 +120,7 @@ impl DirectorStore {
         let mut stmt = conn.prepare(
             "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1"
         )?;
-        let device = stmt.query_row(params![uuid.to_string()], |row| {
+        let device = stmt.query_row(params![uuid], |row| {
             let uuid = row.get(0)?;
             let architecture_str: String = row.get(1)?;
             let lifecycle_str: Option<String> = row.get(2)?;
@@ -241,7 +238,7 @@ impl DirectorStore {
 
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.hostname', ?) WHERE uuid = ?",
-            params![hostname, uuid.to_string()],
+            params![hostname, uuid],
         )?;
 
         Ok(())
@@ -250,19 +247,18 @@ impl DirectorStore {
     /// Set MAC address in device attributes
     pub async fn set_mac_address(&self, uuid: &Uuid, mac: &str) -> Result<()> {
         let conn = self.conn.lock().await;
-        let uuid_str = uuid.to_string();
 
         // First, update the legacy mac_address field
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.mac_address', ?) WHERE uuid = ?",
-            params![mac, &uuid_str],
+            params![mac, uuid],
         )?;
 
         // Then, if network_interfaces array exists, update the primary NIC's MAC address
         let has_interfaces: bool = conn
             .query_row(
                 "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
-                params![&uuid_str],
+                params![uuid],
                 |row| {
                     let json_type: Option<String> = row.get(0)?;
                     Ok(json_type == Some("array".to_string()))
@@ -278,7 +274,7 @@ impl DirectorStore {
                     "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?), '$.network_interfaces')
                      WHERE json_extract(value, '$.is_primary') = 1
                      LIMIT 1",
-                    params![&uuid_str],
+                    params![uuid],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;
@@ -287,7 +283,7 @@ impl DirectorStore {
                 let path = format!("$.network_interfaces[{}].mac_address", index);
                 conn.execute(
                     "UPDATE devices SET attributes = json_set(attributes, ?, ?) WHERE uuid = ?",
-                    params![path, mac, &uuid_str],
+                    params![path, mac, uuid],
                 )?;
             }
         }
@@ -298,14 +294,12 @@ impl DirectorStore {
     /// Set IP address in device attributes (called by DHCP when lease becomes active)
     /// Updates either BMC IP or network interface IP based on the MAC address
     pub async fn set_ip_address(&self, uuid: &Uuid, ip: &str, mac: &str) -> Result<()> {
-        let uuid_str = uuid.to_string();
-
         // Check if this MAC belongs to the BMC
         let is_bmc: bool = {
             let conn = self.conn.lock().await;
             conn.query_row(
                 "SELECT COALESCE(json_extract(attributes, '$.bmc.mac_address') = ?, 0) FROM devices WHERE uuid = ?",
-                params![mac, &uuid_str],
+                params![mac, uuid],
                 |row| row.get::<_, bool>(0),
             )
             .optional()?
@@ -317,7 +311,7 @@ impl DirectorStore {
             let conn = self.conn.lock().await;
             conn.execute(
                 "UPDATE devices SET attributes = json_set(attributes, '$.bmc.ip_address', ?) WHERE uuid = ?",
-                params![ip, &uuid_str],
+                params![ip, uuid],
             )?;
             return Ok(());
         }
@@ -358,9 +352,7 @@ impl DirectorStore {
         )?;
 
         let result = stmt
-            .query_row(params![uuid.to_string()], |row| {
-                row.get::<_, Option<String>>(0)
-            })
+            .query_row(params![uuid], |row| row.get::<_, Option<String>>(0))
             .optional()?;
 
         match result {
@@ -386,7 +378,7 @@ impl DirectorStore {
 
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', json(?)) WHERE uuid = ?",
-            params![json_str, uuid.to_string()],
+            params![json_str, uuid],
         )?;
 
         Ok(())
@@ -469,7 +461,7 @@ impl DirectorStore {
             "UPDATE pending_devices
              SET device_uuid = ?1, completed_at = CURRENT_TIMESTAMP
              WHERE mac_address = ?2 AND completed_at IS NULL",
-            params![device_uuid.to_string(), mac_address],
+            params![device_uuid, mac_address],
         )?;
 
         Ok(())
@@ -516,10 +508,7 @@ impl DirectorStore {
     /// Cascades to plans and transitions, sets leases device_uuid to NULL
     pub async fn delete_device(&self, uuid: &Uuid) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn.execute(
-            "DELETE FROM devices WHERE uuid = ?1",
-            params![uuid.to_string()],
-        )?;
+        conn.execute("DELETE FROM devices WHERE uuid = ?1", params![uuid])?;
         Ok(())
     }
 
@@ -564,14 +553,11 @@ impl DirectorStore {
              )",
         )?;
 
-        let rows = stmt.query_map(
-            params![exclude_device.to_string(), mac, network_id],
-            |row| {
-                let uuid = row.get(0)?;
-                let attributes_json: Option<String> = row.get(1)?;
-                Ok((uuid, attributes_json))
-            },
-        )?;
+        let rows = stmt.query_map(params![exclude_device, mac, network_id], |row| {
+            let uuid = row.get(0)?;
+            let attributes_json: Option<String> = row.get(1)?;
+            Ok((uuid, attributes_json))
+        })?;
 
         let mut duplicates = Vec::new();
 
@@ -1476,7 +1462,7 @@ mod tests {
             r#"UPDATE devices SET attributes = json_set(attributes, '$.bmc',
                json('{"mac_address":"aa:bb:cc:dd:ee:aa","ip_address":null,"ip_address_source":"Unknown"}')
             ) WHERE uuid = ?"#,
-            params![uuid.to_string()],
+            params![uuid],
         )
         .unwrap();
         drop(conn);
@@ -1515,7 +1501,7 @@ mod tests {
         let conn = store.conn.lock().await;
         conn.execute(
             "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', 'invalid') WHERE uuid = ?",
-            params![uuid.to_string()],
+            params![uuid],
         ).unwrap();
         drop(conn);
 
@@ -1581,7 +1567,7 @@ mod tests {
             r#"UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces',
                json('[{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:01","ip_address":"10.0.0.100","is_primary":true}]')
             ) WHERE uuid = ?"#,
-            params![uuid.to_string()],
+            params![uuid],
         )
         .unwrap();
         drop(conn);

@@ -282,7 +282,7 @@ impl RolesStore {
 
         conn.execute(
             "UPDATE devices SET role_id = ?1 WHERE uuid = ?2",
-            params![role_id, device_uuid.to_string()],
+            params![role_id, device_uuid],
         )
         .context("Failed to assign role to device")?;
 
@@ -300,7 +300,7 @@ impl RolesStore {
              WHERE d.uuid = ?1",
         )?;
 
-        let result = stmt.query_row(params![device_uuid.to_string()], |row| {
+        let result = stmt.query_row(params![device_uuid], |row| {
             let disk_layout_json: String = row.get(4)?;
             let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
             let config_json: Option<String> = row.get(5)?;

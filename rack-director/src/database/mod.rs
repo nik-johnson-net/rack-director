@@ -1,9 +1,11 @@
+mod migrations;
+
 use std::path::Path;
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
-const LATEST_VERSION: i32 = 10;
+const LATEST_VERSION: i32 = 11;
 const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -15,12 +17,40 @@ const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/8.sql"),
     include_str!("migrations/9.sql"),
     include_str!("migrations/10.sql"),
+    include_str!("migrations/11.sql"),
+];
+
+/// Post-migration hooks that run Rust code after SQL migrations
+/// Index corresponds to migration version (1-indexed, so POST_MIGRATION_HOOKS[10] runs after migration 11)
+type PostMigrationHook = fn(&Connection) -> Result<()>;
+const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION as usize] = [
+    None,                                          // Migration 1
+    None,                                          // Migration 2
+    None,                                          // Migration 3
+    None,                                          // Migration 4
+    None,                                          // Migration 5
+    None,                                          // Migration 6
+    None,                                          // Migration 7
+    None,                                          // Migration 8
+    None,                                          // Migration 9
+    None,                                          // Migration 10
+    Some(migrations::migration_11::convert_uuids), // Migration 11
 ];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {
     let conn = Connection::open(path)?;
     let current_version = get_or_init_current_migration(&conn)?;
     perform_migrations(&conn, current_version)?;
+
+    // Hack for bad data from Bug #1
+    // Note: After migration 11, UUIDs are BLOBs
+    // The migration should have already removed this bad data, but we keep this as a safeguard
+    conn.execute(
+        "DELETE FROM devices WHERE uuid = x'7b757569647d'",
+        params![],
+    )
+    .unwrap();
+
     Ok(conn)
 }
 
@@ -57,12 +87,25 @@ fn perform_migrations(conn: &Connection, current_version: i32) -> Result<()> {
 }
 
 fn perform_migration(conn: &Connection, version: i32) -> Result<()> {
-    if let Err(e) = conn.execute_batch(MIGRATIONS[version as usize - 1]) {
+    // Wrap entire migration in a transaction for atomicity
+    let tx = conn.unchecked_transaction()?;
+
+    // Run SQL migration
+    if let Err(e) = tx.execute_batch(MIGRATIONS[version as usize - 1]) {
         log::error!("Couldn't update database. {e}");
         return Err(e.into());
     }
 
-    conn.execute("UPDATE migrations SET version = ?1 ", [version])?;
+    // Run post-migration hook if it exists
+    if let Some(hook) = POST_MIGRATION_HOOKS[version as usize - 1] {
+        log::debug!("Running post-migration hook for version {}", version);
+        hook(&tx)?;
+    }
+
+    tx.execute("UPDATE migrations SET version = ?1 ", [version])?;
+
+    // Commit the transaction
+    tx.commit()?;
 
     Ok(())
 }
@@ -103,14 +146,18 @@ mod tests {
 
     #[test]
     fn test_device_operations() {
+        use uuid::Uuid;
+
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let conn = open(db_path).unwrap();
 
-        // Test creating a device
+        // Test creating a device with BLOB UUID
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
         conn.execute(
             "INSERT INTO devices (uuid, lifecycle) VALUES (?1, 'new')",
-            ["test-uuid"],
+            params![test_uuid],
         )
         .unwrap();
 
@@ -118,8 +165,98 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT uuid FROM devices WHERE uuid = ?1")
             .unwrap();
-        let uuid: String = stmt.query_row(["test-uuid"], |row| row.get(0)).unwrap();
+        let retrieved_uuid: Uuid = stmt
+            .query_row(params![test_uuid], |row| row.get(0))
+            .unwrap();
 
-        assert_eq!(uuid, "test-uuid");
+        assert_eq!(retrieved_uuid, test_uuid);
+    }
+
+    #[test]
+    fn test_migration_11_uuid_conversion() {
+        use uuid::Uuid;
+
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_migration.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Set up database to migration 10 (before UUID BLOB migration)
+        conn.execute_batch(
+            "CREATE TABLE migrations (version INTEGER);
+             INSERT INTO migrations (version) VALUES (0)",
+        )
+        .unwrap();
+
+        // Run migrations 1-10
+        for version in 1..=10 {
+            conn.execute_batch(MIGRATIONS[version - 1]).unwrap();
+            conn.execute("UPDATE migrations SET version = ?1", [version])
+                .unwrap();
+        }
+
+        // Insert test data with TEXT UUIDs
+        let test_uuid1 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        let test_uuid2 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap();
+
+        conn.execute(
+            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', 'x86-64')",
+            params![test_uuid1.to_string()],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', 'x86-64')",
+            params![test_uuid2.to_string()],
+        )
+        .unwrap();
+
+        // Insert plan with TEXT device_uuid
+        conn.execute(
+            "INSERT INTO plans (device_uuid, status, total_steps, actions) VALUES (?1, 'pending', 1, '[]')",
+            params![test_uuid1.to_string()],
+        )
+        .unwrap();
+
+        // Verify UUIDs are stored as TEXT before migration
+        let uuid_type: String = conn
+            .query_row(
+                "SELECT typeof(uuid) FROM devices WHERE uuid = ?1",
+                params![test_uuid1.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(uuid_type, "text");
+
+        // Run migration 11
+        drop(conn);
+        let conn = open(&db_path).unwrap();
+
+        // Verify UUIDs are now stored as BLOB
+        let uuid_type: String = conn
+            .query_row("SELECT typeof(uuid) FROM devices LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(uuid_type, "blob");
+
+        // Verify we can read UUIDs as Uuid type
+        let mut stmt = conn
+            .prepare("SELECT uuid FROM devices ORDER BY uuid")
+            .unwrap();
+        let uuids: Vec<Uuid> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(uuids.len(), 2);
+        assert!(uuids.contains(&test_uuid1));
+        assert!(uuids.contains(&test_uuid2));
+
+        // Verify plan device_uuid was also converted
+        let plan_uuid: Uuid = conn
+            .query_row("SELECT device_uuid FROM plans", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(plan_uuid, test_uuid1);
     }
 }

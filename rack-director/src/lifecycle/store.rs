@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::lifecycle::{DeviceLifecycle, LifecycleTransition};
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -80,7 +80,7 @@ impl LifecycleStore {
     ) -> Result<Option<DeviceLifecycle>> {
         let mut stmt = conn.prepare("SELECT lifecycle FROM devices WHERE uuid = ?1")?;
 
-        let mut rows = stmt.query_map([device_uuid.to_string()], |row| {
+        let mut rows = stmt.query_map([device_uuid], |row| {
             let lifecycle_str: String = row.get(0)?;
             Ok(DeviceLifecycle::from(lifecycle_str))
         })?;
@@ -102,7 +102,7 @@ impl LifecycleStore {
 
         conn.execute(
             "UPDATE devices SET lifecycle = ?1 WHERE uuid = ?2",
-            [&lifecycle_str, &device_uuid.to_string()],
+            params![&lifecycle_str, device_uuid],
         )?;
 
         Ok(())
@@ -120,7 +120,7 @@ impl LifecycleStore {
             "INSERT INTO lifecycle_transitions (device_uuid, from_state, to_state, plan_id, created_at)
              VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
             rusqlite::params![
-                transition.device_uuid.to_string(),
+                transition.device_uuid,
                 from_state_str,
                 to_state_str,
                 transition.plan_id
@@ -143,9 +143,8 @@ impl LifecycleStore {
              LIMIT 1"
         )?;
 
-        let mut transition_iter = stmt.query_map([device_uuid.to_string()], |row| {
-            self.map_row_to_transition(row)
-        })?;
+        let mut transition_iter =
+            stmt.query_map([device_uuid], |row| self.map_row_to_transition(row))?;
 
         if let Some(transition_result) = transition_iter.next() {
             return Ok(Some(transition_result?));
@@ -189,9 +188,8 @@ impl LifecycleStore {
 
         let mut stmt = conn.prepare(query)?;
 
-        let transition_iter = stmt.query_map([device_uuid.to_string()], |row| {
-            self.map_row_to_transition(row)
-        })?;
+        let transition_iter =
+            stmt.query_map([device_uuid], |row| self.map_row_to_transition(row))?;
 
         let mut transitions = Vec::new();
         for transition_result in transition_iter {
