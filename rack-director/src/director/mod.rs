@@ -498,6 +498,10 @@ impl Director {
         self.store.delete_pending_device(id).await
     }
 
+    pub async fn delete_device(&self, uuid: &Uuid) -> anyhow::Result<()> {
+        self.store.delete_device(uuid).await
+    }
+
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         self.store.find_device_by_bmc_mac(mac).await
     }

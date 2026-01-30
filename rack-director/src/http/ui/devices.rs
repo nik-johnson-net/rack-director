@@ -88,7 +88,10 @@ struct DevicesIndex {
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ui/devices", get(get_all_devices))
-        .route("/ui/devices/{uuid}", get(get_device_by_uuid))
+        .route(
+            "/ui/devices/{uuid}",
+            get(get_device_by_uuid).delete(delete_device_by_uuid),
+        )
         .route(
             "/ui/devices/{uuid}/attributes",
             patch(update_device_attributes),
@@ -465,6 +468,24 @@ async fn delete_pending_device(
     }
 }
 
+async fn delete_device_by_uuid(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    match state.director.delete_device(&uuid).await {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            log::error!("Failed to delete device {}: {}", uuid, e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to delete device".to_string(),
+                }),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
@@ -632,6 +653,116 @@ mod tests {
         assert!(
             pending_devices.is_empty(),
             "Pending device should be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_device() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x20);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Verify device exists before deletion
+        assert!(
+            state.director.device_exists(&test_uuid).await.unwrap(),
+            "Device should exist before deletion"
+        );
+
+        let app = routes(state.clone());
+
+        // Delete the device
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/ui/devices/{}", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify device is deleted
+        assert!(
+            !state.director.device_exists(&test_uuid).await.unwrap(),
+            "Device should be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_multiple_devices() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let uuid1 = test_uuid(0x21);
+        let uuid2 = test_uuid(0x22);
+
+        // Register two devices
+        state
+            .director
+            .register_device(&uuid1, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        state
+            .director
+            .register_device(&uuid2, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Delete first device
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/ui/devices/{}", uuid1))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Delete second device
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/ui/devices/{}", uuid2))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify both devices are deleted
+        assert!(!state.director.device_exists(&uuid1).await.unwrap());
+        assert!(!state.director.device_exists(&uuid2).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_device() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x22);
+
+        // Don't register the device - it doesn't exist
+
+        let app = routes(state.clone());
+
+        // Try to delete non-existent device
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/ui/devices/{}", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        // Should still return NO_CONTENT (idempotent delete)
+        // SQLite DELETE with no matching rows is still successful
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "Deleting non-existent device should be idempotent"
         );
     }
 }

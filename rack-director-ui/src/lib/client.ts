@@ -612,6 +612,16 @@ export async function updateDeviceAttributes(uuid: string, attributes: Record<st
   });
 }
 
+export async function deleteDevice(uuid: string): Promise<void> {
+  return fetch(`/ui/devices/${uuid}`, {
+    method: 'DELETE'
+  }).then((response) => {
+    if (!response.ok) {
+      throw new Error('Failed to delete device');
+    }
+  });
+}
+
 export async function getDeviceStatus(uuid: string): Promise<DeviceStatus> {
   return fetch(`/ui/devices/${uuid}/status`).then((response) => {
     if (response.ok) {

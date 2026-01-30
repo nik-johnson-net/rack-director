@@ -30,6 +30,7 @@ import {
   makeLeaseStatic,
   getNetworks,
   updateDeviceAttributes,
+  deleteDevice,
   type Device,
   type Role,
   type DeviceStatus,
@@ -41,7 +42,7 @@ import {
   type DhcpNetwork,
   type BmcConfig,
 } from "@/lib/client";
-import { ArrowLeft, CheckCircle, Clock, Pin } from "lucide-react";
+import { ArrowLeft, CheckCircle, Clock, Pin, Trash2 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -291,6 +292,19 @@ function DeviceDetail() {
       setError(err instanceof Error ? err.message : "Failed to make lease static");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteDevice = async () => {
+    if (!uuid) return;
+
+    setError(null);
+
+    try {
+      await deleteDevice(uuid);
+      navigate('/devices');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete device");
     }
   };
 
@@ -817,6 +831,40 @@ function DeviceDetail() {
           <pre className="bg-gray-50 p-4 rounded text-xs font-mono overflow-x-auto">
             {JSON.stringify(device.attributes, null, 2)}
           </pre>
+        </CardContent>
+      </Card>
+
+      {/* Delete Device */}
+      <Card className="border-red-200">
+        <CardHeader>
+          <CardTitle className="text-red-700">Danger Zone</CardTitle>
+          <CardDescription>
+            Irreversible and destructive actions
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="destructive" className="w-full">
+                <Trash2 className="h-4 w-4 mr-2" />
+                Delete Device
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete Device?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will permanently delete this device and all associated plans, transitions, and leases. This action cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={handleDeleteDevice} className="bg-red-600 hover:bg-red-700">
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </CardContent>
       </Card>
     </div>

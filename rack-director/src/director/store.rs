@@ -512,6 +512,17 @@ impl DirectorStore {
         Ok(())
     }
 
+    /// Delete a device by UUID
+    /// Cascades to plans and transitions, sets leases device_uuid to NULL
+    pub async fn delete_device(&self, uuid: &Uuid) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM devices WHERE uuid = ?1",
+            params![uuid.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Find device UUID by BMC MAC address
     ///
     /// Searches all devices for a BMC with the given MAC address in their attributes.
