@@ -14,10 +14,8 @@ use crate::operating_systems::{Architecture, OperatingSystemsStore};
 use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::roles::RolesStore;
 use crate::storage::ImageStore;
-use crate::templates;
 use crate::tftp::Handler;
 use crate::tftp::Reader;
-use anyhow::anyhow;
 
 mod store;
 
@@ -25,6 +23,7 @@ pub use store::Device;
 pub use store::NetworkInterface;
 pub use store::PendingDevice;
 
+#[derive(Debug)]
 pub enum BootTarget {
     LocalDisk,
     NetBoot {
@@ -95,92 +94,24 @@ impl Director {
         if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await?
             && let Some(current_action) = plan.get_current_action()
         {
+            // Get device for ActionContext
+            let device = self.get_device(uuid).await?;
+
+            // Create ActionContext for the action
+            let ctx = crate::plans::actions::ActionContext {
+                root_url: &self.root_url,
+                device: &device,
+                os_store: &self.os_store,
+                roles_store: &self.roles_store,
+                image_store: &self.image_store,
+            };
+
             // Return appropriate boot target based on the current action
-            return self.get_boot_target_for_action(uuid, current_action).await;
+            return current_action.to_boot_target(&ctx).await;
         }
 
         // Default to local disk if no active plan
         Ok(BootTarget::LocalDisk)
-    }
-
-    async fn get_boot_target_for_action(
-        &self,
-        uuid: &Uuid,
-        action: &crate::plans::Action,
-    ) -> anyhow::Result<BootTarget> {
-        match action.action_type.as_str() {
-            "discover_hardware" => {
-                // Boot the agent image for hardware discovery
-                // Agent images are served via /cnc/agent-images/ endpoint (bundled with rack-director)
-                let kernel_url = format!("{}/cnc/agent-images/vmlinuz", &self.root_url);
-                let initramfs_url = format!("{}/cnc/agent-images/initramfs.img", &self.root_url);
-
-                // Pass the rack-director URL and action via kernel cmdline so agent can phone home
-                let cmdline = format!(
-                    "rackdirector.url={}/cnc rackdirector.action=device-scan quiet",
-                    &self.root_url
-                );
-
-                Ok(BootTarget::NetBoot {
-                    ramdisk: initramfs_url,
-                    kernel: kernel_url,
-                    cmdline,
-                })
-            }
-            "configure_bmc" => {
-                // Boot the agent image for BMC configuration
-                let kernel_url = format!("{}/cnc/agent-images/vmlinuz", &self.root_url);
-                let initramfs_url = format!("{}/cnc/agent-images/initramfs.img", &self.root_url);
-
-                // Pass the rack-director URL and action via kernel cmdline
-                let cmdline = format!(
-                    "rackdirector.url={}/cnc rackdirector.action=configure-bmc quiet",
-                    &self.root_url
-                );
-
-                Ok(BootTarget::NetBoot {
-                    ramdisk: initramfs_url,
-                    kernel: kernel_url,
-                    cmdline,
-                })
-            }
-            "install_os" => {
-                // Get device
-                let device = self.get_device(uuid).await?;
-
-                // Get device architecture
-                let arch = device.architecture;
-
-                // Get device role
-                if let Some(role) = self.roles_store.get_device_role(uuid).await? {
-                    // Get OS architecture configuration
-                    let os_arch = self.os_store.get_architecture(role.os_id, arch).await?;
-
-                    // Generate URLs from image store
-                    let kernel_url = self.image_store.get_url(&os_arch.kernel_path);
-                    let initramfs_url = self.image_store.get_url(&os_arch.initramfs_path);
-
-                    let cmdline = os_arch
-                        .cmdline_args
-                        .map(|template| templates::render_cmdline_args(&template, &self.root_url))
-                        .unwrap_or_else(|| Ok("".to_string()))?;
-
-                    return Ok(BootTarget::NetBoot {
-                        ramdisk: initramfs_url,
-                        kernel: kernel_url,
-                        cmdline,
-                    });
-                }
-
-                log::warn!(
-                    "Role not found for {} while determining boot target for os_install",
-                    uuid
-                );
-                Err(anyhow!("role not found for {}", uuid))
-            }
-            // Default to local boot for unknown actions
-            _ => Ok(BootTarget::LocalDisk),
-        }
     }
 
     pub async fn update_attributes(
@@ -609,10 +540,7 @@ mod tests {
             .unwrap();
 
         // Create first plan
-        let first_actions = vec![crate::plans::Action::new(
-            "install_os".to_string(),
-            std::collections::HashMap::new(),
-        )];
+        let first_actions = vec![crate::plans::Action::InstallOs];
         let first_plan = crate::plans::Plan::new(test_uuid, first_actions);
         director.create_plan(&first_plan).await.unwrap();
 
@@ -623,15 +551,12 @@ mod tests {
             .unwrap();
         assert!(active_plan.is_some());
         assert_eq!(
-            active_plan.as_ref().unwrap().actions[0].action_type,
-            "install_os"
+            active_plan.as_ref().unwrap().actions[0],
+            crate::plans::Action::InstallOs
         );
 
         // Create second plan - this should be rejected
-        let second_actions = vec![crate::plans::Action::new(
-            "configure_network".to_string(),
-            std::collections::HashMap::new(),
-        )];
+        let second_actions = vec![crate::plans::Action::PartitionDisks];
         let second_plan = crate::plans::Plan::new(test_uuid, second_actions);
         let result = director.create_plan(&second_plan).await;
 
@@ -651,7 +576,7 @@ mod tests {
             .unwrap();
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
-        assert_eq!(plan.actions[0].action_type, "install_os");
+        assert_eq!(plan.actions[0], crate::plans::Action::InstallOs);
         assert_eq!(plan.status, PlanStatus::Pending);
     }
 
@@ -756,8 +681,8 @@ mod tests {
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
         assert_eq!(plan.actions.len(), 2);
-        assert_eq!(plan.actions[0].action_type, "discover_hardware");
-        assert_eq!(plan.actions[1].action_type, "configure_bmc");
+        assert_eq!(plan.actions[0], crate::plans::Action::DiscoverHardware);
+        assert_eq!(plan.actions[1], crate::plans::Action::ConfigureBmc);
 
         // Verify the device gets the right boot target for first action (discover_hardware)
         let boot_target = director.next_boot_target(&test_uuid).await.unwrap();

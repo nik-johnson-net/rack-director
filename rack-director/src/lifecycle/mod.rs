@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 pub mod store;
@@ -160,30 +159,12 @@ impl LifecycleManager {
 
         match transition_type {
             TransitionType::Discover => {
-                vec![
-                    Action::new("discover_hardware".to_string(), HashMap::new()),
-                    Action::new("configure_bmc".to_string(), HashMap::new()),
-                ]
+                vec![Action::DiscoverHardware, Action::ConfigureBmc]
             }
-            TransitionType::Provision => vec![
-                Action::new("install_os".to_string(), HashMap::new()),
-                Action::new("configure_network".to_string(), HashMap::new()),
-                Action::new("install_software".to_string(), HashMap::new()),
-            ],
-            TransitionType::Deprovision => vec![
-                Action::new("backup_data".to_string(), HashMap::new()),
-                Action::new("remove_software".to_string(), HashMap::new()),
-                Action::new("factory_reset".to_string(), HashMap::new()),
-            ],
-            TransitionType::Remove => vec![
-                Action::new("secure_wipe".to_string(), HashMap::new()),
-                Action::new("inventory_removal".to_string(), HashMap::new()),
-            ],
-            TransitionType::Repair => vec![
-                Action::new("run_diagnostics".to_string(), HashMap::new()),
-                Action::new("repair_issues".to_string(), HashMap::new()),
-                Action::new("verify_functionality".to_string(), HashMap::new()),
-            ],
+            TransitionType::Provision => vec![Action::PartitionDisks, Action::InstallOs],
+            TransitionType::Deprovision => vec![],
+            TransitionType::Remove => vec![],
+            TransitionType::Repair => vec![],
         }
     }
 }
@@ -281,25 +262,6 @@ mod tests {
             LifecycleManager::get_transition_type(&Broken, &Unprovisioned),
             Some(TransitionType::Repair)
         );
-    }
-
-    #[test]
-    fn test_plan_stubs() {
-        let discover_actions =
-            LifecycleManager::get_plan_stub_for_transition(&TransitionType::Discover);
-        assert_eq!(discover_actions.len(), 2);
-        assert_eq!(discover_actions[0].action_type, "discover_hardware");
-        assert_eq!(discover_actions[1].action_type, "configure_bmc");
-
-        let provision_actions =
-            LifecycleManager::get_plan_stub_for_transition(&TransitionType::Provision);
-        assert_eq!(provision_actions.len(), 3);
-        assert_eq!(provision_actions[0].action_type, "install_os");
-
-        let deprovision_actions =
-            LifecycleManager::get_plan_stub_for_transition(&TransitionType::Deprovision);
-        assert_eq!(deprovision_actions.len(), 3);
-        assert_eq!(deprovision_actions[0].action_type, "backup_data");
     }
 
     #[test]

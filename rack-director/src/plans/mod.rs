@@ -1,9 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use uuid::Uuid;
 
+pub mod actions;
 pub mod store;
+
+pub use actions::Action;
 pub use store::PlansStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,29 +36,6 @@ impl From<PlanStatus> for String {
             PlanStatus::Success => "success".to_string(),
             PlanStatus::Failed => "failed".to_string(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Action {
-    pub action_type: String,
-    pub parameters: HashMap<String, serde_json::Value>,
-    pub description: Option<String>,
-}
-
-impl Action {
-    pub fn new(action_type: String, parameters: HashMap<String, serde_json::Value>) -> Self {
-        Action {
-            action_type,
-            parameters,
-            description: None,
-        }
-    }
-
-    #[allow(unused)]
-    pub fn with_description(mut self, description: String) -> Self {
-        self.description = Some(description);
-        self
     }
 }
 
@@ -156,10 +135,7 @@ mod tests {
 
     #[test]
     fn test_plan_creation() {
-        let actions = vec![
-            Action::new("install_os".to_string(), HashMap::new()),
-            Action::new("configure_network".to_string(), HashMap::new()),
-        ];
+        let actions = vec![Action::InstallOs, Action::PartitionDisks];
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
         let plan = Plan::new(uuid, actions);
 
@@ -173,10 +149,7 @@ mod tests {
 
     #[test]
     fn test_plan_execution_flow() {
-        let actions = vec![
-            Action::new("step1".to_string(), HashMap::new()),
-            Action::new("step2".to_string(), HashMap::new()),
-        ];
+        let actions = vec![Action::DiscoverHardware, Action::ConfigureBmc];
         let mut plan = Plan::new(
             Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             actions,
@@ -201,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_plan_failure() {
-        let actions = vec![Action::new("failing_action".to_string(), HashMap::new())];
+        let actions = vec![Action::InstallOs];
         let mut plan = Plan::new(
             Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             actions,
@@ -218,10 +191,7 @@ mod tests {
 
     #[test]
     fn test_get_current_action() {
-        let actions = vec![
-            Action::new("first".to_string(), HashMap::new()),
-            Action::new("second".to_string(), HashMap::new()),
-        ];
+        let actions = vec![Action::DiscoverHardware, Action::ConfigureBmc];
         let plan = Plan::new(
             Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             actions,
@@ -229,6 +199,6 @@ mod tests {
 
         let current = plan.get_current_action();
         assert!(current.is_some());
-        assert_eq!(current.unwrap().action_type, "first");
+        assert_eq!(*current.unwrap(), Action::DiscoverHardware);
     }
 }

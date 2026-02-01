@@ -21,21 +21,15 @@ sanboot --no-describe --drive 0x80
 /// from the HTTP server. Used for device discovery, OS installation, or maintenance tasks.
 ///
 /// # Arguments
-/// * `root_url` - The base HTTP URL where kernel and ramdisk images are hosted
 /// * `ramdisk` - The filename of the initramfs image
 /// * `kernel` - The filename of the kernel image
 /// * `cmdline` - Kernel command line arguments
-pub fn generate_kernel_script(
-    root_url: &str,
-    ramdisk: &str,
-    kernel: &str,
-    cmdline: &str,
-) -> String {
+pub fn generate_kernel_script(ramdisk: &str, kernel: &str, cmdline: &str) -> String {
     format!(
         r#"#!ipxe
 # Boot custom linux image for new device intake
-kernel {root_url}/cnc/images/{kernel} {cmdline}
-initrd {root_url}/cnc/images/{ramdisk}
+kernel {kernel} {cmdline}
+initrd {ramdisk}
 boot
 "#
     )
@@ -98,9 +92,8 @@ mod tests {
     #[test]
     fn test_generate_kernel_script() {
         let script = generate_kernel_script(
-            "http://example.com",
-            "initramfs.img",
-            "vmlinuz",
+            "http://example.com/cnc/images/initramfs.img",
+            "http://example.com/cnc/images/vmlinuz",
             "console=ttyS0",
         );
         assert!(script.contains("#!ipxe"));

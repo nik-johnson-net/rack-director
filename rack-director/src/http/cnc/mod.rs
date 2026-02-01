@@ -29,7 +29,7 @@ use ipxe_scripts::{
     build_response, generate_boot_local_script, generate_kernel_script, generate_uuid_redirect,
 };
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct IpxeQuery {
     uuid: Option<Uuid>,
     mac: Option<String>,
@@ -53,6 +53,7 @@ async fn ipxe_handler(
     Query(params): Query<IpxeQuery>,
     Host(host): Host,
 ) -> Result<Response<String>, Error> {
+    log::debug!("/cnc/ipxe, params: {:?}", params);
     let root_url = format!("http://{host}");
 
     let uuid: Uuid = match params.uuid {
@@ -118,8 +119,10 @@ async fn ipxe_handler(
             ramdisk,
             kernel,
             cmdline,
-        } => generate_kernel_script(&root_url, &ramdisk, &kernel, &cmdline),
+        } => generate_kernel_script(&ramdisk, &kernel, &cmdline),
     };
+
+    log::debug!("cnc/ipxe: returning script for {}:\n{}", uuid, ipxe_script);
 
     Ok(build_response(ipxe_script))
 }
@@ -587,13 +590,7 @@ mod tests {
         let test_uuid = test_uuid(0x03);
 
         // Create a test plan
-        let actions = vec![
-            crate::plans::Action::new("install_os".to_string(), std::collections::HashMap::new()),
-            crate::plans::Action::new(
-                "configure_network".to_string(),
-                std::collections::HashMap::new(),
-            ),
-        ];
+        let actions = vec![crate::plans::Action::InstallOs];
         let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
@@ -627,10 +624,7 @@ mod tests {
         let test_uuid = test_uuid(0x04);
 
         // Create a test plan
-        let actions = vec![crate::plans::Action::new(
-            "install_os".to_string(),
-            std::collections::HashMap::new(),
-        )];
+        let actions = vec![crate::plans::Action::InstallOs];
         let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
@@ -732,8 +726,8 @@ mod tests {
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
         assert_eq!(plan.actions.len(), 2);
-        assert_eq!(plan.actions[0].action_type, "discover_hardware");
-        assert_eq!(plan.actions[1].action_type, "configure_bmc");
+        assert_eq!(plan.actions[0], crate::plans::Action::DiscoverHardware);
+        assert_eq!(plan.actions[1], crate::plans::Action::ConfigureBmc);
 
         // iPXE response should contain agent kernel boot
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
