@@ -53,8 +53,8 @@ COPY --from=bin-builder /output/rack-agent /rack-agent
 RUN chmod +x "/usr/local/bin/build-agent.sh" && "/usr/local/bin/build-agent.sh"
 
 FROM redhat/ubi10
-ADD https://boot.ipxe.org/undionly.kpxe /opt/rack-director/tftp/undionly.kpxe
-ADD https://boot.ipxe.org/ipxe.efi /opt/rack-director/tftp/ipxe.efi
+ADD https://boot.ipxe.org/undionly.kpxe /opt/rack-director/firmware/undionly.kpxe
+ADD https://boot.ipxe.org/ipxe.efi /opt/rack-director/firmware/ipxe.efi
 COPY --from=bin-builder /output/rack-director /opt/rack-director/bin/rack-director
 COPY --from=bin-builder /output/ui /opt/rack-director/ui
 COPY --from=agent-image-builder /output/vmlinuz /opt/rack-director/agent/vmlinuz

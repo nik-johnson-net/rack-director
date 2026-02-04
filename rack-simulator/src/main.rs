@@ -107,7 +107,7 @@ enum ConfigCommands {
         #[arg(long, default_value = "auto")]
         uuid: String,
 
-        /// Architecture: x86-bios, x64-uefi, arm64-uefi
+        /// Architecture: x86-bios, x64-uefi, arm64-uefi, x64-uefi-http
         #[arg(long, default_value = "x64-uefi")]
         arch: String,
 

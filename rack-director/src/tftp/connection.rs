@@ -1,4 +1,4 @@
-use log::debug;
+use log::{debug, trace};
 use std::{fmt::Display, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::UdpSocket, time::timeout};
 
@@ -126,24 +126,24 @@ impl<H: Handler + 'static> Connection<H> {
     }
 
     async fn handle(&mut self, packet: Packet) -> std::result::Result<(), Error> {
-        debug!("TFTP: Handling packet {:?}", packet);
+        trace!("TFTP: Handling packet {:?}", packet);
         let control_flow = self.state.handle(packet).await;
         match control_flow {
             ControlFlow::Continue(packet) => {
-                debug!("TFTP: Sending packet to {}: {:?}", self.addr, packet);
+                trace!("TFTP: Sending packet to {}: {:?}", self.addr, packet);
                 // Send the response packet back to the client
                 self.socket.send(&packet.to_bytes()).await?;
             }
             ControlFlow::Closed(packet_opt) => {
                 if let Some(packet) = packet_opt {
-                    debug!(
+                    trace!(
                         "TFTP: Closed - Sending packet to {}: {:?}",
                         self.addr, packet
                     );
                     // Send the final packet before closing
                     self.socket.send(&packet.to_bytes()).await?;
                 } else {
-                    debug!("TFTP: Closed");
+                    trace!("TFTP: Closed");
                 }
                 // Close the connection
                 return Err(Error::ConnectionClosed);

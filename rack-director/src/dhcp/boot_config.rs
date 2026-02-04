@@ -1,25 +1,24 @@
 use anyhow::Result;
-use dhcproto::v4::{self, DhcpOption, Message, OptionCode};
+use dhcproto::v4::{self, Architecture, Message};
 use std::net::Ipv4Addr;
-use uuid::Uuid;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BootMode {
-    BiosLegacy,
-    UefiBoot,
-    UefiArm64,
-}
+use crate::boot_files::BootFileProvider;
+
+use super::request::RequestContext;
 
 #[derive(Debug, Clone)]
-pub struct BootOptions {
-    pub next_server: Option<String>,
-    pub filename: String,
+struct BootOptions {
+    next_server: Option<String>,
+    filename: String,
+    file_size_blocks: Option<u16>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BootConfigProvider {
     tftp_server: String,
     http_server: String,
+    boot_file_provider: Arc<dyn BootFileProvider>,
 }
 
 impl BootConfigProvider {
@@ -28,11 +27,16 @@ impl BootConfigProvider {
     /// # Arguments
     /// * `tftp_server` - TFTP server address (IP or hostname)
     /// * `http_server` - HTTP server URL (must start with `http://` or `https://`)
+    /// * `boot_file_provider` - Provider for accessing boot files and their sizes
     ///
     /// # Panics
     /// Panics if `http_server` does not start with `http://` or `https://`.
     /// This validation ensures boot scripts always receive valid HTTP URLs.
-    pub fn new(tftp_server: String, http_server: String) -> Self {
+    pub fn new(
+        tftp_server: String,
+        http_server: String,
+        boot_file_provider: Arc<dyn BootFileProvider>,
+    ) -> Self {
         // Validate that http_server has proper URL scheme
         if !http_server.starts_with("http://") && !http_server.starts_with("https://") {
             panic!(
@@ -44,188 +48,165 @@ impl BootConfigProvider {
         Self {
             tftp_server,
             http_server,
+            boot_file_provider,
         }
     }
 
-    pub fn get_boot_options(&self, mode: BootMode) -> Result<BootOptions> {
-        match mode {
-            BootMode::BiosLegacy => Ok(BootOptions {
-                // BIOS: Use TFTP to download undionly.kpxe (iPXE for BIOS)
-                // Then iPXE will fetch the boot script via HTTP
-                next_server: Some(self.tftp_server.clone()),
-                filename: "undionly.kpxe".to_string(),
-            }),
-            BootMode::UefiBoot => Ok(BootOptions {
-                // UEFI x86-64: Use TFTP to download ipxe.efi (iPXE for UEFI)
-                // Then iPXE will fetch the boot script via HTTP
-                next_server: Some(self.tftp_server.clone()),
-                filename: "ipxe.efi".to_string(),
-            }),
-            BootMode::UefiArm64 => Ok(BootOptions {
-                // UEFI ARM64: Use TFTP to download ipxe.efi (iPXE for UEFI ARM64)
-                // Then iPXE will fetch the boot script via HTTP
-                next_server: Some(self.tftp_server.clone()),
-                filename: "ipxe.efi".to_string(),
-            }),
-        }
-    }
-
-    pub fn get_ipxe_boot_script(&self) -> Result<BootOptions> {
-        // iPXE second-stage: Return HTTP URL for boot script
-        // This is called when iPXE makes a second DHCP request after booting
-        Ok(BootOptions {
-            next_server: None,
-            filename: format!("{}/cnc/ipxe", self.http_server),
-        })
-    }
-
-    /// Checks if the client requested boot options via DHCP option 55 (Parameter Request List).
+    /// Resolves and applies boot options to a DHCP message.
     ///
-    /// This method examines the Parameter Request List (option 55) in the DHCP message to
-    /// determine if the client explicitly requested boot-related options:
-    /// - Option 66 (TFTP Server Name)
-    /// - Option 67 (Bootfile Name)
+    /// Decision logic (in order):
+    /// 1. Check if client requested any boot options — skip if not requested
+    /// 2. iPXE client → filename = HTTP boot script URL (no file size)
+    /// 3. HTTP boot arch (14/15/16) → filename = HTTP URL for iPXE firmware
+    /// 4. UEFI arch (7, 11) → next_server = TFTP server, filename = ipxe.efi
+    /// 5. BIOS arch (0, 9, default) → next_server = TFTP server, filename = undionly.kpxe
+    ///
+    /// For actual boot files (not scripts), looks up file size and includes Option 13 if requested.
+    pub async fn populate_boot_options(
+        &self,
+        msg: &mut Message,
+        req_ctx: &RequestContext,
+    ) -> Result<()> {
+        // 1. Check if client requested any boot options
+        if !req_ctx.requested_tftp_server && !req_ctx.requested_bootfile {
+            log::debug!("Client did not request any boot options");
+            return Ok(());
+        }
+
+        // 2. iPXE client → HTTP boot script (no file to lookup)
+        if req_ctx.is_ipxe {
+            let boot_opts = BootOptions {
+                next_server: None,
+                filename: format!("{}/cnc/ipxe", self.http_server),
+                file_size_blocks: None, // Boot scripts have no file size
+            };
+            self.apply_boot_options_to_message(msg, &boot_opts, req_ctx)?;
+            return Ok(());
+        }
+
+        // 3. Determine boot file and lookup size
+        let boot_opts = match req_ctx.client_arch {
+            // HTTP Boot architectures (14/15/16) → HTTP URL for iPXE firmware
+            Some(
+                Architecture::Unknown(14) | Architecture::Unknown(15) | Architecture::Unknown(16),
+            ) => {
+                let filename = "ipxe.efi";
+                let file_size_blocks = self.lookup_file_size_blocks(filename).await;
+                BootOptions {
+                    next_server: None,
+                    filename: format!("{}/cnc/boot/ipxe.efi", self.http_server),
+                    file_size_blocks,
+                }
+            }
+            // UEFI architectures (7, 11) → TFTP ipxe.efi
+            Some(Architecture::BC | Architecture::Unknown(11)) => {
+                let filename = "ipxe.efi";
+                let file_size_blocks = self.lookup_file_size_blocks(filename).await;
+                BootOptions {
+                    next_server: Some(self.tftp_server.clone()),
+                    filename: filename.to_string(),
+                    file_size_blocks,
+                }
+            }
+            // BIOS architectures (0, 9) and default → TFTP undionly.kpxe
+            _ => {
+                let filename = "undionly.kpxe";
+                let file_size_blocks = self.lookup_file_size_blocks(filename).await;
+                BootOptions {
+                    next_server: Some(self.tftp_server.clone()),
+                    filename: filename.to_string(),
+                    file_size_blocks,
+                }
+            }
+        };
+
+        self.apply_boot_options_to_message(msg, &boot_opts, req_ctx)?;
+        Ok(())
+    }
+
+    /// Looks up the file size in 512-byte blocks for a boot file.
+    ///
+    /// Returns None if the file cannot be found or if there's an error accessing it.
+    /// Logs a warning on error but does not fail the DHCP response.
     ///
     /// # Arguments
-    /// * `msg` - The DHCP message to check
+    /// * `filename` - The boot file name (e.g., "ipxe.efi", "undionly.kpxe")
     ///
     /// # Returns
-    /// * `true` - Client requested both boot options (66 and 67)
-    /// * `false` - Client did not request boot options or option 55 is missing
-    ///
-    /// # Use Case
-    /// This is used in conjunction with per-network autodiscovery to determine if a device
-    /// is actively trying to PXE boot. Devices that don't request boot options (e.g., already
-    /// booted operating systems renewing leases) should not receive boot options.
-    pub fn client_requested_boot_options(&self, msg: &Message) -> bool {
-        if let Some(param_list) = msg.opts().iter().find_map(|(_, opt)| {
-            if let DhcpOption::ParameterRequestList(list) = opt {
-                Some(list)
-            } else {
+    /// * `Some(blocks)` - File size in 512-byte blocks (rounded up)
+    /// * `None` - File not found or error occurred
+    async fn lookup_file_size_blocks(&self, filename: &str) -> Option<u16> {
+        match self.boot_file_provider.filesize(filename).await {
+            Ok(size_bytes) => {
+                // Calculate blocks: round up (size_bytes + 511) / 512
+                let blocks = size_bytes.div_ceil(512) as u16;
+                log::debug!(
+                    "Boot file '{}': {} bytes = {} blocks",
+                    filename,
+                    size_bytes,
+                    blocks
+                );
+                Some(blocks)
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to get file size for '{}': {}. Option 13 will be omitted.",
+                    filename,
+                    e
+                );
                 None
             }
-        }) {
-            param_list.contains(&OptionCode::TFTPServerName)
-                && param_list.contains(&OptionCode::BootfileName)
-        } else {
-            false
         }
     }
 
-    /// Determines whether boot options should be provided for a device.
+    /// Applies boot options to a DHCP message.
     ///
-    /// # Decision Logic
-    /// - If network autodiscover is enabled: Always provide boot options (permissive mode)
-    /// - If network autodiscover is disabled: Only provide boot options for known devices (strict mode)
-    /// - Pending devices (in pending_devices table) are also allowed to boot
-    ///
-    /// # Arguments
-    /// * `network_autodiscover` - Whether autodiscovery is enabled for this network
-    /// * `device_uuid` - The device UUID if the device is known (exists in devices table)
-    /// * `is_pending_device` - Whether the device exists in the pending_devices table
-    ///
-    /// # Returns
-    /// `true` if boot options should be provided, `false` otherwise
-    pub fn should_provide_boot_options(
-        &self,
-        network_autodiscover: bool,
-        device_uuid: Option<&Uuid>,
-        is_pending_device: bool,
-    ) -> bool {
-        network_autodiscover || device_uuid.is_some() || is_pending_device
-    }
-
-    /// Gets boot options for the specified mode if allowed based on device state.
-    ///
-    /// This method combines device authorization checking with boot option retrieval.
-    /// It returns `None` if the device is not allowed to boot (unknown device with
-    /// autodiscover disabled), or `Some(BootOptions)` if allowed.
-    ///
-    /// # Arguments
-    /// * `mode` - The boot mode (BIOS Legacy, UEFI, etc.)
-    /// * `network_autodiscover` - Whether autodiscovery is enabled for this network
-    /// * `device_uuid` - The device UUID if known
-    /// * `is_pending_device` - Whether the device exists in the pending_devices table
-    ///
-    /// # Returns
-    /// * `Ok(Some(BootOptions))` - Boot options for allowed devices
-    /// * `Ok(None)` - Boot options withheld (unknown device with autodiscover disabled)
-    /// * `Err(_)` - Error generating boot options
-    pub fn get_boot_options_if_allowed(
-        &self,
-        mode: BootMode,
-        network_autodiscover: bool,
-        device_uuid: Option<&Uuid>,
-        is_pending_device: bool,
-    ) -> Result<Option<BootOptions>> {
-        if self.should_provide_boot_options(network_autodiscover, device_uuid, is_pending_device) {
-            Ok(Some(self.get_boot_options(mode)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Gets iPXE boot script if allowed based on device state.
-    ///
-    /// This method combines device authorization checking with boot script retrieval.
-    /// It returns `None` if the device is not allowed to boot (unknown device with
-    /// autodiscover disabled), or `Some(BootOptions)` if allowed.
-    ///
-    /// # Arguments
-    /// * `network_autodiscover` - Whether autodiscovery is enabled for this network
-    /// * `device_uuid` - The device UUID if known
-    /// * `is_pending_device` - Whether the device exists in the pending_devices table
-    ///
-    /// # Returns
-    /// * `Ok(Some(BootOptions))` - Boot script URL for allowed devices
-    /// * `Ok(None)` - Boot script withheld (unknown device with autodiscover disabled)
-    /// * `Err(_)` - Error generating boot script
-    pub fn get_ipxe_boot_script_if_allowed(
-        &self,
-        network_autodiscover: bool,
-        device_uuid: Option<&Uuid>,
-        is_pending_device: bool,
-    ) -> Result<Option<BootOptions>> {
-        if self.should_provide_boot_options(network_autodiscover, device_uuid, is_pending_device) {
-            Ok(Some(self.get_ipxe_boot_script()?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Applies boot options to a DHCP message for first-stage PXE boot.
-    ///
-    /// This method adds the following DHCP options for TFTP-based boot:
-    /// - Option 66: TFTP Server Name (next_server)
-    /// - Option 67: Bootfile Name (filename)
-    /// - siaddr field: Next server IP address
+    /// This method selectively adds DHCP options based on what the client requested:
+    /// - Option 66: TFTP Server Name - only if requested AND next_server is Some
+    /// - Option 67: Bootfile Name - only if requested
+    /// - Option 13: Boot File Size - only if requested AND file_size_blocks is Some
+    /// - siaddr field: Next server IP address - only if option 66 requested
     ///
     /// # Arguments
     /// * `msg` - The DHCP message to modify
     /// * `boot_opts` - The boot options to apply
+    /// * `req_ctx` - The request context containing client option requests
     ///
     /// # Returns
     /// * `Ok(())` - Options applied successfully
     /// * `Err(_)` - Failed to parse next_server IP address
-    pub fn apply_boot_options_to_message(
+    fn apply_boot_options_to_message(
         &self,
         msg: &mut Message,
         boot_opts: &BootOptions,
+        req_ctx: &RequestContext,
     ) -> Result<()> {
-        // Option 66 (TFTP Server Name)
-        if let Some(next_server) = &boot_opts.next_server {
+        // Option 66 (TFTP Server Name) - only if requested and applicable
+        if req_ctx.requested_tftp_server
+            && let Some(next_server) = &boot_opts.next_server
+        {
             msg.opts_mut().insert(v4::DhcpOption::TFTPServerName(
                 next_server.clone().into_bytes(),
             ));
         }
 
-        // Option 67 (Bootfile Name)
-        msg.opts_mut().insert(v4::DhcpOption::BootfileName(
-            boot_opts.filename.clone().into_bytes(),
-        ));
+        // Option 67 (Bootfile Name) - only if requested
+        if req_ctx.requested_bootfile {
+            msg.opts_mut().insert(v4::DhcpOption::BootfileName(
+                boot_opts.filename.clone().into_bytes(),
+            ));
+        }
 
-        // siaddr field (next server IP)
-        if let Some(next_server) = &boot_opts.next_server
+        // Option 13 (Boot File Size) - only if requested AND we have a file size
+        if req_ctx.requested_bootfile_size
+            && let Some(blocks) = boot_opts.file_size_blocks
+        {
+            msg.opts_mut().insert(v4::DhcpOption::BootFileSize(blocks));
+        }
+
+        // siaddr field (next server IP) - only if option 66 requested
+        if req_ctx.requested_tftp_server
+            && let Some(next_server) = &boot_opts.next_server
             && let Ok(next_ip) = next_server.parse::<Ipv4Addr>()
         {
             msg.set_siaddr(next_ip);
@@ -233,535 +214,780 @@ impl BootConfigProvider {
 
         Ok(())
     }
-
-    /// Applies iPXE boot script options to a DHCP message for second-stage boot.
-    ///
-    /// This method adds the HTTP URL for the iPXE boot script:
-    /// - Option 67: Bootfile Name (HTTP URL for iPXE script)
-    ///
-    /// # Arguments
-    /// * `msg` - The DHCP message to modify
-    /// * `boot_opts` - The boot options containing the iPXE script URL
-    pub fn apply_ipxe_script_to_message(&self, msg: &mut Message, boot_opts: &BootOptions) {
-        // Option 67 (Bootfile Name) - HTTP URL for iPXE script
-        msg.opts_mut().insert(v4::DhcpOption::BootfileName(
-            boot_opts.filename.clone().into_bytes(),
-        ));
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use async_trait::async_trait;
+    use dhcproto::v4::{Message, MessageType, Opcode};
+    use std::collections::HashMap;
+    use std::net::Ipv4Addr;
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::BufReader;
 
-    fn test_uuid() -> Uuid {
-        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
+    /// Mock BootFileProvider for testing
+    struct MockBootFileProvider {
+        file_sizes: StdMutex<HashMap<String, Result<u64, String>>>,
     }
 
-    #[test]
-    fn test_bios_boot_options() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        let opts = provider.get_boot_options(BootMode::BiosLegacy).unwrap();
-        assert_eq!(opts.next_server, Some("10.0.0.1".to_owned()));
-        assert_eq!(opts.filename, "undionly.kpxe");
+    impl MockBootFileProvider {
+        fn new() -> Self {
+            Self {
+                file_sizes: StdMutex::new(HashMap::new()),
+            }
+        }
+
+        fn with_file(self, filename: &str, size: u64) -> Self {
+            self.file_sizes
+                .lock()
+                .unwrap()
+                .insert(filename.to_string(), Ok(size));
+            self
+        }
+
+        fn with_error(self, filename: &str, error: &str) -> Self {
+            self.file_sizes
+                .lock()
+                .unwrap()
+                .insert(filename.to_string(), Err(error.to_string()));
+            self
+        }
     }
 
-    #[test]
-    fn test_uefi_boot_options() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        let opts = provider.get_boot_options(BootMode::UefiBoot).unwrap();
-        assert_eq!(opts.next_server, Some("10.0.0.1".to_owned()));
-        assert_eq!(opts.filename, "ipxe.efi");
+    #[async_trait]
+    impl BootFileProvider for MockBootFileProvider {
+        async fn get_file(&self, _filename: &str) -> Result<BufReader<tokio::fs::File>> {
+            anyhow::bail!("get_file not implemented in mock")
+        }
+
+        async fn filesize(&self, filename: &str) -> Result<u64> {
+            let sizes = self.file_sizes.lock().unwrap();
+            match sizes.get(filename) {
+                Some(Ok(size)) => Ok(*size),
+                Some(Err(e)) => anyhow::bail!("{}", e),
+                None => anyhow::bail!("File not found: {}", filename),
+            }
+        }
     }
 
-    #[test]
-    fn test_uefi_arm64_boot_options() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        let opts = provider.get_boot_options(BootMode::UefiArm64).unwrap();
-        assert_eq!(opts.next_server, Some("10.0.0.1".to_owned()));
-        assert_eq!(opts.filename, "ipxe.efi");
+    fn make_req_ctx(
+        client_arch: Option<Architecture>,
+        is_ipxe: bool,
+        requested_tftp_server: bool,
+        requested_bootfile: bool,
+        requested_bootfile_size: bool,
+    ) -> RequestContext {
+        RequestContext {
+            mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            message_type: MessageType::Discover,
+            requested_ip: None,
+            client_arch,
+            is_ipxe,
+            requested_tftp_server,
+            requested_bootfile,
+            requested_bootfile_size,
+            ciaddr: Ipv4Addr::UNSPECIFIED,
+        }
     }
 
-    #[test]
-    fn test_ipxe_boot_script() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
-        let opts = provider.get_ipxe_boot_script().unwrap();
-        assert_eq!(opts.next_server, None);
-        assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
+    fn make_provider() -> BootConfigProvider {
+        let mock = MockBootFileProvider::new()
+            .with_file("ipxe.efi", 1024000) // ~1MB
+            .with_file("undionly.kpxe", 102400); // ~100KB
+        BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            Arc::new(mock),
+        )
     }
 
-    // Autodiscover decision logic tests
-    #[test]
-    fn test_should_provide_boot_options_autodiscover_enabled_known_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        assert!(provider.should_provide_boot_options(true, Some(&test_uuid()), false));
+    fn get_bootfile_name(msg: &Message) -> Option<String> {
+        msg.opts().iter().find_map(|(_, opt)| {
+            if let v4::DhcpOption::BootfileName(name) = opt {
+                Some(String::from_utf8_lossy(name).to_string())
+            } else {
+                None
+            }
+        })
     }
 
-    #[test]
-    fn test_should_provide_boot_options_autodiscover_enabled_unknown_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        // With autodiscover enabled, even unknown devices (None) should get boot options
-        assert!(provider.should_provide_boot_options(true, None, false));
+    fn get_tftp_server_name(msg: &Message) -> Option<String> {
+        msg.opts().iter().find_map(|(_, opt)| {
+            if let v4::DhcpOption::TFTPServerName(name) = opt {
+                Some(String::from_utf8_lossy(name).to_string())
+            } else {
+                None
+            }
+        })
     }
 
-    #[test]
-    fn test_should_provide_boot_options_autodiscover_disabled_known_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        assert!(provider.should_provide_boot_options(false, Some(&test_uuid()), false));
-    }
-
-    #[test]
-    fn test_should_provide_boot_options_autodiscover_disabled_unknown_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        // With autodiscover disabled, unknown devices (None) should NOT get boot options
-        assert!(!provider.should_provide_boot_options(false, None, false));
-    }
-
-    // Conditional boot options tests
-    #[test]
-    fn test_get_boot_options_if_allowed_autodiscover_enabled_unknown_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        let result = provider
-            .get_boot_options_if_allowed(BootMode::BiosLegacy, true, None, false)
-            .unwrap();
-        assert!(result.is_some());
-        let opts = result.unwrap();
-        assert_eq!(opts.filename, "undionly.kpxe");
-    }
-
-    #[test]
-    fn test_get_boot_options_if_allowed_autodiscover_disabled_unknown_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        let result = provider
-            .get_boot_options_if_allowed(BootMode::BiosLegacy, false, None, false)
-            .unwrap();
-        // Should return None for unknown device with autodiscover disabled
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_get_boot_options_if_allowed_autodiscover_disabled_known_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        let result = provider
-            .get_boot_options_if_allowed(BootMode::UefiBoot, false, Some(&test_uuid()), false)
-            .unwrap();
-        assert!(result.is_some());
-        let opts = result.unwrap();
-        assert_eq!(opts.filename, "ipxe.efi");
-    }
-
-    // Conditional iPXE boot script tests
-    #[test]
-    fn test_get_ipxe_boot_script_if_allowed_autodiscover_enabled_unknown_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
-        let result = provider
-            .get_ipxe_boot_script_if_allowed(true, None, false)
-            .unwrap();
-        assert!(result.is_some());
-        let opts = result.unwrap();
-        assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
-    }
-
-    #[test]
-    fn test_get_ipxe_boot_script_if_allowed_autodiscover_disabled_unknown_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
-        let result = provider
-            .get_ipxe_boot_script_if_allowed(false, None, false)
-            .unwrap();
-        // Should return None for unknown device with autodiscover disabled
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_get_ipxe_boot_script_if_allowed_autodiscover_disabled_known_device() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
-        let result = provider
-            .get_ipxe_boot_script_if_allowed(false, Some(&test_uuid()), false)
-            .unwrap();
-        assert!(result.is_some());
-        let opts = result.unwrap();
-        assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
-    }
-
-    // Pending device tests
-    #[test]
-    fn test_should_provide_boot_options_pending_device_autodiscover_disabled() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        // Pending devices should get boot options even with autodiscover disabled
-        assert!(provider.should_provide_boot_options(false, None, true));
-    }
-
-    #[test]
-    fn test_get_boot_options_if_allowed_pending_device_autodiscover_disabled() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-        let result = provider
-            .get_boot_options_if_allowed(BootMode::UefiBoot, false, None, true)
-            .unwrap();
-        // Pending device should get boot options even with autodiscover disabled
-        assert!(result.is_some());
-        let opts = result.unwrap();
-        assert_eq!(opts.filename, "ipxe.efi");
-    }
-
-    #[test]
-    fn test_get_ipxe_boot_script_if_allowed_pending_device_autodiscover_disabled() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
-        let result = provider
-            .get_ipxe_boot_script_if_allowed(false, None, true)
-            .unwrap();
-        // Pending device should get boot script even with autodiscover disabled
-        assert!(result.is_some());
-        let opts = result.unwrap();
-        assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
-    }
-
-    // Helper method tests
-    #[test]
-    fn test_apply_boot_options_to_message() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let boot_opts = BootOptions {
-            next_server: Some("10.0.0.1".to_string()),
-            filename: "undionly.kpxe".to_string(),
-        };
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootReply);
-
-        provider
-            .apply_boot_options_to_message(&mut msg, &boot_opts)
-            .unwrap();
-
-        // Verify TFTP Server Name (Option 66)
-        let tftp_server = msg
-            .opts()
-            .iter()
-            .find_map(|(_, opt)| {
-                if let v4::DhcpOption::TFTPServerName(name) = opt {
-                    Some(String::from_utf8_lossy(name).to_string())
-                } else {
-                    None
-                }
-            })
-            .expect("TFTP Server Name should be present");
-        assert_eq!(tftp_server, "10.0.0.1");
-
-        // Verify Bootfile Name (Option 67)
-        let bootfile = msg
-            .opts()
-            .iter()
-            .find_map(|(_, opt)| {
-                if let v4::DhcpOption::BootfileName(name) = opt {
-                    Some(String::from_utf8_lossy(name).to_string())
-                } else {
-                    None
-                }
-            })
-            .expect("Bootfile Name should be present");
-        assert_eq!(bootfile, "undionly.kpxe");
-
-        // Verify siaddr field
-        assert_eq!(msg.siaddr().to_string(), "10.0.0.1");
-    }
-
-    #[test]
-    fn test_apply_boot_options_to_message_no_next_server() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let boot_opts = BootOptions {
-            next_server: None,
-            filename: "boot.efi".to_string(),
-        };
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootReply);
-
-        provider
-            .apply_boot_options_to_message(&mut msg, &boot_opts)
-            .unwrap();
-
-        // TFTP Server Name should not be present
-        let tftp_server = msg
-            .opts()
-            .iter()
-            .find(|(_, opt)| matches!(opt, v4::DhcpOption::TFTPServerName(_)));
-        assert!(tftp_server.is_none());
-
-        // Bootfile Name should still be present
-        let bootfile = msg
-            .opts()
-            .iter()
-            .find_map(|(_, opt)| {
-                if let v4::DhcpOption::BootfileName(name) = opt {
-                    Some(String::from_utf8_lossy(name).to_string())
-                } else {
-                    None
-                }
-            })
-            .expect("Bootfile Name should be present");
-        assert_eq!(bootfile, "boot.efi");
-
-        // siaddr should remain unspecified
-        assert_eq!(msg.siaddr(), Ipv4Addr::UNSPECIFIED);
-    }
-
-    #[test]
-    fn test_apply_ipxe_script_to_message() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
-
-        let boot_opts = BootOptions {
-            next_server: None,
-            filename: "http://10.0.0.1:3000/cnc/ipxe".to_string(),
-        };
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootReply);
-
-        provider.apply_ipxe_script_to_message(&mut msg, &boot_opts);
-
-        // Verify Bootfile Name (Option 67) contains HTTP URL
-        let bootfile = msg
-            .opts()
-            .iter()
-            .find_map(|(_, opt)| {
-                if let v4::DhcpOption::BootfileName(name) = opt {
-                    Some(String::from_utf8_lossy(name).to_string())
-                } else {
-                    None
-                }
-            })
-            .expect("Bootfile Name should be present");
-        assert_eq!(bootfile, "http://10.0.0.1:3000/cnc/ipxe");
-    }
-
-    // Tests for client_requested_boot_options
-    #[test]
-    fn test_client_requested_boot_options_with_both_options() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootRequest);
-
-        // Add Parameter Request List with options 66 and 67
-        msg.opts_mut()
-            .insert(v4::DhcpOption::ParameterRequestList(vec![
-                OptionCode::SubnetMask,
-                OptionCode::Router,
-                OptionCode::TFTPServerName, // Option 66
-                OptionCode::BootfileName,   // Option 67
-                OptionCode::DomainNameServer,
-            ]));
-
-        assert!(
-            provider.client_requested_boot_options(&msg),
-            "Should return true when both options 66 and 67 are requested"
-        );
-    }
-
-    #[test]
-    fn test_client_requested_boot_options_missing_tftp_server() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootRequest);
-
-        // Add Parameter Request List with only option 67
-        msg.opts_mut()
-            .insert(v4::DhcpOption::ParameterRequestList(vec![
-                OptionCode::SubnetMask,
-                OptionCode::Router,
-                OptionCode::BootfileName, // Option 67 only
-                OptionCode::DomainNameServer,
-            ]));
-
-        assert!(
-            !provider.client_requested_boot_options(&msg),
-            "Should return false when option 66 is missing"
-        );
-    }
-
-    #[test]
-    fn test_client_requested_boot_options_missing_bootfile() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootRequest);
-
-        // Add Parameter Request List with only option 66
-        msg.opts_mut()
-            .insert(v4::DhcpOption::ParameterRequestList(vec![
-                OptionCode::SubnetMask,
-                OptionCode::Router,
-                OptionCode::TFTPServerName, // Option 66 only
-                OptionCode::DomainNameServer,
-            ]));
-
-        assert!(
-            !provider.client_requested_boot_options(&msg),
-            "Should return false when option 67 is missing"
-        );
-    }
-
-    #[test]
-    fn test_client_requested_boot_options_no_param_list() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootRequest);
-
-        // No Parameter Request List at all
-        assert!(
-            !provider.client_requested_boot_options(&msg),
-            "Should return false when Parameter Request List is missing"
-        );
-    }
-
-    #[test]
-    fn test_client_requested_boot_options_empty_param_list() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootRequest);
-
-        // Empty Parameter Request List
-        msg.opts_mut()
-            .insert(v4::DhcpOption::ParameterRequestList(vec![]));
-
-        assert!(
-            !provider.client_requested_boot_options(&msg),
-            "Should return false when Parameter Request List is empty"
-        );
-    }
-
-    #[test]
-    fn test_client_requested_boot_options_typical_os_renewal() {
-        use dhcproto::v4::{Message, Opcode};
-
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
-
-        let mut msg = Message::default();
-        msg.set_opcode(Opcode::BootRequest);
-
-        // Typical parameter request list from an already-booted OS
-        msg.opts_mut()
-            .insert(v4::DhcpOption::ParameterRequestList(vec![
-                OptionCode::SubnetMask,
-                OptionCode::Router,
-                OptionCode::DomainNameServer,
-                OptionCode::DomainName,
-                OptionCode::AddressLeaseTime,
-            ]));
-
-        assert!(
-            !provider.client_requested_boot_options(&msg),
-            "Should return false for typical OS DHCP renewal (no boot options requested)"
-        );
+    fn get_bootfile_size(msg: &Message) -> Option<u16> {
+        msg.opts().iter().find_map(|(_, opt)| {
+            if let v4::DhcpOption::BootFileSize(size) = opt {
+                Some(*size)
+            } else {
+                None
+            }
+        })
     }
 
     // URL validation tests
     #[test]
     fn test_new_with_valid_http_url() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
+        let mock = MockBootFileProvider::new();
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
         assert_eq!(provider.http_server, "http://10.0.0.1");
     }
 
     #[test]
     fn test_new_with_valid_https_url() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "https://10.0.0.1".to_string());
+        let mock = MockBootFileProvider::new();
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "https://10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
         assert_eq!(provider.http_server, "https://10.0.0.1");
     }
 
     #[test]
     fn test_new_with_valid_http_url_with_port() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
+        let mock = MockBootFileProvider::new();
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1:3000".to_string(),
+            Arc::new(mock),
+        );
         assert_eq!(provider.http_server, "http://10.0.0.1:3000");
     }
 
     #[test]
     #[should_panic(expected = "http_server must start with 'http://' or 'https://'")]
     fn test_new_with_invalid_url_no_scheme() {
-        BootConfigProvider::new("10.0.0.1".to_string(), "10.0.0.1".to_string());
+        let mock = MockBootFileProvider::new();
+        BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
     }
 
     #[test]
     #[should_panic(expected = "http_server must start with 'http://' or 'https://'")]
     fn test_new_with_invalid_url_wrong_scheme() {
-        BootConfigProvider::new("10.0.0.1".to_string(), "ftp://10.0.0.1".to_string());
+        let mock = MockBootFileProvider::new();
+        BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "ftp://10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
     }
 
-    #[test]
-    fn test_ipxe_boot_script_url_has_http_prefix() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1:3000".to_string());
-        let opts = provider.get_ipxe_boot_script().unwrap();
+    // iPXE client tests
+    #[tokio::test]
+    async fn test_populate_boot_options_ipxe_client() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(None, true, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
 
-        // Verify the URL starts with http://
-        assert!(
-            opts.filename.starts_with("http://"),
-            "iPXE boot script URL should start with http://, got: {}",
-            opts.filename
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("http://10.0.0.1/cnc/ipxe".to_string()),
+            "iPXE client should get HTTP URL for boot script"
         );
-        assert_eq!(opts.filename, "http://10.0.0.1:3000/cnc/ipxe");
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            None,
+            "iPXE client should not have TFTP server set"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            Ipv4Addr::UNSPECIFIED,
+            "iPXE client should not have siaddr set"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            None,
+            "iPXE boot script should not have file size (not a file)"
+        );
     }
 
-    #[test]
-    fn test_ipxe_boot_script_url_preserves_https() {
-        let provider =
-            BootConfigProvider::new("10.0.0.1".to_string(), "https://10.0.0.1".to_string());
-        let opts = provider.get_ipxe_boot_script().unwrap();
+    // HTTP Boot architecture tests (14/15/16)
+    #[tokio::test]
+    async fn test_populate_boot_options_http_boot_arch_14() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::Unknown(14)), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
 
-        // Verify the URL starts with https://
-        assert!(
-            opts.filename.starts_with("https://"),
-            "iPXE boot script URL should start with https://, got: {}",
-            opts.filename
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            "Arch 14 should get HTTP URL for iPXE firmware"
         );
-        assert_eq!(opts.filename, "https://10.0.0.1/cnc/ipxe");
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            None,
+            "HTTP boot should not have TFTP server set"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            Ipv4Addr::UNSPECIFIED,
+            "HTTP boot should not have siaddr set"
+        );
+        // File size should be provided: 1024000 bytes = 2000 blocks
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2000),
+            "HTTP boot should have file size for ipxe.efi"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_http_boot_arch_15() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::Unknown(15)), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            "Arch 15 should get HTTP URL for iPXE firmware"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            None,
+            "HTTP boot should not have TFTP server set"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2000),
+            "HTTP boot should have file size for ipxe.efi"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_http_boot_arch_16() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::Unknown(16)), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            "Arch 16 should get HTTP URL for iPXE firmware"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            None,
+            "HTTP boot should not have TFTP server set"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2000),
+            "HTTP boot should have file size for ipxe.efi"
+        );
+    }
+
+    // UEFI architecture tests (7, 11)
+    #[tokio::test]
+    async fn test_populate_boot_options_uefi_arch_7() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("ipxe.efi".to_string()),
+            "UEFI arch 7 should get ipxe.efi"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            Some("10.0.0.1".to_string()),
+            "UEFI arch 7 should have TFTP server set"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            "10.0.0.1".parse::<Ipv4Addr>().unwrap(),
+            "UEFI arch 7 should have siaddr set to TFTP server"
+        );
+        // File size should be provided: 1024000 bytes = 2000 blocks
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2000),
+            "UEFI arch 7 should have file size for ipxe.efi"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_uefi_arch_11() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::Unknown(11)), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("ipxe.efi".to_string()),
+            "UEFI arch 11 should get ipxe.efi"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            Some("10.0.0.1".to_string()),
+            "UEFI arch 11 should have TFTP server set"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2000),
+            "UEFI arch 11 should have file size for ipxe.efi"
+        );
+    }
+
+    // BIOS architecture tests (0, 9, default)
+    #[tokio::test]
+    async fn test_populate_boot_options_bios_arch_0() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::Intelx86PC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("undionly.kpxe".to_string()),
+            "BIOS arch 0 should get undionly.kpxe"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            Some("10.0.0.1".to_string()),
+            "BIOS arch 0 should have TFTP server set"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            "10.0.0.1".parse::<Ipv4Addr>().unwrap(),
+            "BIOS arch 0 should have siaddr set to TFTP server"
+        );
+        // File size should be provided: 102400 bytes = 200 blocks
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(200),
+            "BIOS arch 0 should have file size for undionly.kpxe"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_bios_arch_9() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::X86_64), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("undionly.kpxe".to_string()),
+            "BIOS arch 9 should get undionly.kpxe"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            Some("10.0.0.1".to_string()),
+            "BIOS arch 9 should have TFTP server set"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(200),
+            "BIOS arch 9 should have file size for undionly.kpxe"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_no_arch_default_bios() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(None, false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("undionly.kpxe".to_string()),
+            "Default (no arch) should get undionly.kpxe (BIOS)"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            Some("10.0.0.1".to_string()),
+            "Default (no arch) should have TFTP server set"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(200),
+            "Default (no arch) should have file size for undionly.kpxe"
+        );
+    }
+
+    // Selective option request tests
+    #[tokio::test]
+    async fn test_populate_boot_options_only_tftp_server_requested() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, false, false);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            Some("10.0.0.1".to_string()),
+            "Should have TFTP server set when only option 66 requested"
+        );
+        assert_eq!(
+            get_bootfile_name(&msg),
+            None,
+            "Should NOT have bootfile name when option 67 not requested"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            "10.0.0.1".parse::<Ipv4Addr>().unwrap(),
+            "Should have siaddr set when option 66 requested"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            None,
+            "Should NOT have file size when option 13 not requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_only_bootfile_requested() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, false, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("ipxe.efi".to_string()),
+            "Should have bootfile name when only option 67 requested"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            None,
+            "Should NOT have TFTP server when option 66 not requested"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            Ipv4Addr::UNSPECIFIED,
+            "Should NOT have siaddr set when option 66 not requested"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2000),
+            "Should have file size when option 13 requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_http_boot_only_bootfile_applicable() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::Unknown(14)), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            "HTTP boot should return bootfile name when requested"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            None,
+            "HTTP boot should NOT return TFTP server (not applicable)"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            Ipv4Addr::UNSPECIFIED,
+            "HTTP boot should NOT set siaddr (not applicable)"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2000),
+            "HTTP boot should have file size for ipxe.efi"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_populate_boot_options_no_options_requested() {
+        let provider = make_provider();
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, false, false, false);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            None,
+            "Should NOT have bootfile name when no options requested"
+        );
+        assert_eq!(
+            get_tftp_server_name(&msg),
+            None,
+            "Should NOT have TFTP server when no options requested"
+        );
+        assert_eq!(
+            msg.siaddr(),
+            Ipv4Addr::UNSPECIFIED,
+            "Should NOT have siaddr set when no options requested"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            None,
+            "Should NOT have file size when no options requested"
+        );
+    }
+
+    // Option 13 (Boot File Size) specific tests
+    #[tokio::test]
+    async fn test_option_13_size_calculation_exact_blocks() {
+        let mock = MockBootFileProvider::new().with_file("ipxe.efi", 512);
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(1),
+            "512 bytes should be 1 block"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_option_13_size_calculation_round_up() {
+        let mock = MockBootFileProvider::new()
+            .with_file("ipxe.efi", 600)
+            .with_file("undionly.kpxe", 1025);
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
+
+        // Test 600 bytes = 2 blocks (rounds up from 1.17)
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(2),
+            "600 bytes should be 2 blocks"
+        );
+
+        // Test 1025 bytes = 3 blocks (rounds up from 2.002)
+        let req_ctx = make_req_ctx(Some(Architecture::Intelx86PC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_bootfile_size(&msg),
+            Some(3),
+            "1025 bytes should be 3 blocks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_option_13_omitted_when_not_requested() {
+        let provider = make_provider();
+        // Request bootfile but NOT file size
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, true, false);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("ipxe.efi".to_string()),
+            "Should have bootfile name"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            None,
+            "Should NOT have file size when option 13 not requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_option_13_omitted_on_file_lookup_error() {
+        let mock = MockBootFileProvider::new().with_error("ipxe.efi", "File not found");
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("ipxe.efi".to_string()),
+            "Should have bootfile name even if size lookup fails"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            None,
+            "Should NOT have file size when lookup fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_option_13_omitted_for_boot_scripts() {
+        let provider = make_provider();
+        // iPXE client gets boot script (no physical file)
+        let req_ctx = make_req_ctx(None, true, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_bootfile_name(&msg),
+            Some("http://10.0.0.1/cnc/ipxe".to_string()),
+            "iPXE should get boot script URL"
+        );
+        assert_eq!(
+            get_bootfile_size(&msg),
+            None,
+            "Boot scripts should NOT have file size (not a physical file)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_option_13_multiple_architectures() {
+        let mock = MockBootFileProvider::new()
+            .with_file("ipxe.efi", 1024000) // 2000 blocks
+            .with_file("undionly.kpxe", 102400); // 200 blocks
+        let provider = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            Arc::new(mock),
+        );
+
+        // UEFI gets ipxe.efi
+        let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+        assert_eq!(get_bootfile_name(&msg), Some("ipxe.efi".to_string()));
+        assert_eq!(get_bootfile_size(&msg), Some(2000));
+
+        // BIOS gets undionly.kpxe
+        let req_ctx = make_req_ctx(Some(Architecture::Intelx86PC), false, true, true, true);
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootReply);
+        provider
+            .populate_boot_options(&mut msg, &req_ctx)
+            .await
+            .unwrap();
+        assert_eq!(get_bootfile_name(&msg), Some("undionly.kpxe".to_string()));
+        assert_eq!(get_bootfile_size(&msg), Some(200));
     }
 }

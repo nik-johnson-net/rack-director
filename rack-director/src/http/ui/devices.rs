@@ -529,6 +529,13 @@ mod tests {
         )
         .unwrap();
 
+        // Create boot files directory for testing
+        let boot_files_path = temp_dir.path().join("boot");
+        std::fs::create_dir_all(&boot_files_path).unwrap();
+
+        let boot_file_provider =
+            Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
+
         let state = Arc::new(AppState {
             director: Director::new(
                 db_tokio.clone(),
@@ -540,6 +547,7 @@ mod tests {
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
             roles_store: crate::roles::RolesStore::new(db_tokio),
             agent_images_path,
+            boot_file_provider,
         });
         (state, temp_dir)
     }

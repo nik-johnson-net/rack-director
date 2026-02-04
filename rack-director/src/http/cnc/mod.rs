@@ -1,3 +1,4 @@
+mod boot_files;
 mod device_registration;
 mod install_script;
 mod ipxe_scripts;
@@ -40,6 +41,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/cnc/ipxe", get(ipxe_handler))
         .route("/cnc/install_script", get(install_script_handler))
         .route("/cnc/agent-images/{filename}", get(agent_images_handler))
+        .route("/cnc/boot/{filename}", get(boot_files::boot_file_handler))
         .route("/cnc/update_attributes", post(update_attributes))
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
@@ -421,6 +423,17 @@ mod tests {
         )
         .unwrap();
 
+        // Create boot files directory for testing
+        let boot_files_path = temp_dir.path().join("boot");
+        std::fs::create_dir_all(&boot_files_path).unwrap();
+
+        // Create mock boot files
+        std::fs::write(boot_files_path.join("ipxe.efi"), b"mock ipxe.efi").unwrap();
+        std::fs::write(boot_files_path.join("undionly.kpxe"), b"mock undionly.kpxe").unwrap();
+
+        let boot_file_provider =
+            Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
+
         let state = Arc::new(AppState {
             director: Director::new(
                 db_tokio.clone(),
@@ -432,6 +445,7 @@ mod tests {
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
             roles_store: crate::roles::RolesStore::new(db_tokio),
             agent_images_path,
+            boot_file_provider,
         });
         (state, temp_dir)
     }

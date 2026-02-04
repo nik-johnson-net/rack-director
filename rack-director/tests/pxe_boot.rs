@@ -58,7 +58,7 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
 
     // VALIDATION: TFTP download - Verify we got the bootloader content
     let real_contents_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/tftp/undionly.kpxe");
+        .join("tests/fixtures/firmware/undionly.kpxe");
     let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
         bootfile_content, real_contents,
@@ -178,8 +178,8 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
     .await??;
 
     // VALIDATION: TFTP download - Verify we got the UEFI bootloader content
-    let real_contents_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tftp/ipxe.efi");
+    let real_contents_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/firmware/ipxe.efi");
     let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
         bootfile_content, real_contents,
@@ -297,8 +297,8 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     .await??;
 
     // VALIDATION: TFTP download - Verify we got the ARM64 UEFI bootloader content
-    let real_contents_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tftp/ipxe.efi");
+    let real_contents_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/firmware/ipxe.efi");
     let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
         bootfile_content, real_contents,

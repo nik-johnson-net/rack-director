@@ -45,6 +45,7 @@ pub enum Architecture {
     X86Bios,
     X64Uefi,
     Arm64Uefi,
+    X64UefiHttp,
 }
 
 impl Architecture {
@@ -53,8 +54,9 @@ impl Architecture {
             "x86-bios" | "x86_bios" | "bios" => Ok(Self::X86Bios),
             "x64-uefi" | "x64_uefi" | "uefi" | "x86-64" => Ok(Self::X64Uefi),
             "arm64-uefi" | "arm64_uefi" | "arm64" | "aarch64" => Ok(Self::Arm64Uefi),
+            "x64-uefi-http" | "x64_uefi_http" | "http" => Ok(Self::X64UefiHttp),
             _ => Err(anyhow!(
-                "Unknown architecture: {}. Use x86-bios, x64-uefi, or arm64-uefi",
+                "Unknown architecture: {}. Use x86-bios, x64-uefi, arm64-uefi, or x64-uefi-http",
                 s
             )),
         }
@@ -65,6 +67,7 @@ impl Architecture {
             Self::X86Bios => 0,
             Self::X64Uefi => 7,
             Self::Arm64Uefi => 11,
+            Self::X64UefiHttp => 15,
         }
     }
 
@@ -73,6 +76,7 @@ impl Architecture {
             Self::X86Bios => "x86-bios",
             Self::X64Uefi => "x64-uefi",
             Self::Arm64Uefi => "arm64-uefi",
+            Self::X64UefiHttp => "x64-uefi-http",
         }
     }
 }
@@ -529,7 +533,35 @@ mod tests {
             Architecture::from_str("arm64-uefi").unwrap(),
             Architecture::Arm64Uefi
         );
+        assert_eq!(
+            Architecture::from_str("x64-uefi-http").unwrap(),
+            Architecture::X64UefiHttp
+        );
+        assert_eq!(
+            Architecture::from_str("x64_uefi_http").unwrap(),
+            Architecture::X64UefiHttp
+        );
+        assert_eq!(
+            Architecture::from_str("http").unwrap(),
+            Architecture::X64UefiHttp
+        );
         assert!(Architecture::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_architecture_dhcp_option_93() {
+        assert_eq!(Architecture::X86Bios.dhcp_option_93(), 0);
+        assert_eq!(Architecture::X64Uefi.dhcp_option_93(), 7);
+        assert_eq!(Architecture::Arm64Uefi.dhcp_option_93(), 11);
+        assert_eq!(Architecture::X64UefiHttp.dhcp_option_93(), 15);
+    }
+
+    #[test]
+    fn test_architecture_as_str() {
+        assert_eq!(Architecture::X86Bios.as_str(), "x86-bios");
+        assert_eq!(Architecture::X64Uefi.as_str(), "x64-uefi");
+        assert_eq!(Architecture::Arm64Uefi.as_str(), "arm64-uefi");
+        assert_eq!(Architecture::X64UefiHttp.as_str(), "x64-uefi-http");
     }
 
     #[test]

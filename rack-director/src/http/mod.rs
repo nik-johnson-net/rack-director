@@ -11,6 +11,7 @@ use anyhow::Result;
 use axum::Router;
 use tokio::task::JoinHandle;
 
+use crate::boot_files::BootFileProvider;
 use crate::dhcp::DhcpStore;
 use crate::director::Director;
 use crate::operating_systems::OperatingSystemsStore;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub os_store: OperatingSystemsStore,
     pub roles_store: RolesStore,
     pub agent_images_path: PathBuf,
+    pub boot_file_provider: Arc<dyn BootFileProvider>,
 }
 
 pub struct StartResult {
@@ -39,6 +41,7 @@ pub async fn start<T: Into<SocketAddr>, P: Into<PathBuf>>(
     roles_store: RolesStore,
     bind: T,
     agent_images_path: P,
+    boot_file_provider: Arc<dyn BootFileProvider>,
 ) -> Result<StartResult> {
     let state = Arc::new(AppState {
         director,
@@ -47,6 +50,7 @@ pub async fn start<T: Into<SocketAddr>, P: Into<PathBuf>>(
         os_store,
         roles_store,
         agent_images_path: agent_images_path.into(),
+        boot_file_provider,
     });
 
     let app = Router::new()

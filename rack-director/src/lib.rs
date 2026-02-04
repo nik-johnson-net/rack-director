@@ -1,3 +1,4 @@
+pub mod boot_files;
 mod database;
 mod dhcp;
 mod director;
@@ -24,7 +25,7 @@ use crate::director::Director;
 
 const DEFAULT_DATABASE_PATH: &str = env!("RACK_DIRECTOR_DATABASE_PATH");
 const DEFAULT_AGENT_IMAGES_PATH: &str = env!("RACK_DIRECTOR_AGENT_IMAGES_PATH");
-const DEFAULT_TFTP_PATH: &str = env!("RACK_DIRECTOR_TFTP_PATH");
+const DEFAULT_FIRMWARE_PATH: &str = env!("RACK_DIRECTOR_FIRMWARE_PATH");
 const DEFAULT_LOCAL_IMAGES_PATH: &str = env!("RACK_DIRECTOR_LOCAL_IMAGES_PATH");
 
 #[derive(Parser, Debug)]
@@ -34,7 +35,7 @@ pub struct Args {
     db_path: String,
 
     // Path to the directory containing the TFTP files.
-    #[arg(long, default_value = DEFAULT_TFTP_PATH)]
+    #[arg(long, default_value = DEFAULT_FIRMWARE_PATH)]
     tftp_path: String,
 
     // DHCP server address (optional, defaults to 67)
@@ -162,20 +163,25 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
 
     let http_server = public_url.clone();
 
+    // Initialize boot file provider for DHCP (Option 13), HTTP Boot, and TFTP
+    let boot_file_provider = Arc::new(boot_files::FilesystemBootFileProvider::new(
+        std::path::PathBuf::from(&args.tftp_path),
+    )?);
+
     let dhcp_server = dhcp::DhcpServer::new(
         db.clone(),
         director.clone(),
         tftp_public,
         http_server,
+        boot_file_provider.clone(),
         server_identifier,
         args.dhcp_address,
     )
     .await
     .unwrap();
 
-    // Initialize TFTP Handler
-    let tftp_handler = director::DirectorTftpHandler::new(args.tftp_path.clone());
-    let mut tftp_server = tftp::Server::new(tftp_handler);
+    // Initialize TFTP Server
+    let mut tftp_server = tftp::Server::new(boot_file_provider.clone());
     tftp_server.address(args.tftp_address);
 
     // Start HTTP Service
@@ -187,6 +193,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         roles_store,
         args.http_address,
         args.agent_images_path,
+        boot_file_provider,
     )
     .await?;
 

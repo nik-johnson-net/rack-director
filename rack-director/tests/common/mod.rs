@@ -54,9 +54,9 @@ pub async fn start_rack_director() -> Result<TestRackDirectorHandle, anyhow::Err
     let storage_dir = tempfile::tempdir()?;
     let storage_path = storage_dir.path().to_str().unwrap().to_string();
 
-    // Get absolute path to TFTP fixtures
+    // Get absolute path to firmware fixtures (shared by TFTP and HTTP)
     let tftp_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tftp");
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/firmware");
 
     let args = rack_director::Args::parse_from([
         "test",

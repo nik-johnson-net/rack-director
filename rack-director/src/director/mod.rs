@@ -1,9 +1,5 @@
-use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::io::AsyncReadExt;
-use tokio::io::BufReader;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -14,8 +10,6 @@ use crate::operating_systems::{Architecture, OperatingSystemsStore};
 use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::roles::RolesStore;
 use crate::storage::ImageStore;
-use crate::tftp::Handler;
-use crate::tftp::Reader;
 
 mod store;
 
@@ -435,75 +429,6 @@ impl Director {
 
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         self.store.find_device_by_bmc_mac(mac).await
-    }
-}
-
-pub struct DirectorTftpHandler {
-    root: PathBuf,
-}
-
-impl DirectorTftpHandler {
-    pub fn new<P: Into<PathBuf>>(root: P) -> Self {
-        DirectorTftpHandler { root: root.into() }
-    }
-}
-
-impl Handler for DirectorTftpHandler {
-    type Reader = DirectorTftpReader;
-
-    async fn create_reader(&self, filename: &str, block_size: u64) -> anyhow::Result<Self::Reader> {
-        match filename {
-            "ipxe.efi" | "undionly.kpxe" => {
-                let reader =
-                    DirectorTftpReader::open(&self.root.join(filename), block_size).await?;
-                Ok(reader)
-            }
-            _ => Err(anyhow::anyhow!("Unsupported file: {}", filename)),
-        }
-    }
-
-    async fn filesize(&self, filename: &str) -> anyhow::Result<u64> {
-        match filename {
-            "ipxe.efi" | "undionly.kpxe" => {
-                let metadata = tokio::fs::metadata(&self.root.join(filename)).await?;
-                Ok(metadata.len())
-            }
-            _ => Err(anyhow::anyhow!("Unsupported file: {}", filename)),
-        }
-    }
-}
-
-pub struct DirectorTftpReader {
-    file: BufReader<tokio::fs::File>,
-    block_size: u64,
-}
-
-impl DirectorTftpReader {
-    pub async fn open(path: &Path, block_size: u64) -> anyhow::Result<Self> {
-        let file = tokio::fs::File::open(path).await?;
-        Ok(DirectorTftpReader {
-            file: BufReader::new(file),
-            block_size,
-        })
-    }
-}
-
-impl Reader for DirectorTftpReader {
-    async fn read(&mut self) -> anyhow::Result<Vec<u8>> {
-        let mut buffered: usize = 0;
-        let mut chunk = vec![0; self.block_size as usize]; // Read in chunks of block_size bytes
-
-        // read() is not guaranteed to fill buffer. Keep trying until it returns n = 0 or we've filled the buffer.
-        while buffered < self.block_size as usize {
-            let n = self.file.read(&mut chunk[buffered..]).await?;
-            if n == 0 {
-                break;
-            }
-            buffered += n;
-        }
-
-        chunk.truncate(buffered); // Return only the bytes that were actually read
-        Ok(chunk)
     }
 }
 

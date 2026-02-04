@@ -15,6 +15,14 @@ pub enum DiscoverType {
     Bmc,
 }
 
+/// Determine the expected Vendor Class Identifier (Option 60) based on architecture
+fn expected_vendor_class(arch: &crate::config::Architecture) -> &'static [u8] {
+    match arch {
+        crate::config::Architecture::X64UefiHttp => b"HTTPClient",
+        _ => b"PXEServer",
+    }
+}
+
 /// Discover an IP address for a specific NIC
 pub fn discover(
     conn: &ConnectionConfig,
@@ -68,13 +76,34 @@ pub fn discover(
     msg.opts_mut().insert(DhcpOption::ClientSystemArchitecture(
         v4::Architecture::from(arch.dhcp_option_93()),
     ));
-    msg.opts_mut().insert(DhcpOption::ParameterRequestList(vec![
-        OptionCode::SubnetMask,
-        OptionCode::Router,
-        OptionCode::DomainNameServer,
-        OptionCode::TFTPServerName,
-        OptionCode::BootfileName,
-    ]));
+
+    // HTTP boot clients send "HTTPClient" as Vendor Class Identifier (Option 60)
+    if matches!(arch, crate::config::Architecture::X64UefiHttp) {
+        msg.opts_mut()
+            .insert(DhcpOption::ClassIdentifier(b"HTTPClient".to_vec()));
+        output.info("Including HTTPClient Vendor Class Identifier (Option 60)");
+    }
+
+    // HTTP boot clients don't request TFTP server name (Option 66)
+    // They receive an HTTP URL directly in the bootfile name (Option 67)
+    let param_list = if matches!(arch, crate::config::Architecture::X64UefiHttp) {
+        vec![
+            OptionCode::SubnetMask,
+            OptionCode::Router,
+            OptionCode::DomainNameServer,
+            OptionCode::BootfileName, // Option 67 only
+        ]
+    } else {
+        vec![
+            OptionCode::SubnetMask,
+            OptionCode::Router,
+            OptionCode::DomainNameServer,
+            OptionCode::TFTPServerName, // Option 66
+            OptionCode::BootfileName,   // Option 67
+        ]
+    };
+    msg.opts_mut()
+        .insert(DhcpOption::ParameterRequestList(param_list));
 
     let mut buf = Vec::new();
     let mut encoder = Encoder::new(&mut buf);
@@ -105,6 +134,39 @@ pub fn discover(
     output.info("Received OFFER");
     output.detail("Offered IP", &offered_ip.to_string());
     output.detail("Server IP", &server_ip.to_string());
+
+    // Validate Vendor Class Identifier (Option 60) for NIC boots (not BMC)
+    if matches!(kind, DiscoverType::Nic { .. }) {
+        let expected_class = expected_vendor_class(&arch);
+        let vendor_class = offer
+            .opts()
+            .get(OptionCode::ClassIdentifier)
+            .and_then(|opt| {
+                if let DhcpOption::ClassIdentifier(class) = opt {
+                    Some(class.as_slice())
+                } else {
+                    None
+                }
+            });
+
+        match vendor_class {
+            Some(class) if class == expected_class => {
+                output.detail("Vendor Class", String::from_utf8_lossy(class).as_ref());
+            }
+            Some(class) => {
+                return Err(anyhow!(
+                    "Incorrect Vendor Class Identifier: expected '{}', got '{}'",
+                    String::from_utf8_lossy(expected_class),
+                    String::from_utf8_lossy(class)
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "Missing Vendor Class Identifier (Option 60) in OFFER"
+                ));
+            }
+        }
+    }
 
     // Store IP for this NIC
     match kind {
@@ -275,6 +337,34 @@ fn request_internal(
         v4::Architecture::from(arch.dhcp_option_93()),
     ));
 
+    // HTTP boot clients send "HTTPClient" as Vendor Class Identifier (Option 60)
+    if matches!(arch, crate::config::Architecture::X64UefiHttp) {
+        msg.opts_mut()
+            .insert(DhcpOption::ClassIdentifier(b"HTTPClient".to_vec()));
+        output.info("Including HTTPClient Vendor Class Identifier (Option 60)");
+    }
+
+    // HTTP boot clients don't request TFTP server name (Option 66)
+    // They receive an HTTP URL directly in the bootfile name (Option 67)
+    let param_list = if matches!(arch, crate::config::Architecture::X64UefiHttp) {
+        vec![
+            OptionCode::SubnetMask,
+            OptionCode::Router,
+            OptionCode::DomainNameServer,
+            OptionCode::BootfileName, // Option 67 only
+        ]
+    } else {
+        vec![
+            OptionCode::SubnetMask,
+            OptionCode::Router,
+            OptionCode::DomainNameServer,
+            OptionCode::TFTPServerName, // Option 66
+            OptionCode::BootfileName,   // Option 67
+        ]
+    };
+    msg.opts_mut()
+        .insert(DhcpOption::ParameterRequestList(param_list));
+
     if is_ipxe {
         msg.opts_mut()
             .insert(DhcpOption::UserClass(b"iPXE".to_vec()));
@@ -319,6 +409,34 @@ fn request_internal(
     output.detail("Leased IP", &leased_ip.to_string());
     output.detail("Next Server", &next_server.to_string());
     output.detail("Bootfile", bootfile.as_ref().unwrap_or(&"None".to_owned()));
+
+    // Validate Vendor Class Identifier (Option 60)
+    let expected_class = expected_vendor_class(&arch);
+    let vendor_class = ack.opts().get(OptionCode::ClassIdentifier).and_then(|opt| {
+        if let DhcpOption::ClassIdentifier(class) = opt {
+            Some(class.as_slice())
+        } else {
+            None
+        }
+    });
+
+    match vendor_class {
+        Some(class) if class == expected_class => {
+            output.detail("Vendor Class", String::from_utf8_lossy(class).as_ref());
+        }
+        Some(class) => {
+            return Err(anyhow!(
+                "Incorrect Vendor Class Identifier: expected '{}', got '{}'",
+                String::from_utf8_lossy(expected_class),
+                String::from_utf8_lossy(class)
+            ));
+        }
+        None => {
+            return Err(anyhow!(
+                "Missing Vendor Class Identifier (Option 60) in ACK"
+            ));
+        }
+    }
 
     // Store IP for this NIC
     state.allocated_ips[nic_index] = Some(leased_ip);

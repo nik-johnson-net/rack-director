@@ -5,23 +5,80 @@ use dhcproto::{
     encoder::Encoder,
     v4::{self, Architecture, Message, MessageType},
 };
+use log::{debug, info, trace, warn};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use uuid::Uuid;
 
-use crate::director::Director;
-
 use super::allocator::IpAllocator;
-use super::boot_config::{BootConfigProvider, BootMode};
-use super::device_resolution;
+use super::boot_config::BootConfigProvider;
+use super::device_resolution::{DeviceContext, DeviceResolver};
 use super::message_builder;
+use super::request::RequestContext;
 use super::store::{DhcpNetwork, DhcpStore, LeaseState, format_mac};
+
+/// Determines the appropriate vendor class identifier (Option 60) based on client architecture.
+///
+/// # DHCP Option 60 - Vendor Class Identifier
+///
+/// This option is used by PXE clients to identify themselves and by servers to provide
+/// architecture-specific boot information. Different client types expect different identifiers:
+///
+/// - **HTTP Boot clients** (arch 14/15/16): Expect "HTTPClient" to indicate HTTP boot support
+/// - **Traditional PXE clients** (all other architectures): Expect "PXEServer" identifier
+///
+/// # Arguments
+/// * `client_arch` - The client architecture from DHCP Option 93, if present
+///
+/// # Returns
+/// The vendor class identifier as a byte slice:
+/// - `b"HTTPClient"` for HTTP boot architectures (14, 15, 16)
+/// - `b"PXEServer"` for all other cases (traditional PXE boot)
+///
+/// # References
+/// - RFC 4578 - DHCP PXE Options
+/// - UEFI Specification 2.10 - Section 24.4.2 (HTTP Boot)
+fn determine_vendor_class_identifier(client_arch: Option<Architecture>) -> &'static [u8] {
+    match client_arch {
+        // HTTP Boot architectures
+        // - 14: x86-64 HTTP
+        // - 15: x86 HTTP (IA32)
+        // - 16: EBC (EFI Byte Code) HTTP
+        Some(Architecture::Unknown(14) | Architecture::Unknown(15) | Architecture::Unknown(16)) => {
+            b"HTTPClient"
+        }
+        // All other architectures (traditional PXE boot)
+        _ => b"PXEServer",
+    }
+}
+
+/// Determines whether boot options should be provided for a device.
+///
+/// # Decision Logic
+/// - If network autodiscover is enabled: Always provide boot options (permissive mode)
+/// - If network autodiscover is disabled: Only provide boot options for known devices (strict mode)
+/// - Pending devices (in pending_devices table) are also allowed to boot
+///
+/// # Arguments
+/// * `network_autodiscover` - Whether autodiscovery is enabled for this network
+/// * `device_uuid` - The device UUID if the device is known (exists in devices table)
+/// * `is_pending_device` - Whether the device exists in the pending_devices table
+///
+/// # Returns
+/// `true` if boot options should be provided, `false` otherwise
+fn should_provide_boot_options(
+    network_autodiscover: bool,
+    device_uuid: Option<&Uuid>,
+    is_pending_device: bool,
+) -> bool {
+    network_autodiscover || device_uuid.is_some() || is_pending_device
+}
 
 #[derive(Clone)]
 pub struct DhcpHandler {
     store: DhcpStore,
-    director: Director,
+    device_resolver: Arc<dyn DeviceResolver>,
     allocator: IpAllocator,
     boot_config: BootConfigProvider,
     server_identifier: Ipv4Addr,
@@ -30,14 +87,14 @@ pub struct DhcpHandler {
 impl DhcpHandler {
     pub fn new(
         store: DhcpStore,
-        director: Director,
+        device_resolver: Arc<dyn DeviceResolver>,
         allocator: IpAllocator,
         boot_config: BootConfigProvider,
         server_identifier: Ipv4Addr,
     ) -> Self {
         Self {
             store,
-            director,
+            device_resolver,
             allocator,
             boot_config,
             server_identifier,
@@ -59,6 +116,8 @@ impl DhcpHandler {
             }
         };
 
+        trace!("DHCP: Received packet {:?}", msg);
+
         // Extract relay agent address (giaddr)
         let relay_agent = if msg.giaddr() != Ipv4Addr::UNSPECIFIED {
             Some(msg.giaddr())
@@ -75,11 +134,9 @@ impl DhcpHandler {
             }
         };
 
-        log::debug!(
+        debug!(
             "Using network '{}' (id={}) for relay {:?}",
-            network.name,
-            network.id,
-            relay_agent
+            network.name, network.id, relay_agent
         );
 
         let response = match msg.opts().msg_type() {
@@ -100,6 +157,7 @@ impl DhcpHandler {
         };
 
         if let Some(resp) = response {
+            trace!("DHCP: Sending response {:?}", resp);
             self.send_response(resp, &msg, peer_addr, socket).await?;
         }
 
@@ -131,7 +189,7 @@ impl DhcpHandler {
             }
         };
 
-        log::debug!("Sending DHCP response to {}", dest);
+        debug!("Sending DHCP response to {}", dest);
         socket.send_to(&buf, dest).await?;
 
         Ok(())
@@ -142,73 +200,63 @@ impl DhcpHandler {
         msg: &Message,
         network: &DhcpNetwork,
     ) -> Result<Option<Message>> {
-        let mac = msg.chaddr();
-        let mac_str = format_mac(mac);
+        let req_ctx = RequestContext::from_message(msg);
 
-        log::info!(
+        info!(
             "DHCP DISCOVER from MAC {} on network '{}'",
-            mac_str,
-            network.name
+            req_ctx.mac, network.name
         );
 
-        // Resolve device UUID (device NIC or BMC)
-        let device_uuid = device_resolution::resolve_device_uuid(&self.director, &mac_str).await?;
+        let dev_ctx = self.device_resolver.resolve(&req_ctx.mac).await?;
 
-        // Check if this interface is disabled (e.g., due to duplicate MAC)
-        if let Some(uuid) = &device_uuid {
-            let (is_disabled, reason) =
-                device_resolution::is_interface_disabled(&self.director, uuid, &mac_str).await?;
-
-            if is_disabled {
-                log::warn!(
-                    "Skipping DHCP DISCOVER for disabled interface {} on device {}. Reason: {}",
-                    mac_str,
-                    uuid,
-                    reason.as_deref().unwrap_or("unknown")
-                );
-                return Ok(None);
-            }
+        if dev_ctx.is_disabled {
+            warn!(
+                "Skipping DHCP DISCOVER for disabled interface {} on device {}. Reason: {}",
+                req_ctx.mac,
+                dev_ctx
+                    .device_uuid
+                    .as_ref()
+                    .map(|u| u.to_string())
+                    .unwrap_or_default(),
+                dev_ctx.disable_reason.as_deref().unwrap_or("unknown")
+            );
+            return Ok(None);
         }
 
         // Allocate or retrieve existing IP in this network
-        let ip = if let Some(uuid) = &device_uuid {
-            log::debug!("Device UUID {} found for MAC {}", uuid, mac_str);
+        let ip = if let Some(uuid) = &dev_ctx.device_uuid {
+            debug!("Device UUID {} found for MAC {}", uuid, req_ctx.mac);
             self.allocator
-                .allocate_for_device_in_network(&mac_str, uuid, network.id)
+                .allocate_for_device_in_network(&req_ctx.mac, uuid, network.id)
                 .await?
         } else {
-            log::debug!(
+            debug!(
                 "No device UUID found for MAC {}, allocating from pool",
-                mac_str
+                req_ctx.mac
             );
             self.allocator
-                .allocate_for_mac_in_network(&mac_str, network.id)
+                .allocate_for_mac_in_network(&req_ctx.mac, network.id)
                 .await?
         };
 
         // Create lease in 'offered' state
         self.store
             .create_or_update_lease_with_network(
-                &mac_str,
+                &req_ctx.mac,
                 &ip,
-                device_uuid.as_ref(),
+                dev_ctx.device_uuid.as_ref(),
                 LeaseState::Offered,
                 network.lease_duration,
                 network.id,
             )
             .await?;
 
-        // Check if device is in pending_devices table
-        let is_pending_device =
-            device_resolution::is_pending_device(&self.director, &mac_str).await?;
-
-        // Build DHCP Offer
-        let offer = self.build_offer(msg, ip, network, device_uuid.as_ref(), is_pending_device)?;
-        log::info!(
+        let offer = self
+            .build_offer(msg, ip, network, &req_ctx, &dev_ctx)
+            .await?;
+        info!(
             "DHCP OFFER {} to MAC {} on network '{}'",
-            ip,
-            mac_str,
-            network.name
+            ip, req_ctx.mac, network.name
         );
 
         Ok(Some(offer))
@@ -219,96 +267,72 @@ impl DhcpHandler {
         msg: &Message,
         network: &DhcpNetwork,
     ) -> Result<Option<Message>> {
-        let mac = msg.chaddr();
-        let mac_str = format_mac(mac);
+        let req_ctx = RequestContext::from_message(msg);
 
-        log::info!(
+        info!(
             "DHCP REQUEST from MAC {} on network '{}'",
-            mac_str,
-            network.name
+            req_ctx.mac, network.name
         );
 
-        // Resolve device UUID (device NIC or BMC)
-        let device_uuid = device_resolution::resolve_device_uuid(&self.director, &mac_str).await?;
+        let dev_ctx = self.device_resolver.resolve(&req_ctx.mac).await?;
 
-        // Check if device is in pending_devices table
-        let is_pending_device =
-            device_resolution::is_pending_device(&self.director, &mac_str).await?;
-
-        // Check if this interface is disabled (e.g., due to duplicate MAC)
-        if let Some(uuid) = &device_uuid {
-            let (is_disabled, reason) =
-                device_resolution::is_interface_disabled(&self.director, uuid, &mac_str).await?;
-
-            if is_disabled {
-                log::warn!(
-                    "Skipping DHCP REQUEST for disabled interface {} on device {}. Reason: {}",
-                    mac_str,
-                    uuid,
-                    reason.as_deref().unwrap_or("unknown")
-                );
-                return Ok(None);
-            }
+        if dev_ctx.is_disabled {
+            warn!(
+                "Skipping DHCP REQUEST for disabled interface {} on device {}. Reason: {}",
+                req_ctx.mac,
+                dev_ctx
+                    .device_uuid
+                    .as_ref()
+                    .map(|u| u.to_string())
+                    .unwrap_or_default(),
+                dev_ctx.disable_reason.as_deref().unwrap_or("unknown")
+            );
+            return Ok(None);
         }
 
         // Extract requested IP address
-        let requested_ip = if let Some((_code, v4::DhcpOption::RequestedIpAddress(ip))) = msg
-            .opts()
-            .iter()
-            .find(|(_, opt)| matches!(opt, v4::DhcpOption::RequestedIpAddress(_)))
-        {
-            *ip
+        let requested_ip = if let Some(ip) = req_ctx.requested_ip {
+            ip
+        } else if req_ctx.ciaddr != Ipv4Addr::UNSPECIFIED {
+            req_ctx.ciaddr
         } else {
-            // No requested IP, check ciaddr (client IP address)
-            if msg.ciaddr() != Ipv4Addr::UNSPECIFIED {
-                msg.ciaddr()
-            } else {
-                log::warn!("DHCP REQUEST without requested IP or ciaddr");
-                return Ok(Some(self.build_nak(msg)?));
-            }
+            warn!("DHCP REQUEST without requested IP or ciaddr");
+            return Ok(Some(self.build_nak(msg)?));
         };
 
-        log::debug!("Requested IP: {}", requested_ip);
+        debug!("Requested IP: {}", requested_ip);
 
         // Validate request matches our offer
-        let lease = self.store.get_lease_by_mac(&mac_str).await?;
+        let lease = self.store.get_lease_by_mac(&req_ctx.mac).await?;
         if let Some(lease) = lease {
             let lease_ip: Ipv4Addr = lease.ip_address.parse()?;
             if lease_ip != requested_ip {
-                log::warn!(
+                warn!(
                     "DHCP REQUEST IP mismatch: requested {}, expected {}",
-                    requested_ip,
-                    lease_ip
+                    requested_ip, lease_ip
                 );
                 return Ok(Some(self.build_nak(msg)?));
             }
 
             // Update lease to 'active'
-            self.store.activate_lease(&mac_str).await?;
-            if let Some(uuid) = &device_uuid {
-                self.director
-                    .set_device_ip_address(uuid, &lease_ip.to_string(), &mac_str)
+            self.store.activate_lease(&req_ctx.mac).await?;
+            if let Some(uuid) = &dev_ctx.device_uuid {
+                self.device_resolver
+                    .on_lease_activated(uuid, &lease_ip.to_string(), &req_ctx.mac)
                     .await?;
             }
 
-            // Build DHCP Ack with boot options (passing device_uuid for authorization)
-            let ack = self.build_ack(
-                msg,
-                lease_ip,
-                network,
-                device_uuid.as_ref(),
-                is_pending_device,
-            )?;
-            log::info!(
+            let ack = self
+                .build_ack(msg, lease_ip, network, &req_ctx, &dev_ctx)
+                .await?;
+            info!(
                 "DHCP ACK {} to MAC {} on network '{}'",
-                requested_ip,
-                mac_str,
-                network.name
+                requested_ip, req_ctx.mac, network.name
             );
 
             Ok(Some(ack))
         } else {
-            log::warn!("No lease found for MAC {}", mac_str);
+            warn!("No lease found for MAC {}", req_ctx.mac);
             Ok(Some(self.build_nak(msg)?))
         }
     }
@@ -317,7 +341,7 @@ impl DhcpHandler {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
-        log::info!("DHCP RELEASE from MAC {}", mac_str);
+        info!("DHCP RELEASE from MAC {}", mac_str);
 
         self.store.release_lease(&mac_str).await?;
 
@@ -328,7 +352,7 @@ impl DhcpHandler {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
-        log::warn!("DHCP DECLINE from MAC {}", mac_str);
+        warn!("DHCP DECLINE from MAC {}", mac_str);
 
         // Mark lease as released to prevent reuse
         self.store.release_lease(&mac_str).await?;
@@ -336,18 +360,17 @@ impl DhcpHandler {
         Ok(())
     }
 
-    fn build_offer(
+    async fn build_offer(
         &self,
         req: &Message,
         ip: Ipv4Addr,
         network: &DhcpNetwork,
-        device_uuid: Option<&Uuid>,
-        is_pending_device: bool,
+        req_ctx: &RequestContext,
+        dev_ctx: &DeviceContext,
     ) -> Result<Message> {
         let mut msg = message_builder::create_base_reply(req, &self.server_identifier);
         msg.set_yiaddr(ip);
 
-        // Standard DHCP options
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Offer));
         msg.opts_mut()
@@ -355,98 +378,51 @@ impl DhcpHandler {
         msg.opts_mut()
             .insert(v4::DhcpOption::AddressLeaseTime(network.lease_duration));
 
-        // Network configuration
+        // Set vendor class identifier based on client architecture
+        let vendor_class = determine_vendor_class_identifier(req_ctx.client_arch);
+        msg.opts_mut()
+            .insert(v4::DhcpOption::ClassIdentifier(vendor_class.to_vec()));
+
         message_builder::add_network_options(&mut msg, network)?;
 
-        // PXEBoot configuration
-        self.detect_and_add_pxeboot_options(
-            &mut msg,
-            req,
-            device_uuid,
-            network,
-            is_pending_device,
-        )?;
+        self.detect_and_add_pxeboot_options(&mut msg, req_ctx, dev_ctx, network)
+            .await?;
 
         Ok(msg)
     }
 
-    fn build_ack(
+    async fn build_ack(
         &self,
         req: &Message,
         ip: Ipv4Addr,
         network: &DhcpNetwork,
-        device_uuid: Option<&Uuid>,
-        is_pending_device: bool,
+        req_ctx: &RequestContext,
+        dev_ctx: &DeviceContext,
     ) -> Result<Message> {
-        let mut msg = self.build_offer(req, ip, network, device_uuid, is_pending_device)?;
+        let mut msg = self.build_offer(req, ip, network, req_ctx, dev_ctx).await?;
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Ack));
 
         Ok(msg)
     }
 
-    fn detect_and_add_pxeboot_options(
+    async fn detect_and_add_pxeboot_options(
         &self,
         msg: &mut Message,
-        req: &Message,
-        device_uuid: Option<&Uuid>,
+        req_ctx: &RequestContext,
+        dev_ctx: &DeviceContext,
         network: &DhcpNetwork,
-        is_pending_device: bool,
     ) -> Result<()> {
-        // Check if client requested boot options via option 55
-        let client_wants_boot_options = self.boot_config.client_requested_boot_options(req);
-
-        if !client_wants_boot_options {
-            // Client did not request boot options (e.g., already booted OS renewing lease)
-            // Log this for visibility and skip boot option processing
-            let mac = format_mac(req.chaddr());
-            let identifier = device_uuid.map(|u| u.to_string()).unwrap_or(mac);
-            log::info!("Device {} did not ask for boot options", identifier);
+        if !should_provide_boot_options(
+            network.enable_autodiscovery,
+            dev_ctx.device_uuid.as_ref(),
+            dev_ctx.is_pending,
+        ) {
+            info!("Skipping boot options for unknown device (autodiscover disabled)");
             return Ok(());
         }
 
-        // Client requested boot options, check if this is iPXE making a second DHCP request
-        let is_ipxe = self.is_ipxe(req);
-
-        if is_ipxe {
-            // iPXE second-stage boot: Return HTTP URL for boot script (if allowed)
-            if let Some(boot_opts) = self.boot_config.get_ipxe_boot_script_if_allowed(
-                network.enable_autodiscovery,
-                device_uuid,
-                is_pending_device,
-            )? {
-                log::debug!(
-                    "iPXE detected, returning HTTP boot script: {}",
-                    boot_opts.filename
-                );
-
-                self.boot_config
-                    .apply_ipxe_script_to_message(msg, &boot_opts);
-            } else {
-                log::info!("Skipping boot script for unknown device (autodiscover disabled)");
-            }
-        } else {
-            // First-stage boot: Determine boot mode and return bootloader via TFTP (if allowed)
-            let boot_mode = self.detect_boot_mode(req);
-            if let Some(boot_opts) = self.boot_config.get_boot_options_if_allowed(
-                boot_mode,
-                network.enable_autodiscovery,
-                device_uuid,
-                is_pending_device,
-            )? {
-                log::debug!(
-                    "Boot mode: {:?}, next_server: {:?}, filename: {}",
-                    boot_mode,
-                    boot_opts.next_server,
-                    boot_opts.filename
-                );
-
-                self.boot_config
-                    .apply_boot_options_to_message(msg, &boot_opts)?;
-            } else {
-                log::info!("Skipping boot options for unknown device (autodiscover disabled)");
-            }
-        }
+        self.boot_config.populate_boot_options(msg, req_ctx).await?;
 
         Ok(())
     }
@@ -454,55 +430,18 @@ impl DhcpHandler {
     fn build_nak(&self, req: &Message) -> Result<Message> {
         Ok(message_builder::build_nak(req, self.server_identifier))
     }
-
-    fn is_ipxe(&self, msg: &Message) -> bool {
-        // Check Option 77 (User-Class) for "iPXE" identifier
-        for (_code, opt) in msg.opts().iter() {
-            if let v4::DhcpOption::UserClass(data) = opt {
-                // The UserClass option contains a Vec<u8>
-                // iPXE sends "iPXE" as the user class identifier
-                if data == b"iPXE" {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn detect_boot_mode(&self, msg: &Message) -> BootMode {
-        // Check Option 93 (Client System Architecture)
-        for (_code, opt) in msg.opts().iter() {
-            if let v4::DhcpOption::ClientSystemArchitecture(arch) = opt {
-                return match arch {
-                    Architecture::Intelx86PC | Architecture::X86_64 => BootMode::BiosLegacy, // Intel x86PC
-                    Architecture::BC
-                    | Architecture::Unknown(14)
-                    | Architecture::Unknown(15)
-                    | Architecture::Unknown(16) => BootMode::UefiBoot, // EFI IA32, EFI BC (x86-64), EFI Xscale
-                    Architecture::Unknown(11) => BootMode::UefiArm64, // EFI ARM 64-bit (AArch64)
-                    _ => {
-                        // Unknown architecture, assume BIOS for safety
-                        log::warn!("Unknown client architecture: {:?}", arch);
-                        BootMode::BiosLegacy
-                    }
-                };
-            }
-        }
-
-        // No architecture option: assume BIOS
-        BootMode::BiosLegacy
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::storage::MemoryImageStore;
+    use chrono::DateTime;
     use dhcproto::v4::Opcode;
 
     use super::*;
 
-    #[test]
-    fn test_server_identifier_in_offer() {
+    #[tokio::test]
+    async fn test_server_identifier_in_offer() {
         let (handler, store) = create_test_handler_with_store();
 
         // Create a minimal DISCOVER message
@@ -515,8 +454,16 @@ mod tests {
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
         // Get default network
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let network = rt.block_on(store.get_network(1)).unwrap();
+        let network = store.get_network(1).await.unwrap();
+
+        // Create contexts
+        let req_ctx = RequestContext::from_message(&discover);
+        let dev_ctx = DeviceContext {
+            device_uuid: None,
+            is_disabled: false,
+            disable_reason: None,
+            is_pending: false,
+        };
 
         // Build an OFFER response
         let offer = handler
@@ -524,9 +471,10 @@ mod tests {
                 &discover,
                 "10.0.0.100".parse().unwrap(),
                 &network,
-                None,
-                false,
+                &req_ctx,
+                &dev_ctx,
             )
+            .await
             .unwrap();
 
         // Verify the server identifier matches the handler's configured value
@@ -583,8 +531,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_custom_server_identifier() {
+    #[tokio::test]
+    async fn test_custom_server_identifier() {
+        use super::super::device_resolution::DirectorDeviceResolver;
+        use crate::boot_files::FilesystemBootFileProvider;
         use crate::database;
         use crate::director::Director;
         use std::sync::Arc;
@@ -602,17 +552,26 @@ mod tests {
             "http://localhost:8080",
         );
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
+        let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
         let allocator = IpAllocator::new(store.clone());
-        let boot_config =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
+
+        // Create a temporary boot files directory for testing
+        let boot_files_dir = temp_dir.path().join("boot_files");
+        std::fs::create_dir_all(&boot_files_dir).unwrap();
+        let boot_file_provider =
+            Arc::new(FilesystemBootFileProvider::new(boot_files_dir.to_path_buf()).unwrap());
+
+        let boot_config = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            boot_file_provider,
+        );
 
         // Use a custom server identifier different from gateway
         let custom_server_id: Ipv4Addr = "192.168.1.50".parse().unwrap();
         let handler = DhcpHandler::new(
             store.clone(),
-            director,
+            device_resolver,
             allocator,
             boot_config,
             custom_server_id,
@@ -625,7 +584,7 @@ mod tests {
         );
 
         // Get default network
-        let network = rt.block_on(store.get_network(1)).unwrap();
+        let network = store.get_network(1).await.unwrap();
 
         // Build an OFFER and verify it uses the custom identifier
         let mut discover = Message::default();
@@ -636,14 +595,24 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
+        // Create contexts
+        let req_ctx = RequestContext::from_message(&discover);
+        let dev_ctx = DeviceContext {
+            device_uuid: None,
+            is_disabled: false,
+            disable_reason: None,
+            is_pending: false,
+        };
+
         let offer = handler
             .build_offer(
                 &discover,
                 "10.0.0.100".parse().unwrap(),
                 &network,
-                None,
-                false,
+                &req_ctx,
+                &dev_ctx,
             )
+            .await
             .unwrap();
 
         let server_id = offer
@@ -665,6 +634,8 @@ mod tests {
     }
 
     fn create_test_handler_with_store() -> (DhcpHandler, DhcpStore) {
+        use super::super::device_resolution::DirectorDeviceResolver;
+        use crate::boot_files::FilesystemBootFileProvider;
         use crate::database;
         use crate::director::Director;
         use std::sync::Arc;
@@ -682,14 +653,25 @@ mod tests {
             "http://localhost:8080",
         );
 
+        let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
         let allocator = IpAllocator::new(store.clone());
-        let boot_config =
-            BootConfigProvider::new("10.0.0.1".to_string(), "http://10.0.0.1".to_string());
+
+        // Create a temporary boot files directory for testing
+        let boot_files_dir = temp_dir.path().join("boot_files");
+        std::fs::create_dir_all(&boot_files_dir).unwrap();
+        let boot_file_provider =
+            Arc::new(FilesystemBootFileProvider::new(boot_files_dir.to_path_buf()).unwrap());
+
+        let boot_config = BootConfigProvider::new(
+            "10.0.0.1".to_string(),
+            "http://10.0.0.1".to_string(),
+            boot_file_provider,
+        );
         let server_identifier = "10.0.0.1".parse().unwrap();
 
         let handler = DhcpHandler::new(
             store.clone(),
-            director,
+            device_resolver,
             allocator,
             boot_config,
             server_identifier,
@@ -700,5 +682,356 @@ mod tests {
     fn create_test_handler() -> DhcpHandler {
         let (handler, _store) = create_test_handler_with_store();
         handler
+    }
+
+    // Authorization tests
+    #[test]
+    fn test_should_provide_boot_options_autodiscover_enabled() {
+        assert!(
+            should_provide_boot_options(true, None, false),
+            "Should provide boot options when autodiscover is enabled"
+        );
+    }
+
+    #[test]
+    fn test_should_provide_boot_options_autodiscover_disabled_unknown_device() {
+        assert!(
+            !should_provide_boot_options(false, None, false),
+            "Should NOT provide boot options for unknown device when autodiscover is disabled"
+        );
+    }
+
+    #[test]
+    fn test_should_provide_boot_options_known_device() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        assert!(
+            should_provide_boot_options(false, Some(&uuid), false),
+            "Should provide boot options for known device even when autodiscover is disabled"
+        );
+    }
+
+    #[test]
+    fn test_should_provide_boot_options_pending_device() {
+        assert!(
+            should_provide_boot_options(false, None, true),
+            "Should provide boot options for pending device even when autodiscover is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_option_60_default_pxe() {
+        let handler = create_test_handler();
+
+        // Create a minimal REQUEST message without architecture
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+
+        // Build an Offer response
+        let network = DhcpNetwork {
+            id: 1,
+            name: String::default(),
+            subnet: "255.255.255.1/24".to_string(),
+            gateway: "255.255.255.1".to_string(),
+            dns_servers: vec![],
+            lease_duration: 1,
+            relay_agent_address: None,
+            enable_autodiscovery: true,
+            created_at: DateTime::default(),
+            updated_at: DateTime::default(),
+        };
+        let req_context = RequestContext::from_message(&request);
+        let device_context = DeviceContext {
+            device_uuid: None,
+            is_disabled: false,
+            disable_reason: None,
+            is_pending: false,
+        };
+        let offer = handler
+            .build_offer(
+                &request,
+                Ipv4Addr::UNSPECIFIED,
+                &network,
+                &req_context,
+                &device_context,
+            )
+            .await
+            .unwrap();
+
+        // Verify the class identifier is PXEServer for default (no architecture)
+        let class_ident = offer
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::ClassIdentifier(class_ident) = opt {
+                    Some(class_ident.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("Class Identifier should be present in OFFER");
+
+        assert_eq!(
+            class_ident, b"PXEServer",
+            "Default (no architecture) should receive PXEServer vendor class identifier"
+        );
+    }
+
+    // Vendor Class Identifier (Option 60) Tests
+    #[test]
+    fn test_determine_vendor_class_identifier_http_boot_arch_14() {
+        let arch = Some(dhcproto::v4::Architecture::Unknown(14));
+        assert_eq!(
+            determine_vendor_class_identifier(arch),
+            b"HTTPClient",
+            "Architecture 14 (x86-64 HTTP) should return HTTPClient"
+        );
+    }
+
+    #[test]
+    fn test_determine_vendor_class_identifier_http_boot_arch_15() {
+        let arch = Some(dhcproto::v4::Architecture::Unknown(15));
+        assert_eq!(
+            determine_vendor_class_identifier(arch),
+            b"HTTPClient",
+            "Architecture 15 (x86 HTTP/IA32) should return HTTPClient"
+        );
+    }
+
+    #[test]
+    fn test_determine_vendor_class_identifier_http_boot_arch_16() {
+        let arch = Some(dhcproto::v4::Architecture::Unknown(16));
+        assert_eq!(
+            determine_vendor_class_identifier(arch),
+            b"HTTPClient",
+            "Architecture 16 (EBC HTTP) should return HTTPClient"
+        );
+    }
+
+    #[test]
+    fn test_determine_vendor_class_identifier_uefi_arch_7() {
+        let arch = Some(dhcproto::v4::Architecture::BC);
+        assert_eq!(
+            determine_vendor_class_identifier(arch),
+            b"PXEServer",
+            "Architecture 7 (UEFI BC) should return PXEServer"
+        );
+    }
+
+    #[test]
+    fn test_determine_vendor_class_identifier_bios_arch_0() {
+        let arch = Some(dhcproto::v4::Architecture::Intelx86PC);
+        assert_eq!(
+            determine_vendor_class_identifier(arch),
+            b"PXEServer",
+            "Architecture 0 (BIOS x86) should return PXEServer"
+        );
+    }
+
+    #[test]
+    fn test_determine_vendor_class_identifier_bios_arch_9() {
+        let arch = Some(dhcproto::v4::Architecture::X86_64);
+        assert_eq!(
+            determine_vendor_class_identifier(arch),
+            b"PXEServer",
+            "Architecture 9 (BIOS x86-64) should return PXEServer"
+        );
+    }
+
+    #[test]
+    fn test_determine_vendor_class_identifier_no_arch() {
+        let arch = None;
+        assert_eq!(
+            determine_vendor_class_identifier(arch),
+            b"PXEServer",
+            "No architecture should default to PXEServer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vendor_class_identifier_in_offer_http_boot() {
+        let (handler, store) = create_test_handler_with_store();
+
+        // Create a DISCOVER message with HTTP boot architecture (14)
+        let mut discover = Message::default();
+        discover.set_opcode(Opcode::BootRequest);
+        discover.set_xid(0x12345678);
+        discover.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        discover
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Discover));
+        discover
+            .opts_mut()
+            .insert(v4::DhcpOption::ClientSystemArchitecture(
+                dhcproto::v4::Architecture::Unknown(14),
+            ));
+
+        // Get default network
+        let network = store.get_network(1).await.unwrap();
+
+        // Create contexts
+        let req_ctx = RequestContext::from_message(&discover);
+        let dev_ctx = DeviceContext {
+            device_uuid: None,
+            is_disabled: false,
+            disable_reason: None,
+            is_pending: false,
+        };
+
+        // Build an OFFER response
+        let offer = handler
+            .build_offer(
+                &discover,
+                "10.0.0.100".parse().unwrap(),
+                &network,
+                &req_ctx,
+                &dev_ctx,
+            )
+            .await
+            .unwrap();
+
+        // Verify the vendor class identifier is HTTPClient
+        let class_ident = offer
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::ClassIdentifier(class_ident) = opt {
+                    Some(class_ident.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("Class Identifier should be present in OFFER");
+
+        assert_eq!(
+            class_ident, b"HTTPClient",
+            "HTTP boot client (arch 14) should receive HTTPClient vendor class identifier"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vendor_class_identifier_in_offer_traditional_pxe() {
+        let (handler, store) = create_test_handler_with_store();
+
+        // Create a DISCOVER message with traditional UEFI architecture (7)
+        let mut discover = Message::default();
+        discover.set_opcode(Opcode::BootRequest);
+        discover.set_xid(0x12345678);
+        discover.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        discover
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Discover));
+        discover
+            .opts_mut()
+            .insert(v4::DhcpOption::ClientSystemArchitecture(
+                dhcproto::v4::Architecture::BC,
+            ));
+
+        // Get default network
+        let network = store.get_network(1).await.unwrap();
+
+        // Create contexts
+        let req_ctx = RequestContext::from_message(&discover);
+        let dev_ctx = DeviceContext {
+            device_uuid: None,
+            is_disabled: false,
+            disable_reason: None,
+            is_pending: false,
+        };
+
+        // Build an OFFER response
+        let offer = handler
+            .build_offer(
+                &discover,
+                "10.0.0.100".parse().unwrap(),
+                &network,
+                &req_ctx,
+                &dev_ctx,
+            )
+            .await
+            .unwrap();
+
+        // Verify the vendor class identifier is PXEServer
+        let class_ident = offer
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::ClassIdentifier(class_ident) = opt {
+                    Some(class_ident.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("Class Identifier should be present in OFFER");
+
+        assert_eq!(
+            class_ident, b"PXEServer",
+            "Traditional PXE client (arch 7) should receive PXEServer vendor class identifier"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vendor_class_identifier_in_ack_http_boot() {
+        let (handler, store) = create_test_handler_with_store();
+
+        // Create a REQUEST message with HTTP boot architecture (15)
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::ClientSystemArchitecture(
+                dhcproto::v4::Architecture::Unknown(15),
+            ));
+
+        // Get default network
+        let network = store.get_network(1).await.unwrap();
+
+        // Create contexts
+        let req_ctx = RequestContext::from_message(&request);
+        let dev_ctx = DeviceContext {
+            device_uuid: None,
+            is_disabled: false,
+            disable_reason: None,
+            is_pending: false,
+        };
+
+        // Build an ACK response
+        let ack = handler
+            .build_ack(
+                &request,
+                "10.0.0.100".parse().unwrap(),
+                &network,
+                &req_ctx,
+                &dev_ctx,
+            )
+            .await
+            .unwrap();
+
+        // Verify the vendor class identifier is HTTPClient
+        let class_ident = ack
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::ClassIdentifier(class_ident) = opt {
+                    Some(class_ident.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("Class Identifier should be present in ACK");
+
+        assert_eq!(
+            class_ident, b"HTTPClient",
+            "HTTP boot client (arch 15) should receive HTTPClient vendor class identifier in ACK"
+        );
     }
 }

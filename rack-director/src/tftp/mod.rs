@@ -1,9 +1,11 @@
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
@@ -23,11 +25,11 @@ pub struct StartResult {
 
 pub struct Server<H: Handler> {
     address: SocketAddr,
-    handler: H,
+    handler: Arc<H>,
 }
 
 impl<H: Handler + Send + Sync + 'static> Server<H> {
-    pub fn new(handler: H) -> Self {
+    pub fn new(handler: Arc<H>) -> Self {
         Self {
             address: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 69).into(),
             handler,
@@ -48,9 +50,11 @@ impl<H: Handler + Send + Sync + 'static> Server<H> {
     }
 }
 
-async fn serve<H: Handler + Send + Sync + 'static>(socket: UdpSocket, handler: H) -> Result<()> {
+async fn serve<H: Handler + Send + Sync + 'static>(
+    socket: UdpSocket,
+    handler: Arc<H>,
+) -> Result<()> {
     let arc_socket = Arc::new(socket);
-    let arc_handler = Arc::new(handler);
     let mut buf: [u8; 512] = [0; 512];
     log::info!(
         "Starting TFTP server on {}",
@@ -60,7 +64,59 @@ async fn serve<H: Handler + Send + Sync + 'static>(socket: UdpSocket, handler: H
         let (size, addr) = arc_socket.recv_from(&mut buf).await?;
         let packet = Packet::parse(&buf[0..size])?;
         log::info!("TFTP {:?}", packet);
-        tokio::spawn(Connection::accept(arc_handler.clone(), addr, packet));
+        tokio::spawn(Connection::accept(handler.clone(), addr, packet));
+    }
+}
+
+/// TFTP-specific file reader that reads files in chunks.
+///
+/// This reader wraps a tokio BufReader and provides chunk-based reading
+/// suitable for TFTP block transfers.
+pub struct TftpReader {
+    file: BufReader<tokio::fs::File>,
+    block_size: u64,
+}
+
+impl TftpReader {
+    /// Open a file for TFTP reading.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The filesystem path to the file
+    /// * `block_size` - The size of each block to read (typically 512 bytes)
+    ///
+    /// # Returns
+    ///
+    /// Returns a new TftpReader if the file can be opened successfully.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened.
+    pub async fn open(path: &Path, block_size: u64) -> Result<Self> {
+        let file = tokio::fs::File::open(path).await?;
+        Ok(TftpReader {
+            file: BufReader::new(file),
+            block_size,
+        })
+    }
+}
+
+impl Reader for TftpReader {
+    async fn read(&mut self) -> Result<Vec<u8>> {
+        let mut buffered: usize = 0;
+        let mut chunk = vec![0; self.block_size as usize];
+
+        // read() is not guaranteed to fill buffer. Keep trying until it returns n = 0 or we've filled the buffer.
+        while buffered < self.block_size as usize {
+            let n = self.file.read(&mut chunk[buffered..]).await?;
+            if n == 0 {
+                break;
+            }
+            buffered += n;
+        }
+
+        chunk.truncate(buffered); // Return only the bytes that were actually read
+        Ok(chunk)
     }
 }
 
@@ -81,7 +137,7 @@ mod tests {
     async fn start_test_server<H: Handler + Send + Sync + 'static>(
         handler: H,
     ) -> Result<(u16, JoinHandle<Result<()>>)> {
-        let mut server = Server::new(handler);
+        let mut server = Server::new(Arc::new(handler));
         server.address(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0).into());
         let result = server.serve().await?;
         Ok((result.port, result.join_handle))

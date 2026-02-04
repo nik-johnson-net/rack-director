@@ -4,6 +4,7 @@ mod device_resolution;
 mod handler;
 mod ip_discovery;
 pub mod message_builder;
+mod request;
 mod store;
 
 use anyhow::Result;
@@ -20,7 +21,10 @@ pub use store::{DhcpNetwork, DhcpPool, DhcpStore, Lease, LeaseState, StaticReser
 
 use allocator::IpAllocator;
 use boot_config::BootConfigProvider;
+use device_resolution::DirectorDeviceResolver;
 use handler::DhcpHandler;
+
+use crate::boot_files::BootFileProvider;
 
 pub struct DhcpServer {
     handler: DhcpHandler,
@@ -38,6 +42,7 @@ impl DhcpServer {
         director: Director,
         tftp_server: String,
         http_server: String,
+        boot_file_provider: Arc<dyn BootFileProvider>,
         server_identifier: Ipv4Addr,
         address: Option<SocketAddr>,
     ) -> Result<Self> {
@@ -62,8 +67,15 @@ impl DhcpServer {
         }
 
         let allocator = IpAllocator::new(store.clone());
-        let boot_config = BootConfigProvider::new(tftp_server, http_server);
-        let handler = DhcpHandler::new(store, director, allocator, boot_config, server_identifier);
+        let boot_config = BootConfigProvider::new(tftp_server, http_server, boot_file_provider);
+        let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
+        let handler = DhcpHandler::new(
+            store,
+            device_resolver,
+            allocator,
+            boot_config,
+            server_identifier,
+        );
 
         Ok(Self {
             handler,
@@ -120,6 +132,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dhcp_server_creation() {
+        use crate::boot_files::FilesystemBootFileProvider;
+
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let conn = crate::database::open(db_path).unwrap();
@@ -130,12 +144,19 @@ mod tests {
             "http://localhost:8080",
         );
 
+        // Create a temporary boot files directory for testing
+        let boot_files_dir = temp_dir.path().join("boot_files");
+        std::fs::create_dir_all(&boot_files_dir).unwrap();
+        let boot_file_provider =
+            Arc::new(FilesystemBootFileProvider::new(boot_files_dir.to_path_buf()).unwrap());
+
         let server_identifier = "10.0.0.1".parse().unwrap();
         let server = DhcpServer::new(
             db,
             director,
             "10.0.0.1:69".to_string(),
             "http://10.0.0.1:3000".to_string(),
+            boot_file_provider,
             server_identifier,
             Some(SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 67)),
         )

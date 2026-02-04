@@ -1,85 +1,84 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::director::Director;
 
-/// Resolves a device UUID from a MAC address.
-///
-/// This function attempts to find a device by MAC address in two ways:
-/// 1. First, checks if the MAC belongs to a device NIC (network interface)
-/// 2. If not found, checks if the MAC belongs to a BMC (Baseboard Management Controller)
-///
-/// # Arguments
-/// * `director` - The director service for device lookups
-/// * `mac_str` - The MAC address to resolve (formatted string)
-///
-/// # Returns
-/// * `Ok(Some(uuid))` - Device found, returns the UUID
-/// * `Ok(None)` - Device not found
-/// * `Err(_)` - Database or lookup error
-pub async fn resolve_device_uuid(director: &Director, mac_str: &str) -> Result<Option<Uuid>> {
-    // Check if device exists in devices table by MAC (device NIC)
-    let mut device_uuid = director.find_device_by_mac(mac_str).await?;
-
-    // If not found, check if this MAC belongs to a BMC
-    if device_uuid.is_none()
-        && let Some(bmc_device_uuid) = director.find_device_by_bmc_mac(mac_str).await?
-    {
-        log::info!("MAC {} is a BMC for device {}", mac_str, bmc_device_uuid);
-        device_uuid = Some(bmc_device_uuid);
-    }
-
-    Ok(device_uuid)
+/// Pre-resolved device context for DHCP handling.
+pub struct DeviceContext {
+    pub device_uuid: Option<Uuid>,
+    pub is_disabled: bool,
+    pub disable_reason: Option<String>,
+    pub is_pending: bool,
 }
 
-/// Checks if a network interface is disabled for the given device and MAC address.
-///
-/// An interface may be disabled due to duplicate MAC detection or other administrative
-/// reasons. Disabled interfaces should not receive DHCP responses.
-///
-/// # Arguments
-/// * `director` - The director service for interface lookups
-/// * `device_uuid` - The device UUID to check
-/// * `mac_str` - The MAC address of the interface
-///
-/// # Returns
-/// * `Ok((true, Some(reason)))` - Interface is disabled with a reason
-/// * `Ok((false, None))` - Interface is enabled
-/// * `Err(_)` - Database or lookup error
-pub async fn is_interface_disabled(
-    director: &Director,
-    device_uuid: &Uuid,
-    mac_str: &str,
-) -> Result<(bool, Option<String>)> {
-    let interfaces = director.get_network_interfaces(device_uuid).await?;
+/// Trait for resolving device information from a MAC address.
+#[async_trait]
+pub trait DeviceResolver: Send + Sync {
+    /// Resolve device context from a MAC address.
+    async fn resolve(&self, mac: &str) -> Result<DeviceContext>;
 
-    if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac_str)
-        && iface.disabled
-    {
-        return Ok((true, iface.warning_label.clone()));
-    }
-
-    Ok((false, None))
+    /// Notify that a lease has been activated for a device.
+    async fn on_lease_activated(&self, uuid: &Uuid, ip: &str, mac: &str) -> Result<()>;
 }
 
-/// Checks if a MAC address corresponds to a pending device.
-///
-/// Pending devices are devices that have been detected but not yet fully registered
-/// in the system. They may be allowed to boot depending on the autodiscover setting.
-///
-/// # Arguments
-/// * `director` - The director service for pending device lookups
-/// * `mac_str` - The MAC address to check
-///
-/// # Returns
-/// * `Ok(true)` - MAC belongs to a pending device
-/// * `Ok(false)` - MAC does not belong to a pending device
-/// * `Err(_)` - Database or lookup error
-pub async fn is_pending_device(director: &Director, mac_str: &str) -> Result<bool> {
-    Ok(director
-        .find_pending_device_by_mac(mac_str)
-        .await?
-        .is_some())
+/// DeviceResolver implementation backed by the Director service.
+pub struct DirectorDeviceResolver {
+    director: Director,
+}
+
+impl DirectorDeviceResolver {
+    pub fn new(director: Director) -> Self {
+        Self { director }
+    }
+}
+
+#[async_trait]
+impl DeviceResolver for DirectorDeviceResolver {
+    async fn resolve(&self, mac: &str) -> Result<DeviceContext> {
+        // Resolve device UUID: check NIC first, then BMC
+        let mut device_uuid = self.director.find_device_by_mac(mac).await?;
+        if device_uuid.is_none()
+            && let Some(bmc_uuid) = self.director.find_device_by_bmc_mac(mac).await?
+        {
+            log::info!("MAC {} is a BMC for device {}", mac, bmc_uuid);
+            device_uuid = Some(bmc_uuid);
+        }
+
+        // Check if interface is disabled
+        let (is_disabled, disable_reason) = if let Some(uuid) = &device_uuid {
+            let interfaces = self.director.get_network_interfaces(uuid).await?;
+            if let Some(iface) = interfaces.iter().find(|i| i.mac_address == mac) {
+                if iface.disabled {
+                    (true, iface.warning_label.clone())
+                } else {
+                    (false, None)
+                }
+            } else {
+                (false, None)
+            }
+        } else {
+            (false, None)
+        };
+
+        // Check if pending device
+        let is_pending = self
+            .director
+            .find_pending_device_by_mac(mac)
+            .await?
+            .is_some();
+
+        Ok(DeviceContext {
+            device_uuid,
+            is_disabled,
+            disable_reason,
+            is_pending,
+        })
+    }
+
+    async fn on_lease_activated(&self, uuid: &Uuid, ip: &str, mac: &str) -> Result<()> {
+        self.director.set_device_ip_address(uuid, ip, mac).await
+    }
 }
 
 #[cfg(test)]
@@ -91,46 +90,40 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Mutex;
 
-    async fn create_test_director() -> Director {
+    async fn create_test_resolver() -> DirectorDeviceResolver {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
-        Director::new(
+        let director = Director::new(
             db.clone(),
             Arc::new(MemoryImageStore::new()),
             "http://localhost:8080",
-        )
+        );
+        DirectorDeviceResolver::new(director)
     }
 
     #[tokio::test]
-    async fn test_resolve_device_uuid_not_found() {
-        let director = create_test_director().await;
-        let result = resolve_device_uuid(&director, "aa:bb:cc:dd:ee:ff").await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+    async fn test_resolve_unknown_mac() {
+        let resolver = create_test_resolver().await;
+        let ctx = resolver.resolve("aa:bb:cc:dd:ee:ff").await.unwrap();
+        assert!(ctx.device_uuid.is_none());
+        assert!(!ctx.is_disabled);
+        assert!(ctx.disable_reason.is_none());
+        assert!(!ctx.is_pending);
     }
 
     #[tokio::test]
-    async fn test_is_interface_disabled_no_device() {
-        let director = create_test_director().await;
-        // Non-existent device UUID should return Ok((false, None))
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
-        let result = is_interface_disabled(&director, &test_uuid, "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
-        assert_eq!(result, (false, None));
+    async fn test_resolve_returns_not_disabled_for_unknown() {
+        let resolver = create_test_resolver().await;
+        let ctx = resolver.resolve("11:22:33:44:55:66").await.unwrap();
+        assert!(!ctx.is_disabled);
     }
 
     #[tokio::test]
-    async fn test_is_pending_device_not_found() {
-        let director = create_test_director().await;
-        let result = is_pending_device(&director, "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
-        assert_eq!(result, false);
+    async fn test_resolve_returns_not_pending_for_unknown() {
+        let resolver = create_test_resolver().await;
+        let ctx = resolver.resolve("11:22:33:44:55:66").await.unwrap();
+        assert!(!ctx.is_pending);
     }
-
-    // Note: Full integration tests would require setting up devices properly
-    // These tests verify the functions compile and handle the basic cases
 }

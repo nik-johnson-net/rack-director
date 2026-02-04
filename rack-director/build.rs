@@ -41,8 +41,8 @@ fn main() {
         install_path.join("agent").to_string_lossy(),
     );
     overridable_env(
-        "RACK_DIRECTOR_TFTP_PATH",
-        install_path.join("tftp").to_string_lossy(),
+        "RACK_DIRECTOR_FIRMWARE_PATH",
+        install_path.join("firmware").to_string_lossy(),
     );
     overridable_env(
         "RACK_DIRECTOR_UI_PATH",
