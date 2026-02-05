@@ -52,7 +52,7 @@ fn generate_agent_boot_target(root_url: &str, action_name: &str) -> Result<BootT
     let kernel_url = format!("{}/cnc/agent-images/vmlinuz", root_url);
     let initramfs_url = format!("{}/cnc/agent-images/initramfs.img", root_url);
     let cmdline = format!(
-        "rackdirector.url={}/cnc rackdirector.action={} quiet",
+        "rackdirector.url={}/cnc rackdirector.action={} quiet console=ttyS1,9600 console=tty0",
         root_url, action_name
     );
 
