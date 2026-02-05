@@ -35,10 +35,10 @@ ARG RELEASEVER="10"
 # Configure the build environment
 COPY docker/agent.repo /etc/yum.repos.d/agent.repo
 
-RUN dnf --noplugins -y --repo ${REPO_NAME} install binutils dracut
+RUN dnf --noplugins -y --repo ${REPO_NAME} install binutils dracut squashfs-tools
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
-RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo epel --installroot /agent-image install \
-  redhat-release systemd passwd rootfiles sudo dracut dracut-network dnf lvm2 mdadm systemd-networkd btrfs-progs gdisk
+RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo centos10-x86_64-appstream-rpms --repo epel --installroot /agent-image install \
+  redhat-release systemd passwd rootfiles sudo dracut dracut-network dracut-live lvm2 mdadm systemd-networkd btrfs-progs gdisk
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /agent-image install \
   kernel kernel-devel \
   ipmitool parted util-linux \
@@ -47,7 +47,10 @@ RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /agent-image ins
 
 # Copy build dependencies
 COPY docker/build-agent.sh /usr/local/bin/build-agent.sh
-COPY docker/dracut-modules /dracut-modules
+COPY docker/rack-agent.target /rack-agent.target
+COPY docker/rack-agent.service /rack-agent.service
+COPY docker/rack-agent-reboot.service /rack-agent-reboot.service
+COPY docker/networkd-dhcp.network /networkd-dhcp.network
 COPY --from=bin-builder /output/rack-agent /rack-agent
 # Build the boot images
 RUN chmod +x "/usr/local/bin/build-agent.sh" && "/usr/local/bin/build-agent.sh"

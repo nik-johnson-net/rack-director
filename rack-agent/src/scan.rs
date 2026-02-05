@@ -398,7 +398,13 @@ pub async fn bmc_configure(client: &RackDirector) -> Result<()> {
     // Fetch BMC configuration from rack-director
     info!("Fetching BMC configuration from rack-director...");
     let bmc_config = match client.get_bmc_config(uuid).await {
-        Ok(config) => config,
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            // No BMC configuration is set for this device - not an error condition
+            info!("No BMC configuration found for device, skipping BMC configuration");
+            client.action_success(uuid).await?;
+            return Ok(());
+        }
         Err(e) => {
             let error_msg = format!("Failed to fetch BMC configuration: {}", e);
             log::error!("{}", error_msg);
@@ -613,27 +619,36 @@ async fn perform_scan_and_upload(
 
 // Scan for DMI tables in a few locations
 async fn read_dmi() -> Result<HardwareInfo> {
-    debug!("trying to read SMBIOS at {SMBIOS_SYSFS}");
-    match tokio::fs::read(SMBIOS_SYSFS).await {
-        Ok(data) => return parse_dmi(&data),
-        Err(e) => {
-            debug!("failed to read DMI at SMBIOS location: {e}.");
-        }
-    };
+    debug!("trying to read SMBIOS from sysfs");
 
-    match tokio::fs::read(DMI_SYSFS).await {
-        Ok(data) => return parse_dmi(&data),
-        Err(e) => {
-            debug!("failed to read DMI at DMI location: {e}.");
+    // Try reading from sysfs (Linux standard location)
+    // The entry point and structures are in separate files
+    match (
+        tokio::fs::read(SMBIOS_SYSFS).await,
+        tokio::fs::read(DMI_SYSFS).await,
+    ) {
+        (Ok(entry_point_data), Ok(structures_data)) => {
+            debug!(
+                "Read {} bytes from entry point, {} bytes from DMI structures",
+                entry_point_data.len(),
+                structures_data.len()
+            );
+            return parse_dmi_sysfs(&entry_point_data, &structures_data);
         }
-    };
+        (Err(e1), _) => {
+            debug!("failed to read SMBIOS entry point at {SMBIOS_SYSFS}: {e1}");
+        }
+        (_, Err(e2)) => {
+            debug!("failed to read DMI structures at {DMI_SYSFS}: {e2}");
+        }
+    }
 
-    Err(anyhow!("failed to read DMI data"))
+    Err(anyhow!("failed to read DMI data from sysfs"))
 }
 
-// parse dmi tables for relevant information
-fn parse_dmi(bytes: &[u8]) -> Result<HardwareInfo> {
-    let entry_point = dmidecode::EntryPoint::search(bytes)?;
+// Parse DMI tables from sysfs (separate entry point and structures files)
+fn parse_dmi_sysfs(entry_point_data: &[u8], structures_data: &[u8]) -> Result<HardwareInfo> {
+    let entry_point = dmidecode::EntryPoint::search(entry_point_data)?;
 
     info!(
         "Reading SMBIOS version {}.{}.{}",
@@ -644,7 +659,8 @@ fn parse_dmi(bytes: &[u8]) -> Result<HardwareInfo> {
 
     let mut hardware_info = HardwareInfo::default();
 
-    for table in entry_point.structures(&bytes[entry_point.smbios_address() as usize..]) {
+    // In sysfs, the structures data is already extracted, so we start at offset 0
+    for table in entry_point.structures(structures_data) {
         let decoded_table = match table {
             Ok(s) => s,
             Err(e) => {
@@ -1245,6 +1261,67 @@ mod tests {
         assert!(!deserialized.is_primary);
     }
 
+    // Tests for BMC configuration
+
+    /// Test BmcConfiguration with static IP configuration
+    #[test]
+    fn test_bmc_configuration_static() {
+        let config = BmcConfiguration {
+            ip_address_source: "static".to_string(),
+            ip_address: Some("192.168.1.100".to_string()),
+            netmask: Some("255.255.255.0".to_string()),
+            gateway: Some("192.168.1.1".to_string()),
+            username: Some("admin".to_string()),
+            password: Some("secret".to_string()),
+        };
+
+        assert_eq!(config.ip_address_source, "static");
+        assert_eq!(config.ip_address, Some("192.168.1.100".to_string()));
+        assert_eq!(config.netmask, Some("255.255.255.0".to_string()));
+        assert_eq!(config.gateway, Some("192.168.1.1".to_string()));
+    }
+
+    /// Test BmcConfiguration with DHCP configuration
+    #[test]
+    fn test_bmc_configuration_dhcp() {
+        let config = BmcConfiguration {
+            ip_address_source: "dhcp".to_string(),
+            ip_address: None,
+            netmask: None,
+            gateway: None,
+            username: Some("admin".to_string()),
+            password: Some("secret".to_string()),
+        };
+
+        assert_eq!(config.ip_address_source, "dhcp");
+        assert_eq!(config.ip_address, None);
+        assert_eq!(config.netmask, None);
+        assert_eq!(config.gateway, None);
+    }
+
+    /// Test BmcConfiguration serialization
+    #[test]
+    fn test_bmc_configuration_serialization() {
+        let config = BmcConfiguration {
+            ip_address_source: "static".to_string(),
+            ip_address: Some("192.168.1.100".to_string()),
+            netmask: Some("255.255.255.0".to_string()),
+            gateway: Some("192.168.1.1".to_string()),
+            username: Some("admin".to_string()),
+            password: Some("secret".to_string()),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("static"));
+        assert!(json.contains("192.168.1.100"));
+        assert!(json.contains("255.255.255.0"));
+        assert!(json.contains("192.168.1.1"));
+
+        let deserialized: BmcConfiguration = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.ip_address_source, "static");
+        assert_eq!(deserialized.ip_address, Some("192.168.1.100".to_string()));
+    }
+
     // Tests for BMC detection
 
     /// Test parsing valid ipmitool output
@@ -1382,5 +1459,171 @@ MAC Address             : 0c:c4:7a:02:11:fe
 
         let deserialized: BmcInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.ip_address, None);
+    }
+
+    // Tests for DMI parsing
+
+    /// Helper function to calculate SMBIOS entry point checksum
+    /// The checksum byte makes the sum of all bytes equal to zero (mod 256)
+    fn calculate_smbios_checksum(data: &[u8], checksum_offset: usize) -> u8 {
+        let sum: u8 = data
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != checksum_offset)
+            .map(|(_, &b)| b)
+            .fold(0u8, |acc, b| acc.wrapping_add(b));
+        (0u8.wrapping_sub(sum)) & 0xFF
+    }
+
+    /// Test that parse_dmi_sysfs correctly handles separate entry point and structures data
+    /// This test verifies the fix for the "range start index out of range" bug
+    #[test]
+    fn test_parse_dmi_sysfs_separate_files() {
+        // This is a minimal SMBIOS 2.1 entry point structure (32 bytes)
+        // It contains metadata about the SMBIOS tables but NOT the actual table data
+        let mut entry_point_data: Vec<u8> = vec![
+            0x5f, 0x53, 0x4d, 0x5f, // "_SM_" anchor string
+            0x00, // Checksum (will be calculated)
+            0x1f, // Entry point length (31 bytes)
+            0x02, // SMBIOS major version (2)
+            0x01, // SMBIOS minor version (1)
+            0x00, 0x04, // Maximum structure size (1024 bytes)
+            0x00, // Entry point revision
+            0x00, 0x00, 0x00, 0x00, 0x00, // Formatted area
+            0x5f, 0x44, 0x4d, 0x49, 0x5f, // "_DMI_" intermediate anchor
+            0x00, // Intermediate checksum (will be calculated)
+            0x60, 0x00, // Structure table length (96 bytes)
+            0x00, 0xe0, 0x6f, 0x8f, // Structure table address (0x8F6FE000 - physical memory)
+            0x02, 0x00, // Number of structures (2)
+            0x21, // SMBIOS BCD revision (2.1)
+        ];
+
+        // Calculate and set the intermediate checksum (bytes 16-30)
+        let intermediate_checksum = calculate_smbios_checksum(&entry_point_data[16..31], 5);
+        entry_point_data[16 + 5] = intermediate_checksum;
+
+        // Calculate and set the entry point checksum (bytes 0-30)
+        let entry_checksum = calculate_smbios_checksum(&entry_point_data[0..31], 4);
+        entry_point_data[4] = entry_checksum;
+
+        // This is the actual SMBIOS structures data (extracted from physical memory by kernel)
+        // In sysfs, this data is pre-extracted and ready to parse at offset 0
+        let structures_data: Vec<u8> = vec![
+            // Structure 1: BIOS Information (Type 0)
+            0x00, // Type 0 (BIOS)
+            0x18, // Length (24 bytes)
+            0x00, 0x00, // Handle 0x0000
+            0x01, // Vendor string index (1)
+            0x02, // BIOS version string index (2)
+            0x00, 0xe0, // BIOS starting segment
+            0x03, // Release date string index (3)
+            0x00, // BIOS ROM size
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BIOS characteristics
+            0x00, 0x00, // Extension bytes
+            0x00, // Major release
+            0x00, // Minor release
+            0x00, // EC firmware major
+            0x00, // EC firmware minor
+            // Strings section
+            b'T', b'e', b's', b't', b'V', b'e', b'n', b'd', b'o', b'r', 0x00, // "TestVendor"
+            b'1', b'.', b'0', 0x00, // "1.0"
+            b'2', b'0', b'2', b'4', 0x00, // "2024"
+            0x00, // Double null terminator
+            // Structure 2: System Information (Type 1)
+            0x01, // Type 1 (System)
+            0x1b, // Length (27 bytes)
+            0x01, 0x00, // Handle 0x0001
+            0x01, // Manufacturer string index (1)
+            0x02, // Product name string index (2)
+            0x03, // Version string index (3)
+            0x04, // Serial number string index (4)
+            // UUID (16 bytes) - valid UUID
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,
+            0xde, 0xf0, 0x06, // Wake-up type
+            0x00, // SKU number
+            0x00, // Family
+            // Strings section
+            b'T', b'e', b's', b't', b'M', b'f', b'g', 0x00, // "TestMfg"
+            b'T', b'e', b's', b't', b'P', b'r', b'o', b'd', 0x00, // "TestProd"
+            b'v', b'1', 0x00, // "v1"
+            b'S', b'N', b'1', b'2', b'3', 0x00, // "SN123"
+            0x00, // Double null terminator
+        ];
+
+        // This should NOT panic with "range start index out of range"
+        let result = parse_dmi_sysfs(&entry_point_data, &structures_data);
+
+        // Verify it parsed successfully
+        match &result {
+            Ok(_) => (),
+            Err(e) => panic!("parse_dmi_sysfs failed: {:?}", e),
+        }
+
+        let hardware_info = result.unwrap();
+
+        // Verify we got the expected data
+        assert_eq!(
+            hardware_info.bios_vendor,
+            Some("TestVendor".to_string()),
+            "Should extract BIOS vendor"
+        );
+        assert_eq!(
+            hardware_info.manufacturer,
+            Some("TestMfg".to_string()),
+            "Should extract system manufacturer"
+        );
+        assert!(hardware_info.uuid.is_some(), "Should extract system UUID");
+    }
+
+    /// Test that parse_dmi_sysfs handles empty structures data
+    #[test]
+    fn test_parse_dmi_sysfs_empty_structures() {
+        let mut entry_point_data: Vec<u8> = vec![
+            0x5f, 0x53, 0x4d, 0x5f, // "_SM_" anchor string
+            0x00, // Checksum (will be calculated)
+            0x1f, // Entry point length
+            0x02, // SMBIOS major version
+            0x01, // SMBIOS minor version
+            0x00, 0x04, // Maximum structure size
+            0x00, // Entry point revision
+            0x00, 0x00, 0x00, 0x00, 0x00, // Formatted area
+            0x5f, 0x44, 0x4d, 0x49, 0x5f, // "_DMI_" intermediate anchor
+            0x00, // Intermediate checksum (will be calculated)
+            0x00, 0x00, // Structure table length (0 bytes)
+            0x00, 0xe0, 0x6f, 0x8f, // Structure table address
+            0x00, 0x00, // Number of structures (0)
+            0x21, // SMBIOS BCD revision
+        ];
+
+        // Calculate and set the intermediate checksum (bytes 16-30)
+        let intermediate_checksum = calculate_smbios_checksum(&entry_point_data[16..31], 5);
+        entry_point_data[16 + 5] = intermediate_checksum;
+
+        // Calculate and set the entry point checksum (bytes 0-30)
+        let entry_checksum = calculate_smbios_checksum(&entry_point_data[0..31], 4);
+        entry_point_data[4] = entry_checksum;
+
+        let structures_data: Vec<u8> = vec![];
+
+        let result = parse_dmi_sysfs(&entry_point_data, &structures_data);
+
+        // Should succeed but return empty hardware info
+        assert!(result.is_ok(), "Should handle empty structures gracefully");
+
+        let hardware_info = result.unwrap();
+        assert_eq!(hardware_info.processors.len(), 0);
+        assert_eq!(hardware_info.memory_devices.len(), 0);
+    }
+
+    /// Test that parse_dmi_sysfs rejects invalid entry point data
+    #[test]
+    fn test_parse_dmi_sysfs_invalid_entry_point() {
+        let invalid_entry_point: Vec<u8> = vec![0x00, 0x00, 0x00, 0x00];
+        let structures_data: Vec<u8> = vec![0x00];
+
+        let result = parse_dmi_sysfs(&invalid_entry_point, &structures_data);
+
+        // Should fail to parse invalid entry point
+        assert!(result.is_err(), "Should reject invalid entry point data");
     }
 }

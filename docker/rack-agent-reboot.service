@@ -1,0 +1,10 @@
+[Unit]
+Description=Reboot after Rack Agent completes
+After=rack-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --force reboot
+
+[Install]
+WantedBy=rack-agent.target
