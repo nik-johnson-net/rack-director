@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::{director::BootTarget, director::NetworkInterface, http::AppState};
+use common::device_attributes::BmcConfig;
 
 use crate::http::error::Error;
 
@@ -273,24 +274,6 @@ struct ActionFailedQuery {
     error_message: String,
 }
 
-fn default_ip_source() -> String {
-    "static".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BmcConfig {
-    #[serde(default = "default_ip_source")]
-    pub ip_address_source: String, // "static" or "dhcp"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ip_address: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub netmask: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-}
-
 #[axum::debug_handler]
 async fn action_success(
     State(state): State<Arc<AppState>>,
@@ -348,15 +331,9 @@ async fn get_bmc_config(
     };
 
     // Extract BMC config from device attributes
-    let bmc_config_value = device.attributes.get("bmc_config").ok_or_else(|| {
+    let bmc_config = device.attributes.bmc_config.ok_or_else(|| {
         warn!("Device {} has no BMC configuration", uuid);
         StatusCode::NOT_FOUND
-    })?;
-
-    // Deserialize BMC config
-    let bmc_config: BmcConfig = serde_json::from_value(bmc_config_value.clone()).map_err(|e| {
-        warn!("Failed to parse BMC config for device {}: {}", uuid, e);
-        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     // Validate configuration based on ip_address_source
@@ -827,8 +804,8 @@ mod tests {
         // Verify attributes were updated
         let device = state.director.get_device(&test_uuid).await.unwrap();
         assert_eq!(
-            device.attributes.get("manufacturer").unwrap().as_str(),
-            Some("Dell Inc.")
+            device.attributes.manufacturer.as_ref().unwrap(),
+            "Dell Inc."
         );
 
         // Simulate agent reporting success for first action (discover_hardware)

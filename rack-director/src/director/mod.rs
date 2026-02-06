@@ -13,8 +13,8 @@ use crate::storage::ImageStore;
 
 mod store;
 
+pub use common::device_attributes::NetworkInterface;
 pub use store::Device;
-pub use store::NetworkInterface;
 pub use store::PendingDevice;
 
 #[derive(Debug)]
@@ -436,7 +436,6 @@ impl Director {
 mod tests {
     use super::*;
     use crate::{database, plans::PlanStatus, storage::MemoryImageStore};
-    use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -525,10 +524,8 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].uuid, test_uuid1);
         assert_eq!(
-            devices[0].attributes,
-            *json!({"hostname": "node-446655440001"})
-                .as_object()
-                .unwrap()
+            devices[0].attributes.hostname.as_ref().unwrap(),
+            "node-446655440001"
         );
 
         // Register another device with attributes
@@ -554,14 +551,8 @@ mod tests {
 
         // Find the device with attributes
         let device_with_attrs = devices.iter().find(|d| d.uuid == test_uuid2).unwrap();
-        assert!(!device_with_attrs.attributes.is_empty());
         assert_eq!(
-            device_with_attrs
-                .attributes
-                .get("hostname")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device_with_attrs.attributes.hostname.as_ref().unwrap(),
             "test-server"
         );
     }

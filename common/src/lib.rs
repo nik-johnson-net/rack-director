@@ -1,4 +1,5 @@
 mod subnet;
+pub mod device_attributes;
 
 pub use subnet::Ipv4Subnet;
 pub use subnet::Ipv4SubnetError;

@@ -133,30 +133,22 @@ async fn get_all_devices(
         .into_iter()
         .map(|device| {
             // Extract all network info from device attributes
-            let hostname = device
-                .attributes
-                .get("hostname")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let hostname = device.attributes.hostname.clone();
+            let mac_address = device.attributes.mac_address.clone();
+            let ip_address = device.attributes.static_ip.clone();
 
-            let mac_address = device
-                .attributes
-                .get("mac_address")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let ip_address = device
-                .attributes
-                .get("ip_address")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            // Serialize DeviceAttributes to JSON map for API response
+            let attributes_json = serde_json::to_value(&device.attributes)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
 
             DeviceResponse {
                 uuid: device.uuid.to_string(),
                 architecture: device.architecture,
                 lifecycle: device.lifecycle,
                 role_id: device.role_id,
-                attributes: device.attributes,
+                attributes: attributes_json,
                 created_at: device.created_at,
                 first_seen_at: device.first_seen_at,
                 last_seen_at: device.last_seen_at,
@@ -183,30 +175,22 @@ async fn get_device_by_uuid(
     };
 
     // Extract all info from device attributes
-    let hostname = device
-        .attributes
-        .get("hostname")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let hostname = device.attributes.hostname.clone();
+    let mac_address = device.attributes.mac_address.clone();
+    let ip_address = device.attributes.static_ip.clone();
 
-    let mac_address = device
-        .attributes
-        .get("mac_address")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let ip_address = device
-        .attributes
-        .get("ip_address")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // Serialize DeviceAttributes to JSON map for API response
+    let attributes_json = serde_json::to_value(&device.attributes)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
 
     Ok(Json(DeviceResponse {
         uuid: device.uuid.to_string(),
         architecture: device.architecture,
         lifecycle: device.lifecycle,
         role_id: device.role_id,
-        attributes: device.attributes,
+        attributes: attributes_json,
         created_at: device.created_at,
         first_seen_at: device.first_seen_at,
         last_seen_at: device.last_seen_at,

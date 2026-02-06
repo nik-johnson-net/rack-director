@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::database::FromRow;
 use crate::lifecycle::DeviceLifecycle;
 use crate::operating_systems::Architecture;
+use common::device_attributes::{DeviceAttributes, NetworkInterface};
 
 #[derive(Debug, Clone)]
 pub struct Device {
@@ -16,7 +17,7 @@ pub struct Device {
     pub architecture: Architecture,
     pub lifecycle: Option<DeviceLifecycle>,
     pub role_id: Option<i64>,
-    pub attributes: serde_json::Map<String, serde_json::Value>,
+    pub attributes: DeviceAttributes,
     pub created_at: Option<String>,
     pub first_seen_at: Option<String>,
     pub last_seen_at: Option<String>,
@@ -38,10 +39,10 @@ impl FromRow for Device {
 
         let attributes = match attributes_json {
             Some(json_str) => {
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
-                    .unwrap_or_else(|_| serde_json::Map::new())
+                serde_json::from_str::<DeviceAttributes>(&json_str)
+                    .unwrap_or_default()
             }
-            None => serde_json::Map::new(),
+            None => DeviceAttributes::default(),
         };
 
         let architecture =
@@ -59,23 +60,6 @@ impl FromRow for Device {
             last_seen_at,
         })
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkInterface {
-    pub interface_name: String,
-    pub mac_address: String,
-    pub ip_address: Option<String>,
-    pub is_primary: bool,
-    /// Network ID this interface is on (if it has an IP)
-    #[serde(default)]
-    pub network_id: Option<i64>,
-    /// Whether this interface is disabled (e.g., due to duplicate MAC)
-    #[serde(default)]
-    pub disabled: bool,
-    /// Warning message explaining why interface is disabled
-    #[serde(default)]
-    pub warning_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,18 +134,24 @@ impl DirectorStore {
     ) -> Result<()> {
         // Get existing attributes
         let device = self.get_device(uuid).await?;
-        let mut merged_attributes = device.attributes;
+
+        // Convert existing DeviceAttributes to JSON for merging
+        let mut existing_json = serde_json::to_value(&device.attributes)?;
+        let existing_map = existing_json.as_object_mut().unwrap();
 
         // Merge new attributes (new values overwrite existing keys)
         for (key, value) in attributes {
-            merged_attributes.insert(key, value);
+            existing_map.insert(key, value);
         }
+
+        // Deserialize back to DeviceAttributes to validate structure
+        let merged: DeviceAttributes = serde_json::from_value(existing_json)?;
 
         // Update with merged attributes
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
-            params![serde_json::to_string(&merged_attributes)?, uuid,],
+            params![serde_json::to_string(&merged)?, uuid,],
         )?;
 
         Ok(())
@@ -635,7 +625,7 @@ mod tests {
         // Verify
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device.attributes.get("hostname").unwrap().as_str().unwrap(),
+            device.attributes.hostname.as_ref().unwrap(),
             "test-hostname"
         );
     }
@@ -660,12 +650,7 @@ mod tests {
         // Verify
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device
-                .attributes
-                .get("mac_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.mac_address.as_ref().unwrap(),
             "aa:bb:cc:dd:ee:ff"
         );
     }
@@ -697,7 +682,7 @@ mod tests {
 
         // Verify legacy ip_address field is NOT set
         let device = store.get_device(&uuid).await.unwrap();
-        assert!(device.attributes.get("ip_address").is_none());
+        assert!(device.attributes.static_ip.is_none());
     }
 
     #[tokio::test]
@@ -718,7 +703,7 @@ mod tests {
         // Verify
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device.attributes.get("hostname").unwrap().as_str().unwrap(),
+            device.attributes.hostname.as_ref().unwrap(),
             "node-446655440022"
         );
     }
@@ -740,7 +725,7 @@ mod tests {
         // Verify initial state
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device.attributes.get("hostname").unwrap().as_str().unwrap(),
+            device.attributes.hostname.as_ref().unwrap(),
             "server-01"
         );
 
@@ -769,42 +754,24 @@ mod tests {
 
         // Original attribute should be preserved
         assert_eq!(
-            device.attributes.get("hostname").unwrap().as_str().unwrap(),
+            device.attributes.hostname.as_ref().unwrap(),
             "server-01",
             "hostname should be preserved after update_attributes"
         );
 
         // New attributes should be added
         assert_eq!(
-            device
-                .attributes
-                .get("manufacturer")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.manufacturer.as_ref().unwrap(),
             "Dell Inc."
         );
         assert_eq!(
-            device
-                .attributes
-                .get("product_name")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.product_name.as_ref().unwrap(),
             "PowerEdge R640"
         );
         assert_eq!(
-            device
-                .attributes
-                .get("serial_number")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.serial_number.as_ref().unwrap(),
             "ABC12345"
         );
-
-        // Total should be 4 attributes
-        assert_eq!(device.attributes.len(), 4);
     }
 
     #[tokio::test]
@@ -846,32 +813,20 @@ mod tests {
         let device = store.get_device(&uuid).await.unwrap();
 
         assert_eq!(
-            device.attributes.get("hostname").unwrap().as_str().unwrap(),
+            device.attributes.hostname.as_ref().unwrap(),
             "new-hostname",
             "hostname should be updated to new value"
         );
         assert_eq!(
-            device
-                .attributes
-                .get("manufacturer")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.manufacturer.as_ref().unwrap(),
             "Unknown",
             "manufacturer should be preserved"
         );
         assert_eq!(
-            device
-                .attributes
-                .get("product_name")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.product_name.as_ref().unwrap(),
             "PowerEdge",
             "product_name should be added"
         );
-
-        assert_eq!(device.attributes.len(), 3);
     }
 
     #[tokio::test]
@@ -895,10 +850,9 @@ mod tests {
         // Verify existing attributes are preserved
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device.attributes.get("hostname").unwrap().as_str().unwrap(),
+            device.attributes.hostname.as_ref().unwrap(),
             "test-host"
         );
-        assert_eq!(device.attributes.len(), 1);
     }
 
     // Tests for multi-NIC support
@@ -1217,12 +1171,7 @@ mod tests {
         // Verify legacy field is set
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device
-                .attributes
-                .get("mac_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.mac_address.as_ref().unwrap(),
             "aa:bb:cc:dd:ee:ff"
         );
 
@@ -1277,12 +1226,7 @@ mod tests {
         // Verify legacy field is updated
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device
-                .attributes
-                .get("mac_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.mac_address.as_ref().unwrap(),
             "11:22:33:44:55:66"
         );
 
@@ -1320,7 +1264,7 @@ mod tests {
 
         // Verify legacy field is NOT set
         let device = store.get_device(&uuid).await.unwrap();
-        assert!(device.attributes.get("ip_address").is_none());
+        assert!(device.attributes.static_ip.is_none());
     }
 
     #[tokio::test]
@@ -1380,7 +1324,7 @@ mod tests {
 
         // Verify legacy field is NOT set
         let device = store.get_device(&uuid).await.unwrap();
-        assert!(device.attributes.get("ip_address").is_none());
+        assert!(device.attributes.static_ip.is_none());
     }
 
     #[tokio::test]
@@ -1406,17 +1350,12 @@ mod tests {
         // Verify legacy mac_address field still works
         let device = store.get_device(&uuid).await.unwrap();
         assert_eq!(
-            device
-                .attributes
-                .get("mac_address")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            device.attributes.mac_address.as_ref().unwrap(),
             "aa:bb:cc:dd:ee:ff"
         );
 
         // New behavior: ip_address is stored in network_interfaces, not legacy field
-        assert!(device.attributes.get("ip_address").is_none());
+        assert!(device.attributes.static_ip.is_none());
 
         // Verify find_device_by_mac still works
         let found = store.find_device_by_mac("aa:bb:cc:dd:ee:ff").await.unwrap();
@@ -1460,9 +1399,9 @@ mod tests {
 
         // Verify BMC IP was updated
         let device = store.get_device(&uuid).await.unwrap();
-        let bmc = device.attributes.get("bmc").unwrap();
+        let bmc = device.attributes.bmc.as_ref().unwrap();
         assert_eq!(
-            bmc.get("ip_address").unwrap().as_str().unwrap(),
+            bmc.ip_address.as_ref().unwrap(),
             "10.0.1.50"
         );
 

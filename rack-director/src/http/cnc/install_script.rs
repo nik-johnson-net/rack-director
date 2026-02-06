@@ -82,11 +82,7 @@ pub async fn render_for_device(
     let network_info = get_device_network_info(state, device_uuid).await?;
 
     // Get device attributes
-    let hostname = device
-        .attributes
-        .get("hostname")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let hostname = device.attributes.hostname.clone();
 
     let device_info = templates::DeviceInfo {
         uuid: *device_uuid,
