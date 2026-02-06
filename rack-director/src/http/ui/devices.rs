@@ -17,6 +17,18 @@ use crate::{
     operating_systems::Architecture,
 };
 
+/// Sanitize device attributes for UI consumption
+///
+/// Removes sensitive fields like BMC passwords before returning to the UI.
+/// The UI should never see actual BMC passwords for security reasons.
+fn sanitize_attributes_for_ui(attributes: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(bmc_config) = attributes.get_mut("bmc_config")
+        && let Some(obj) = bmc_config.as_object_mut()
+    {
+        obj.remove("password");
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct StartTransitionRequest {
     to_state: String,
@@ -139,10 +151,13 @@ async fn get_all_devices(
             let ip_address = device.attributes.static_ip.clone();
 
             // Serialize DeviceAttributes to JSON map for API response
-            let attributes_json = serde_json::to_value(&device.attributes)
+            let mut attributes_json = serde_json::to_value(&device.attributes)
                 .ok()
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default();
+
+            // Sanitize sensitive fields before returning to UI
+            sanitize_attributes_for_ui(&mut attributes_json);
 
             DeviceResponse {
                 uuid: device.uuid.to_string(),
@@ -181,10 +196,13 @@ async fn get_device_by_uuid(
     let ip_address = device.attributes.static_ip.clone();
 
     // Serialize DeviceAttributes to JSON map for API response
-    let attributes_json = serde_json::to_value(&device.attributes)
+    let mut attributes_json = serde_json::to_value(&device.attributes)
         .ok()
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
+
+    // Sanitize sensitive fields before returning to UI
+    sanitize_attributes_for_ui(&mut attributes_json);
 
     Ok(Json(DeviceResponse {
         uuid: device.uuid.to_string(),
@@ -1165,6 +1183,203 @@ mod tests {
         assert_eq!(
             device.attributes.manufacturer,
             Some("Dell Inc.".to_string())
+        );
+    }
+
+    // ========== Password Sanitization Tests ==========
+
+    #[test]
+    fn test_sanitize_attributes_removes_password() {
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.1.100",
+                "username": "RACKDIRECTOR",
+                "password": "secret123"
+            }),
+        );
+
+        sanitize_attributes_for_ui(&mut attributes);
+
+        // Verify password is removed
+        let bmc_config = attributes.get("bmc_config").unwrap().as_object().unwrap();
+        assert!(bmc_config.get("password").is_none());
+
+        // Verify other fields remain
+        assert_eq!(
+            bmc_config.get("username").unwrap().as_str().unwrap(),
+            "RACKDIRECTOR"
+        );
+        assert_eq!(
+            bmc_config.get("ip_address").unwrap().as_str().unwrap(),
+            "10.0.1.100"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_attributes_no_bmc_config() {
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("test".to_string()),
+        );
+
+        sanitize_attributes_for_ui(&mut attributes);
+
+        // Should not panic, just leave attributes unchanged
+        assert_eq!(
+            attributes.get("hostname").unwrap().as_str().unwrap(),
+            "test"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_attributes_bmc_config_no_password() {
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "dhcp",
+                "username": "admin"
+            }),
+        );
+
+        sanitize_attributes_for_ui(&mut attributes);
+
+        // Should not panic even if no password field exists
+        let bmc_config = attributes.get("bmc_config").unwrap().as_object().unwrap();
+        assert_eq!(
+            bmc_config.get("username").unwrap().as_str().unwrap(),
+            "admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_device_sanitizes_password() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x50);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC config with password
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.1.100",
+                "username": "RACKDIRECTOR",
+                "password": "supersecret"
+            }),
+        );
+
+        state
+            .director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Get device via UI endpoint
+        let request = Request::builder()
+            .uri(format!("/ui/devices/{}", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Parse response
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let device_response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Verify password is not in response
+        let bmc_config = device_response
+            .get("attributes")
+            .unwrap()
+            .get("bmc_config")
+            .unwrap();
+        assert!(bmc_config.get("password").is_none());
+
+        // Verify username is still there
+        assert_eq!(
+            bmc_config.get("username").unwrap().as_str().unwrap(),
+            "RACKDIRECTOR"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_all_devices_sanitizes_passwords() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x51);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC config with password
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.1.100",
+                "username": "RACKDIRECTOR",
+                "password": "anothersecret"
+            }),
+        );
+
+        state
+            .director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Get all devices
+        let request = Request::builder()
+            .uri("/ui/devices")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Parse response
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let devices_response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Find our device
+        let devices = devices_response.get("devices").unwrap().as_array().unwrap();
+        let device = devices
+            .iter()
+            .find(|d| d.get("uuid").unwrap().as_str().unwrap() == test_uuid.to_string())
+            .unwrap();
+
+        // Verify password is not in response
+        let bmc_config = device.get("attributes").unwrap().get("bmc_config").unwrap();
+        assert!(bmc_config.get("password").is_none());
+
+        // Verify username is still there
+        assert_eq!(
+            bmc_config.get("username").unwrap().as_str().unwrap(),
+            "RACKDIRECTOR"
         );
     }
 }

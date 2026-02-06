@@ -254,10 +254,7 @@ mod tests {
         let deserialized: DeviceAttributes = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(deserialized.hostname, Some("test-server".to_string()));
-        assert_eq!(
-            deserialized.manufacturer,
-            Some("Dell Inc.".to_string())
-        );
+        assert_eq!(deserialized.manufacturer, Some("Dell Inc.".to_string()));
         assert_eq!(deserialized.network_interfaces.len(), 1);
         assert_eq!(
             deserialized.network_interfaces[0].mac_address,
@@ -303,7 +300,10 @@ mod tests {
             attrs.extra.get("custom_field_1").unwrap().as_str().unwrap(),
             "value1"
         );
-        assert_eq!(attrs.extra.get("custom_field_2").unwrap().as_u64().unwrap(), 42);
+        assert_eq!(
+            attrs.extra.get("custom_field_2").unwrap().as_u64().unwrap(),
+            42
+        );
         assert!(attrs.extra.get("nested_custom").unwrap().is_object());
     }
 

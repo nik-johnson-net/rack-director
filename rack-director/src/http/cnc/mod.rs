@@ -311,18 +311,38 @@ async fn action_failed(
     }
 }
 
+/// Generate a random 16-character password for BMC configuration
+///
+/// The password contains a mix of uppercase letters, lowercase letters,
+/// numbers, and special characters to meet typical BMC security requirements.
+fn generate_bmc_password() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
 /// Get BMC configuration for a device
 ///
 /// This endpoint returns the BMC configuration stored in the device's attributes.
 /// The configuration includes static IP settings and credentials that will be
 /// applied to the BMC by the rack-agent.
+///
+/// If no BMC configuration exists or if credentials are missing, they will be
+/// auto-generated with username "RACKDIRECTOR" and a random 16-character password.
 #[axum::debug_handler]
 async fn get_bmc_config(
     State(state): State<Arc<AppState>>,
     extract::Path(uuid): extract::Path<Uuid>,
 ) -> Result<extract::Json<BmcConfig>, StatusCode> {
     // Get device
-    let device = match state.director.get_device(&uuid).await {
+    let mut device = match state.director.get_device(&uuid).await {
         Ok(device) => device,
         Err(e) => {
             warn!("Failed to get device {}: {}", uuid, e);
@@ -330,11 +350,55 @@ async fn get_bmc_config(
         }
     };
 
-    // Extract BMC config from device attributes
-    let bmc_config = device.attributes.bmc_config.ok_or_else(|| {
-        warn!("Device {} has no BMC configuration", uuid);
-        StatusCode::NOT_FOUND
-    })?;
+    // Extract or auto-generate BMC config
+    let mut bmc_config = device.attributes.bmc_config.clone().unwrap_or_else(|| {
+        log::info!("No BMC config for device {}, creating default config", uuid);
+        BmcConfig {
+            ip_address_source: "dhcp".to_string(),
+            ip_address: None,
+            netmask: None,
+            gateway: None,
+            username: None,
+            password: None,
+        }
+    });
+
+    // Auto-generate credentials if missing
+    let mut needs_update = false;
+    if bmc_config.username.is_none() {
+        log::info!("Auto-generating BMC username for device {}", uuid);
+        bmc_config.username = Some("RACKDIRECTOR".to_string());
+        needs_update = true;
+    }
+    if bmc_config.password.is_none() {
+        log::info!("Auto-generating BMC password for device {}", uuid);
+        bmc_config.password = Some(generate_bmc_password());
+        needs_update = true;
+    }
+
+    // Save updated config back to device attributes if we generated credentials
+    if needs_update {
+        log::info!("Saving auto-generated BMC credentials for device {}", uuid);
+        device.attributes.bmc_config = Some(bmc_config.clone());
+
+        // Serialize DeviceAttributes to JSON map
+        let attributes_json = match serde_json::to_value(&device.attributes) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => {
+                warn!("Failed to serialize device attributes for {}", uuid);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+        if let Err(e) = state
+            .director
+            .update_attributes(&uuid, attributes_json)
+            .await
+        {
+            warn!("Failed to save BMC config for device {}: {}", uuid, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
 
     // Validate configuration based on ip_address_source
     if bmc_config.ip_address_source == "static" {
@@ -916,5 +980,204 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ========== BMC Password Generation Tests ==========
+
+    #[test]
+    fn test_generate_bmc_password_length() {
+        let password = generate_bmc_password();
+        assert_eq!(password.len(), 16);
+    }
+
+    #[test]
+    fn test_generate_bmc_password_charset() {
+        let password = generate_bmc_password();
+        const CHARSET: &str =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+
+        // All characters should be from the allowed charset
+        for ch in password.chars() {
+            assert!(
+                CHARSET.contains(ch),
+                "Password contains invalid character: {}",
+                ch
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_bmc_password_randomness() {
+        // Generate multiple passwords and verify they're different
+        let password1 = generate_bmc_password();
+        let password2 = generate_bmc_password();
+        let password3 = generate_bmc_password();
+
+        // It's extremely unlikely (but technically possible) for these to be equal
+        assert_ne!(password1, password2);
+        assert_ne!(password2, password3);
+        assert_ne!(password1, password3);
+    }
+
+    #[tokio::test]
+    async fn test_get_bmc_config_auto_generates_credentials() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x60);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC config without credentials
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "dhcp"
+            }),
+        );
+
+        state
+            .director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Get BMC config via CNC endpoint
+        let request = Request::builder()
+            .uri(format!("/cnc/devices/{}/bmc_config", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Parse response
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bmc_config: common::device_attributes::BmcConfig =
+            serde_json::from_slice(&body).unwrap();
+
+        // Verify credentials were auto-generated
+        assert_eq!(bmc_config.username, Some("RACKDIRECTOR".to_string()));
+        assert!(bmc_config.password.is_some());
+        assert_eq!(bmc_config.password.unwrap().len(), 16);
+
+        // Verify credentials were saved to device
+        let device = state.director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(
+            device.attributes.bmc_config.as_ref().unwrap().username,
+            Some("RACKDIRECTOR".to_string())
+        );
+        assert!(
+            device
+                .attributes
+                .bmc_config
+                .as_ref()
+                .unwrap()
+                .password
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_bmc_config_preserves_existing_credentials() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x61);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC config with existing credentials
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.1.100",
+                "netmask": "255.255.255.0",
+                "gateway": "10.0.1.1",
+                "username": "existing_user",
+                "password": "existing_pass"
+            }),
+        );
+
+        state
+            .director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Get BMC config via CNC endpoint
+        let request = Request::builder()
+            .uri(format!("/cnc/devices/{}/bmc_config", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Parse response
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bmc_config: common::device_attributes::BmcConfig =
+            serde_json::from_slice(&body).unwrap();
+
+        // Verify existing credentials were preserved
+        assert_eq!(bmc_config.username, Some("existing_user".to_string()));
+        assert_eq!(bmc_config.password, Some("existing_pass".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_bmc_config_creates_config_if_missing() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x62);
+
+        // Register device without BMC config
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Get BMC config via CNC endpoint
+        let request = Request::builder()
+            .uri(format!("/cnc/devices/{}/bmc_config", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Parse response
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bmc_config: common::device_attributes::BmcConfig =
+            serde_json::from_slice(&body).unwrap();
+
+        // Verify config was created with auto-generated credentials
+        assert_eq!(bmc_config.ip_address_source, "dhcp");
+        assert_eq!(bmc_config.username, Some("RACKDIRECTOR".to_string()));
+        assert!(bmc_config.password.is_some());
+
+        // Verify config was saved to device
+        let device = state.director.get_device(&test_uuid).await.unwrap();
+        assert!(device.attributes.bmc_config.is_some());
     }
 }

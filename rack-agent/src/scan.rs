@@ -276,7 +276,7 @@ fn parse_ipmitool_output(output: &str) -> Option<BmcInfo> {
 /// This function configures the BMC by running ipmitool commands to set:
 /// - IP address source (static or dhcp)
 /// - For static: IP address, netmask, and default gateway
-/// - Admin password (user ID 2)
+/// - IPMI user with specified username and password (with admin privileges)
 ///
 /// Returns an error if ipmitool is not available or if configuration fails.
 pub async fn configure_bmc(config: &BmcConfiguration, channel: u8) -> Result<()> {
@@ -343,11 +343,13 @@ pub async fn configure_bmc(config: &BmcConfiguration, channel: u8) -> Result<()>
         info!("BMC will obtain IP automatically via DHCP");
     }
 
-    // Set admin password if provided (works for both static and DHCP)
-    if let Some(password) = &config.password {
-        // User ID 2 is typically the ADMIN user
-        run_ipmitool_command(channel, &["user", "set", "password", "2", password]).await?;
-        info!("BMC admin password updated");
+    // Configure IPMI user if username and password are provided
+    if let (Some(username), Some(password)) = (&config.username, &config.password) {
+        info!("Configuring IPMI user: {}", username);
+        configure_ipmi_user(channel, username, password).await?;
+        info!("IPMI user configuration completed");
+    } else {
+        info!("No username/password provided, skipping IPMI user configuration");
     }
 
     info!("BMC configuration completed successfully");
@@ -373,6 +375,183 @@ async fn run_ipmitool_command(channel: u8, args: &[&str]) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// User slot information from ipmitool user list
+#[derive(Debug, Clone)]
+struct IpmiUserSlot {
+    slot: u8,
+    name: String,
+}
+
+/// Parse ipmitool user list output to find user slots
+///
+/// Example output:
+/// ```
+/// ID  Name             Callin  Link Auth  IPMI Msg   Channel Priv Limit
+/// 1                    true    false      false      Unknown (0x00)
+/// 2   admin            true    false      true       ADMINISTRATOR
+/// 3                    true    false      false      Unknown (0x00)
+/// ```
+fn parse_user_list(output: &str) -> Vec<IpmiUserSlot> {
+    let mut slots = Vec::new();
+
+    for line in output.lines().skip(1) {
+        // Skip header line
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        // First column is the slot ID
+        if let Ok(slot) = parts[0].parse::<u8>() {
+            // Second column is the username (may be empty)
+            // If it's "true" or "false", the name column is empty
+            let name = if parts.len() > 1 && parts[1] != "true" && parts[1] != "false" {
+                parts[1].to_string()
+            } else {
+                String::new()
+            };
+
+            slots.push(IpmiUserSlot { slot, name });
+        }
+    }
+
+    slots
+}
+
+/// Find an empty IPMI user slot, or return slot 10 as fallback
+async fn find_empty_user_slot(channel: u8) -> Result<u8> {
+    info!("Searching for empty IPMI user slot on channel {}", channel);
+
+    let output = tokio::process::Command::new("ipmitool")
+        .args(["user", "list", &channel.to_string()])
+        .output()
+        .await
+        .map_err(|e| anyhow!("Failed to execute ipmitool user list: {}", e))?;
+
+    if !output.status.success() {
+        warn!("ipmitool user list failed, using fallback slot 10");
+        return Ok(10);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let slots = parse_user_list(&stdout);
+
+    // Look for empty slot (name is empty)
+    for slot_info in &slots {
+        if slot_info.name.is_empty() {
+            info!("Found empty user slot: {}", slot_info.slot);
+            return Ok(slot_info.slot);
+        }
+    }
+
+    // No empty slot found, use slot 10 as fallback
+    info!("No empty slots found, using fallback slot 10");
+    Ok(10)
+}
+
+/// Check if a user with given name already exists
+///
+/// Returns the slot number if found, None otherwise
+async fn find_existing_user(channel: u8, username: &str) -> Result<Option<u8>> {
+    debug!(
+        "Checking for existing user '{}' on channel {}",
+        username, channel
+    );
+
+    let output = tokio::process::Command::new("ipmitool")
+        .args(["user", "list", &channel.to_string()])
+        .output()
+        .await
+        .map_err(|e| anyhow!("Failed to execute ipmitool user list: {}", e))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let slots = parse_user_list(&stdout);
+
+    for slot_info in slots {
+        if slot_info.name == username {
+            info!(
+                "Found existing user '{}' in slot {}",
+                username, slot_info.slot
+            );
+            return Ok(Some(slot_info.slot));
+        }
+    }
+
+    debug!("User '{}' not found", username);
+    Ok(None)
+}
+
+/// Create or update IPMI user with credentials and admin privileges
+async fn configure_ipmi_user(channel: u8, username: &str, password: &str) -> Result<()> {
+    info!("Configuring IPMI user '{}'", username);
+
+    // Check if user already exists
+    let slot = match find_existing_user(channel, username).await? {
+        Some(existing_slot) => {
+            info!("Updating existing user in slot {}", existing_slot);
+            existing_slot
+        }
+        None => {
+            // Find empty slot
+            let empty_slot = find_empty_user_slot(channel).await?;
+            info!("Creating new user in slot {}", empty_slot);
+
+            // Set username
+            run_ipmitool_command(
+                channel,
+                &["user", "set", "name", &empty_slot.to_string(), username],
+            )
+            .await?;
+
+            empty_slot
+        }
+    };
+
+    // Set password
+    info!("Setting password for user in slot {}", slot);
+    run_ipmitool_command(
+        channel,
+        &["user", "set", "password", &slot.to_string(), password],
+    )
+    .await?;
+
+    // Enable the user
+    info!("Enabling user in slot {}", slot);
+    run_ipmitool_command(channel, &["user", "enable", &slot.to_string()]).await?;
+
+    // Set admin privileges (privilege level 4)
+    info!("Setting admin privileges for slot {}", slot);
+    run_ipmitool_command(
+        channel,
+        &["user", "priv", &slot.to_string(), "4", &channel.to_string()],
+    )
+    .await?;
+
+    // Set channel access
+    info!("Setting channel access for slot {}", slot);
+    run_ipmitool_command(
+        channel,
+        &[
+            "channel",
+            "setaccess",
+            &channel.to_string(),
+            &slot.to_string(),
+            "callin=on",
+            "ipmi=on",
+            "link=on",
+            "privilege=4",
+        ],
+    )
+    .await?;
+
+    info!("Successfully configured IPMI user '{}'", username);
     Ok(())
 }
 
@@ -1625,5 +1804,70 @@ MAC Address             : 0c:c4:7a:02:11:fe
 
         // Should fail to parse invalid entry point
         assert!(result.is_err(), "Should reject invalid entry point data");
+    }
+
+    // Tests for IPMI user management
+
+    /// Test parsing ipmitool user list output
+    #[test]
+    fn test_parse_user_list_valid() {
+        let output = r#"ID  Name             Callin  Link Auth  IPMI Msg   Channel Priv Limit
+1                    true    false      false      Unknown (0x00)
+2   admin            true    false      true       ADMINISTRATOR
+3                    true    false      false      Unknown (0x00)
+4   RACKDIRECTOR     true    false      true       ADMINISTRATOR
+10                   true    false      false      Unknown (0x00)"#;
+
+        let slots = parse_user_list(output);
+
+        assert_eq!(slots.len(), 5);
+        assert_eq!(slots[0].slot, 1);
+        assert_eq!(slots[0].name, "");
+        assert_eq!(slots[1].slot, 2);
+        assert_eq!(slots[1].name, "admin");
+        assert_eq!(slots[3].slot, 4);
+        assert_eq!(slots[3].name, "RACKDIRECTOR");
+        assert_eq!(slots[4].slot, 10);
+        assert_eq!(slots[4].name, "");
+    }
+
+    /// Test parsing empty user list
+    #[test]
+    fn test_parse_user_list_empty() {
+        let output = "ID  Name             Callin  Link Auth  IPMI Msg   Channel Priv Limit\n";
+        let slots = parse_user_list(output);
+        assert_eq!(slots.len(), 0);
+    }
+
+    /// Test parsing malformed user list (graceful handling)
+    #[test]
+    fn test_parse_user_list_malformed() {
+        let output = r#"ID  Name
+invalid line
+not a number  username
+3   testuser"#;
+
+        let slots = parse_user_list(output);
+
+        // Should only parse valid lines
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].slot, 3);
+        assert_eq!(slots[0].name, "testuser");
+    }
+
+    /// Test parsing user list with extra whitespace
+    #[test]
+    fn test_parse_user_list_whitespace() {
+        let output = r#"ID  Name             Callin  Link Auth  IPMI Msg   Channel Priv Limit
+1                    true    false      false      Unknown (0x00)
+2   admin            true    false      true       ADMINISTRATOR"#;
+
+        let slots = parse_user_list(output);
+
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].slot, 1);
+        assert_eq!(slots[0].name, "");
+        assert_eq!(slots[1].slot, 2);
+        assert_eq!(slots[1].name, "admin");
     }
 }
