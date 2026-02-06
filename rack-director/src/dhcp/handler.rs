@@ -203,11 +203,19 @@ impl DhcpHandler {
         let req_ctx = RequestContext::from_message(msg);
 
         info!(
-            "DHCP DISCOVER from MAC {} on network '{}'",
-            req_ctx.mac, network.name
+            "DHCP DISCOVER from MAC {} on network '{}'{}",
+            req_ctx.mac,
+            network.name,
+            req_ctx
+                .guid
+                .map(|g| format!(" (GUID: {})", g))
+                .unwrap_or_default()
         );
 
-        let dev_ctx = self.device_resolver.resolve(&req_ctx.mac).await?;
+        let dev_ctx = self
+            .device_resolver
+            .resolve(&req_ctx.mac, req_ctx.guid.as_ref())
+            .await?;
 
         if dev_ctx.is_disabled {
             warn!(
@@ -270,11 +278,19 @@ impl DhcpHandler {
         let req_ctx = RequestContext::from_message(msg);
 
         info!(
-            "DHCP REQUEST from MAC {} on network '{}'",
-            req_ctx.mac, network.name
+            "DHCP REQUEST from MAC {} on network '{}'{}",
+            req_ctx.mac,
+            network.name,
+            req_ctx
+                .guid
+                .map(|g| format!(" (GUID: {})", g))
+                .unwrap_or_default()
         );
 
-        let dev_ctx = self.device_resolver.resolve(&req_ctx.mac).await?;
+        let dev_ctx = self
+            .device_resolver
+            .resolve(&req_ctx.mac, req_ctx.guid.as_ref())
+            .await?;
 
         if dev_ctx.is_disabled {
             warn!(

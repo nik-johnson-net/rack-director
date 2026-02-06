@@ -1,5 +1,6 @@
 use dhcproto::v4::{Architecture, DhcpOption, Message, MessageType, OptionCode};
 use std::net::Ipv4Addr;
+use uuid::Uuid;
 
 use super::store::format_mac;
 
@@ -15,6 +16,7 @@ pub struct RequestContext {
     pub requested_bootfile: bool,
     pub requested_bootfile_size: bool,
     pub ciaddr: Ipv4Addr,
+    pub guid: Option<Uuid>,
 }
 
 impl RequestContext {
@@ -44,6 +46,8 @@ impl RequestContext {
             }
         }
 
+        let guid = extract_guid(msg);
+
         Self {
             mac,
             message_type,
@@ -54,6 +58,175 @@ impl RequestContext {
             requested_bootfile: has_bootfile_name,
             requested_bootfile_size: has_bootfile_size,
             ciaddr: msg.ciaddr(),
+            guid,
         }
+    }
+}
+
+/// Extract GUID from DHCP Option 97 (Client Machine Identifier).
+///
+/// Per RFC 4578, Option 97 contains:
+/// - 1 byte type field (0 = GUID/UUID)
+/// - 16 bytes UUID data
+///
+/// SMBIOS UUIDs use mixed-endian byte order:
+/// - First 3 groups (time_low, time_mid, time_hi_and_version): little-endian
+/// - Last 2 groups (clock_seq, node): big-endian
+///
+/// We use `Uuid::from_bytes_le()` which handles this correctly.
+fn extract_guid(msg: &Message) -> Option<Uuid> {
+    // DHCP Option 97 - Client Machine Identifier
+    // dhcproto may expose this as Unknown(97) with raw bytes
+    for (code, opt) in msg.opts().iter() {
+        if code == &OptionCode::Unknown(97)
+            && let DhcpOption::Unknown(unknown_opt) = opt {
+                // UnknownOption has a data() method that returns &[u8]
+                let data = unknown_opt.data();
+                // First byte is type (0 = GUID), remaining 16 bytes are UUID
+                if data.len() == 17 && data[0] == 0
+                    && let Ok(uuid_bytes) = data[1..17].try_into() {
+                        return Some(Uuid::from_bytes_le(uuid_bytes));
+                    }
+            }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dhcproto::v4::Opcode;
+
+    #[test]
+    fn test_extract_guid_with_valid_option() {
+        use dhcproto::v4::UnknownOption;
+
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+
+        // Create Option 97 with type 0 and a valid UUID
+        // UUID format: 550e8400-e29b-41d4-a716-446655440000
+        // In little-endian bytes for first 3 groups
+        let mut option_data = vec![0u8]; // Type byte = 0
+        option_data.extend_from_slice(&[
+            0x00, 0x84, 0x0e, 0x55, // time_low (little-endian)
+            0x9b, 0xe2, // time_mid (little-endian)
+            0xd4, 0x41, // time_hi_and_version (little-endian)
+            0xa7, 0x16, // clock_seq (big-endian)
+            0x44, 0x66, 0x55, 0x44, 0x00, 0x00, // node (big-endian)
+        ]);
+
+        msg.opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::Unknown(97),
+                option_data.clone(),
+            )));
+
+        let guid = extract_guid(&msg);
+        assert!(guid.is_some(), "GUID should be extracted from valid option");
+
+        let expected = Uuid::from_bytes_le([
+            0x00, 0x84, 0x0e, 0x55, 0x9b, 0xe2, 0xd4, 0x41, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ]);
+        assert_eq!(guid.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_extract_guid_missing_option() {
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+
+        let guid = extract_guid(&msg);
+        assert!(guid.is_none(), "GUID should be None when option is missing");
+    }
+
+    #[test]
+    fn test_extract_guid_wrong_type_byte() {
+        use dhcproto::v4::UnknownOption;
+
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+
+        // Create Option 97 with wrong type byte (1 instead of 0)
+        let mut option_data = vec![1u8]; // Type byte = 1 (wrong)
+        option_data.extend_from_slice(&[0u8; 16]); // 16 bytes of zeros
+
+        msg.opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::Unknown(97),
+                option_data.clone(),
+            )));
+
+        let guid = extract_guid(&msg);
+        assert!(
+            guid.is_none(),
+            "GUID should be None when type byte is not 0"
+        );
+    }
+
+    #[test]
+    fn test_extract_guid_wrong_length() {
+        use dhcproto::v4::UnknownOption;
+
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+
+        // Create Option 97 with wrong length (too short)
+        let option_data = vec![0u8; 10]; // Only 10 bytes total
+
+        msg.opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::Unknown(97),
+                option_data.clone(),
+            )));
+
+        let guid = extract_guid(&msg);
+        assert!(guid.is_none(), "GUID should be None when length is wrong");
+    }
+
+    #[test]
+    fn test_request_context_includes_guid() {
+        use dhcproto::v4::UnknownOption;
+
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        msg.opts_mut()
+            .insert(DhcpOption::MessageType(MessageType::Discover));
+
+        // Add GUID option
+        let mut option_data = vec![0u8]; // Type byte = 0
+        option_data.extend_from_slice(&[
+            0x00, 0x84, 0x0e, 0x55, 0x9b, 0xe2, 0xd4, 0x41, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ]);
+        msg.opts_mut()
+            .insert(DhcpOption::Unknown(UnknownOption::new(
+                OptionCode::Unknown(97),
+                option_data.clone(),
+            )));
+
+        let ctx = RequestContext::from_message(&msg);
+        assert!(ctx.guid.is_some(), "RequestContext should include GUID");
+    }
+
+    #[test]
+    fn test_request_context_without_guid() {
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        msg.opts_mut()
+            .insert(DhcpOption::MessageType(MessageType::Discover));
+
+        let ctx = RequestContext::from_message(&msg);
+        assert!(
+            ctx.guid.is_none(),
+            "RequestContext should have None GUID when option is missing"
+        );
     }
 }

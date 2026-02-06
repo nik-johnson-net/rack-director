@@ -288,6 +288,7 @@ mod tests {
             requested_bootfile,
             requested_bootfile_size,
             ciaddr: Ipv4Addr::UNSPECIFIED,
+            guid: None,
         }
     }
 

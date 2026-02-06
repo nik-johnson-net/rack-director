@@ -44,7 +44,8 @@ impl FromRow for Device {
             None => serde_json::Map::new(),
         };
 
-        let architecture = Architecture::from_str(&architecture_str).unwrap_or(Architecture::X86_64);
+        let architecture =
+            Architecture::from_str(&architecture_str).unwrap_or(Architecture::X86_64);
         let lifecycle = lifecycle_str.map(DeviceLifecycle::from);
 
         Ok(Device {

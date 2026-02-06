@@ -181,11 +181,8 @@ impl LifecycleStore {
              ORDER BY created_at DESC"
         };
 
-        let transitions = crate::database::query_map_all::<LifecycleTransition>(
-            conn,
-            query,
-            &[device_uuid],
-        )?;
+        let transitions =
+            crate::database::query_map_all::<LifecycleTransition>(conn, query, &[device_uuid])?;
 
         Ok(transitions)
     }

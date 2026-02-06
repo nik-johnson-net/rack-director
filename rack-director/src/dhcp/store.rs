@@ -104,8 +104,8 @@ pub struct DhcpNetwork {
 impl FromRow for DhcpNetwork {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         let dns_servers_json: String = row.get("dns_servers")?;
-        let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
-            .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
+        let dns_servers: Vec<String> =
+            serde_json::from_str(&dns_servers_json).unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
 
         let created_at_str: String = row.get("created_at")?;
         let updated_at_str: String = row.get("updated_at")?;

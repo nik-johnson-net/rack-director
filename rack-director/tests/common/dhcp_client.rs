@@ -1,10 +1,11 @@
 use anyhow::{Result, anyhow};
 use dhcproto::{
     Decodable, Decoder, Encodable, Encoder,
-    v4::{self, DhcpOption, Flags, Message, MessageType, OptionCode},
+    v4::{self, DhcpOption, Flags, Message, MessageType, OptionCode, UnknownOption},
 };
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Client System Architecture types from RFC 4578
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +37,7 @@ pub struct DhcpClient {
     architecture: Architecture,
     socket: UdpSocket,
     xid: u32,
+    guid: Option<Uuid>,
 }
 
 impl DhcpClient {
@@ -58,7 +60,29 @@ impl DhcpClient {
             architecture,
             socket,
             xid,
+            guid: None,
         })
+    }
+
+    /// Set the GUID (Client Machine Identifier) for this client
+    pub fn set_guid(&mut self, guid: Uuid) {
+        self.guid = Some(guid);
+    }
+
+    /// Add GUID option (Option 97) to a DHCP message if guid is set
+    fn add_guid_option(&self, msg: &mut Message) {
+        if let Some(guid) = self.guid {
+            // DHCP Option 97 - Client Machine Identifier
+            // Format: 1 byte type (0 = GUID), followed by 16 bytes UUID
+            let mut option_data = vec![0u8]; // Type byte = 0 (GUID)
+            option_data.extend_from_slice(guid.as_bytes());
+
+            msg.opts_mut()
+                .insert(DhcpOption::Unknown(UnknownOption::new(
+                    OptionCode::Unknown(97),
+                    option_data,
+                )));
+        }
     }
 
     /// Send DHCP DISCOVER and receive DHCP OFFER
@@ -86,6 +110,9 @@ impl DhcpClient {
             OptionCode::TFTPServerName,
             OptionCode::BootfileName,
         ]));
+
+        // Add GUID option if set
+        self.add_guid_option(&mut msg);
 
         // Encode and send
         let mut buf = Vec::new();
@@ -187,6 +214,9 @@ impl DhcpClient {
             msg.opts_mut()
                 .insert(DhcpOption::UserClass(b"iPXE".to_vec()));
         }
+
+        // Add GUID option if set
+        self.add_guid_option(&mut msg);
 
         // Encode and send
         let mut buf = Vec::new();

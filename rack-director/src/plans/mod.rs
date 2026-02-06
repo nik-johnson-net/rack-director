@@ -59,11 +59,7 @@ impl FromRow for Plan {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         let actions_json: String = row.get("actions")?;
         let actions: Vec<Action> = serde_json::from_str(&actions_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
         let status_str: String = row.get("status")?;
