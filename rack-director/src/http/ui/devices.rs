@@ -10,8 +10,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::validation::validate_hostname;
 use crate::{
-    http::AppState,
+    http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
     operating_systems::Architecture,
 };
@@ -50,7 +51,7 @@ struct CreatePendingDeviceRequest {
     network_id: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct UpdateAttributesRequest {
     attributes: serde_json::Map<String, serde_json::Value>,
 }
@@ -204,7 +205,25 @@ async fn update_device_attributes(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
     extract::Json(payload): extract::Json<UpdateAttributesRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, HttpError> {
+    // Validate hostname if present in attributes
+    if let Some(hostname_value) = payload.attributes.get("hostname") {
+        if let Some(hostname) = hostname_value.as_str() {
+            // Validate the hostname
+            if let Err(errors) = validate_hostname(hostname) {
+                return Err(HttpError::ValidationError(errors));
+            }
+        } else {
+            // hostname field exists but is not a string
+            let mut errors = std::collections::HashMap::new();
+            errors.insert(
+                "hostname".to_string(),
+                "Hostname must be a string".to_string(),
+            );
+            return Err(HttpError::ValidationError(errors));
+        }
+    }
+
     // Update device attributes
     match state
         .director
@@ -214,7 +233,7 @@ async fn update_device_attributes(
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
             log::error!("Failed to update device attributes for {}: {}", uuid, e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(HttpError::ServerInternalError(e))
         }
     }
 }
@@ -772,6 +791,380 @@ mod tests {
             response.status(),
             StatusCode::NO_CONTENT,
             "Deleting non-existent device should be idempotent"
+        );
+    }
+
+    // ========== Hostname Update Tests ==========
+
+    #[tokio::test]
+    async fn test_update_device_hostname_valid() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x30);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Update hostname
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("server-01".to_string()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify hostname was updated
+        let device = state.director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(device.attributes.hostname, Some("server-01".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_device_hostname_empty() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x31);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update with empty hostname
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("".to_string()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response contains validation error
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("hostname"));
+        assert!(body_str.contains("required"));
+    }
+
+    #[tokio::test]
+    async fn test_update_device_hostname_too_long() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x32);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update with hostname that's too long (254 chars, exceeds 253 limit)
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("a".repeat(254)),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("hostname"));
+        assert!(body_str.contains("253"));
+    }
+
+    #[tokio::test]
+    async fn test_update_device_hostname_invalid_characters() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x33);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update with invalid hostname (contains underscore)
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("server_01".to_string()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("hostname"));
+        assert!(body_str.contains("letters") || body_str.contains("alphanumeric"));
+    }
+
+    #[tokio::test]
+    async fn test_update_device_hostname_leading_hyphen() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x34);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update with hostname starting with hyphen
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("-server".to_string()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("hostname"));
+        assert!(body_str.contains("hyphen"));
+    }
+
+    #[tokio::test]
+    async fn test_update_device_hostname_trailing_hyphen() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x35);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update with hostname ending with hyphen
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("server-".to_string()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("hostname"));
+        assert!(body_str.contains("hyphen"));
+    }
+
+    #[tokio::test]
+    async fn test_update_device_hostname_with_dots() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x36);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Update hostname with dots (FQDN-style)
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("server.example.com".to_string()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify hostname was updated
+        let device = state.director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(
+            device.attributes.hostname,
+            Some("server.example.com".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_device_hostname_not_string() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x37);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update with hostname as a number instead of string
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "hostname".to_string(),
+            serde_json::Value::Number(123.into()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("hostname"));
+        assert!(body_str.contains("string"));
+    }
+
+    #[tokio::test]
+    async fn test_update_device_attributes_without_hostname() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x38);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Update other attributes without hostname (should work)
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "manufacturer".to_string(),
+            serde_json::Value::String("Dell Inc.".to_string()),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify attribute was updated
+        let device = state.director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(
+            device.attributes.manufacturer,
+            Some("Dell Inc.".to_string())
         );
     }
 }

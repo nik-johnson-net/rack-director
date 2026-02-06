@@ -197,7 +197,10 @@ mod tests {
         let mac = "aa:bb:cc:dd:ee:ff";
 
         // Allocate IP in test network
-        let ip = allocator.allocate_for_mac_in_network(mac, network_id).await.unwrap();
+        let ip = allocator
+            .allocate_for_mac_in_network(mac, network_id)
+            .await
+            .unwrap();
         assert_eq!(ip.to_string(), "10.0.0.100"); // First IP in test range
     }
 

@@ -1165,7 +1165,14 @@ mod tests {
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, network_id)
+            .create_or_update_lease_with_network(
+                mac,
+                &ip,
+                None,
+                LeaseState::Offered,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
@@ -1220,7 +1227,14 @@ mod tests {
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, network_id)
+            .create_or_update_lease_with_network(
+                mac,
+                &ip,
+                None,
+                LeaseState::Offered,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
@@ -1266,7 +1280,14 @@ mod tests {
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, network_id)
+            .create_or_update_lease_with_network(
+                mac,
+                &ip,
+                None,
+                LeaseState::Offered,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
@@ -1319,7 +1340,14 @@ mod tests {
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Active, 3600, network_id)
+            .create_or_update_lease_with_network(
+                mac,
+                &ip,
+                None,
+                LeaseState::Active,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
@@ -1363,7 +1391,8 @@ mod tests {
             .expect("Message type should be present");
 
         assert_eq!(
-            msg_type, MessageType::Ack,
+            msg_type,
+            MessageType::Ack,
             "Should respond with ACK to INIT-REBOOT"
         );
     }
@@ -1416,7 +1445,8 @@ mod tests {
             .expect("Message type should be present");
 
         assert_eq!(
-            msg_type, MessageType::Nak,
+            msg_type,
+            MessageType::Nak,
             "Should NAK request for wrong IP when static reservation exists"
         );
     }
@@ -1465,7 +1495,8 @@ mod tests {
             .expect("Message type should be present");
 
         assert_eq!(
-            msg_type, MessageType::Nak,
+            msg_type,
+            MessageType::Nak,
             "Should NAK renewal with wrong ciaddr when static reservation exists"
         );
     }
@@ -1515,7 +1546,8 @@ mod tests {
             .expect("Message type should be present");
 
         assert_eq!(
-            msg_type, MessageType::Ack,
+            msg_type,
+            MessageType::Ack,
             "Should ACK request with correct reserved IP"
         );
 
@@ -1537,7 +1569,14 @@ mod tests {
 
         // Create an active lease for the old IP
         store
-            .create_or_update_lease_with_network(mac, &old_ip, None, LeaseState::Active, 3600, network_id)
+            .create_or_update_lease_with_network(
+                mac,
+                &old_ip,
+                None,
+                LeaseState::Active,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
@@ -1577,7 +1616,8 @@ mod tests {
             .expect("Message type should be present");
 
         assert_eq!(
-            msg_type, MessageType::Nak,
+            msg_type,
+            MessageType::Nak,
             "Should NAK renewal when static reservation changes to different IP"
         );
     }
@@ -1592,7 +1632,14 @@ mod tests {
 
         // Step 1: Client gets IP from pool
         store
-            .create_or_update_lease_with_network(mac, &old_ip, None, LeaseState::Active, 3600, network_id)
+            .create_or_update_lease_with_network(
+                mac,
+                &old_ip,
+                None,
+                LeaseState::Active,
+                3600,
+                network_id,
+            )
             .await
             .unwrap();
 
@@ -1613,11 +1660,17 @@ mod tests {
             .insert(v4::DhcpOption::MessageType(MessageType::Request));
 
         let network = store.get_network(network_id).await.unwrap();
-        let response = handler.handle_request(&renew_request, &network).await.unwrap();
+        let response = handler
+            .handle_request(&renew_request, &network)
+            .await
+            .unwrap();
 
         assert!(response.is_some());
         let msg = response.unwrap();
-        let msg_type = msg.opts().msg_type().expect("Message type should be present");
+        let msg_type = msg
+            .opts()
+            .msg_type()
+            .expect("Message type should be present");
         assert_eq!(msg_type, MessageType::Nak, "Should NAK renewal of old IP");
 
         // Step 4: Client rediscovers and requests the reserved IP
@@ -1632,13 +1685,23 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::RequestedIpAddress(reserved_ip));
 
-        let response = handler.handle_request(&new_request, &network).await.unwrap();
+        let response = handler
+            .handle_request(&new_request, &network)
+            .await
+            .unwrap();
 
         // Should receive ACK with reserved IP
         assert!(response.is_some());
         let ack = response.unwrap();
-        let msg_type = ack.opts().msg_type().expect("Message type should be present");
-        assert_eq!(msg_type, MessageType::Ack, "Should ACK request for reserved IP");
+        let msg_type = ack
+            .opts()
+            .msg_type()
+            .expect("Message type should be present");
+        assert_eq!(
+            msg_type,
+            MessageType::Ack,
+            "Should ACK request for reserved IP"
+        );
         assert_eq!(
             ack.yiaddr(),
             reserved_ip,
@@ -1650,13 +1713,10 @@ mod tests {
         assert!(lease.is_some());
         let lease = lease.unwrap();
         assert_eq!(
-            lease.ip_address, reserved_ip.to_string(),
+            lease.ip_address,
+            reserved_ip.to_string(),
             "Lease should be updated to reserved IP"
         );
-        assert_eq!(
-            lease.state,
-            LeaseState::Active,
-            "Lease should be active"
-        );
+        assert_eq!(lease.state, LeaseState::Active, "Lease should be active");
     }
 }

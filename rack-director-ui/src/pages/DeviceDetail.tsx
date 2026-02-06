@@ -54,6 +54,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { EditableHostname } from "@/components/devices/editable-hostname";
 
 const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
 
@@ -333,13 +334,21 @@ function DeviceDetail() {
           variant="outline"
           size="icon"
           onClick={() => navigate('/devices')}
+          aria-label="Back to devices"
         >
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-3xl font-bold">
-            {device.attributes?.hostname || device.uuid}
-          </h1>
+          <EditableHostname
+            uuid={device.uuid}
+            hostname={device.attributes?.hostname || device.uuid}
+            onHostnameChange={async () => {
+              // Refresh device data to get the updated hostname
+              const updatedDevice = await getDevice(uuid!);
+              setDevice(updatedDevice);
+            }}
+            onError={(errorMsg) => setError(errorMsg)}
+          />
           <p className="text-sm text-muted-foreground font-mono">{device.uuid}</p>
         </div>
         {status?.current_lifecycle && (

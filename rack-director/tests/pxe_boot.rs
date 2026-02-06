@@ -14,7 +14,9 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
     // Create test network and pool
     let network_id = common::create_test_network(handle.handle.http_port).await?;
     common::create_test_pool(handle.handle.http_port, network_id).await?;
-    handle.set_network_autodiscover(network_id as u16, true).await?;
+    handle
+        .set_network_autodiscover(network_id as u16, true)
+        .await?;
 
     // Step 1: First DHCP exchange (firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]; // Test MAC address
@@ -74,8 +76,7 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
     let (leased_ip2, ipxe_boot_options) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut dhcp_client = DhcpClient::new(mac, Architecture::X86Bios, dhcp_port)?;
         let (offered_ip, server_id) = dhcp_client.discover()?;
-        let (leased_ip, boot_options) =
-            dhcp_client.request_as_ipxe(offered_ip, server_id)?;
+        let (leased_ip, boot_options) = dhcp_client.request_as_ipxe(offered_ip, server_id)?;
         Ok((leased_ip, boot_options))
     })
     .await??;
@@ -139,7 +140,9 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
     // Create test network and pool
     let network_id = common::create_test_network(handle.handle.http_port).await?;
     common::create_test_pool(handle.handle.http_port, network_id).await?;
-    handle.set_network_autodiscover(network_id as u16, true).await?;
+    handle
+        .set_network_autodiscover(network_id as u16, true)
+        .await?;
 
     // Step 1: First DHCP exchange (UEFI firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x57]; // Different MAC
@@ -199,8 +202,7 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
     let (leased_ip2, ipxe_boot_options) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut dhcp_client = DhcpClient::new(mac, Architecture::X64Uefi, dhcp_port)?;
         let (offered_ip, server_id) = dhcp_client.discover()?;
-        let (leased_ip, boot_options) =
-            dhcp_client.request_as_ipxe(offered_ip, server_id)?;
+        let (leased_ip, boot_options) = dhcp_client.request_as_ipxe(offered_ip, server_id)?;
         Ok((leased_ip, boot_options))
     })
     .await??;
@@ -262,7 +264,9 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     // Create test network and pool
     let network_id = common::create_test_network(handle.handle.http_port).await?;
     common::create_test_pool(handle.handle.http_port, network_id).await?;
-    handle.set_network_autodiscover(network_id as u16, true).await?;
+    handle
+        .set_network_autodiscover(network_id as u16, true)
+        .await?;
 
     // Step 1: First DHCP exchange (ARM64 UEFI firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x58]; // Different MAC
@@ -322,8 +326,7 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     let (leased_ip2, ipxe_boot_options) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut dhcp_client = DhcpClient::new(mac, Architecture::Arm64Uefi, dhcp_port)?;
         let (offered_ip, server_id) = dhcp_client.discover()?;
-        let (leased_ip, boot_options) =
-            dhcp_client.request_as_ipxe(offered_ip, server_id)?;
+        let (leased_ip, boot_options) = dhcp_client.request_as_ipxe(offered_ip, server_id)?;
         Ok((leased_ip, boot_options))
     })
     .await??;

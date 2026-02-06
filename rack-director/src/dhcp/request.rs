@@ -108,15 +108,18 @@ fn extract_guid(msg: &Message) -> Option<Uuid> {
     // dhcproto may expose this as Unknown(97) with raw bytes
     for (code, opt) in msg.opts().iter() {
         if code == &OptionCode::Unknown(97)
-            && let DhcpOption::Unknown(unknown_opt) = opt {
-                // UnknownOption has a data() method that returns &[u8]
-                let data = unknown_opt.data();
-                // First byte is type (0 = GUID), remaining 16 bytes are UUID
-                if data.len() == 17 && data[0] == 0
-                    && let Ok(uuid_bytes) = data[1..17].try_into() {
-                        return Some(Uuid::from_bytes_le(uuid_bytes));
-                    }
+            && let DhcpOption::Unknown(unknown_opt) = opt
+        {
+            // UnknownOption has a data() method that returns &[u8]
+            let data = unknown_opt.data();
+            // First byte is type (0 = GUID), remaining 16 bytes are UUID
+            if data.len() == 17
+                && data[0] == 0
+                && let Ok(uuid_bytes) = data[1..17].try_into()
+            {
+                return Some(Uuid::from_bytes_le(uuid_bytes));
             }
+        }
     }
     None
 }

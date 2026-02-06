@@ -602,16 +602,15 @@ export async function getDevice(uuid: string): Promise<Device> {
 }
 
 export async function updateDeviceAttributes(uuid: string, attributes: Record<string, any>): Promise<void> {
-  return fetch(`/ui/devices/${uuid}/attributes`, {
+  const response = await fetch(`/ui/devices/${uuid}/attributes`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ attributes })
-  }).then((response) => {
-    if (!response.ok) {
-      console.error('Error updating device attributes:', response.statusText);
-      throw new Error('Failed to update device attributes');
-    }
   });
+
+  if (!response.ok) {
+    await handleApiError(response, 'Failed to update device attributes');
+  }
 }
 
 export async function deleteDevice(uuid: string): Promise<void> {

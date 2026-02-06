@@ -39,8 +39,7 @@ impl FromRow for Device {
 
         let attributes = match attributes_json {
             Some(json_str) => {
-                serde_json::from_str::<DeviceAttributes>(&json_str)
-                    .unwrap_or_default()
+                serde_json::from_str::<DeviceAttributes>(&json_str).unwrap_or_default()
             }
             None => DeviceAttributes::default(),
         };
@@ -724,10 +723,7 @@ mod tests {
 
         // Verify initial state
         let device = store.get_device(&uuid).await.unwrap();
-        assert_eq!(
-            device.attributes.hostname.as_ref().unwrap(),
-            "server-01"
-        );
+        assert_eq!(device.attributes.hostname.as_ref().unwrap(), "server-01");
 
         // Simulate hardware discovery updating attributes
         let mut hardware_attrs = serde_json::Map::new();
@@ -849,10 +845,7 @@ mod tests {
 
         // Verify existing attributes are preserved
         let device = store.get_device(&uuid).await.unwrap();
-        assert_eq!(
-            device.attributes.hostname.as_ref().unwrap(),
-            "test-host"
-        );
+        assert_eq!(device.attributes.hostname.as_ref().unwrap(), "test-host");
     }
 
     // Tests for multi-NIC support
@@ -1400,10 +1393,7 @@ mod tests {
         // Verify BMC IP was updated
         let device = store.get_device(&uuid).await.unwrap();
         let bmc = device.attributes.bmc.as_ref().unwrap();
-        assert_eq!(
-            bmc.ip_address.as_ref().unwrap(),
-            "10.0.1.50"
-        );
+        assert_eq!(bmc.ip_address.as_ref().unwrap(), "10.0.1.50");
 
         // Verify network_interfaces was NOT created
         let interfaces = store.get_network_interfaces(&uuid).await.unwrap();

@@ -81,6 +81,48 @@ pub fn validate_u32_range(value: u32, min: u32, max: u32, field_name: &str) -> O
     }
 }
 
+/// Validate hostname according to RFC 1123
+/// - Required field (non-empty)
+/// - Max length 253 characters
+/// - Valid characters: alphanumeric, hyphens, dots
+/// - No leading or trailing hyphens
+pub fn validate_hostname(hostname: &str) -> Result<(), HashMap<String, String>> {
+    let mut errors = ValidationErrors::new();
+
+    // Hostname must not be empty
+    errors.add_if_err("hostname", validate_required(hostname, "Hostname"));
+
+    // Hostname max length (RFC 1123: 253 chars total)
+    errors.add_if_err(
+        "hostname",
+        validate_string_length(hostname, 253, "Hostname"),
+    );
+
+    // Hostname format: alphanumeric and hyphens/dots, no leading/trailing hyphens
+    if !hostname.is_empty() {
+        let valid = hostname
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+
+        if !valid {
+            errors.add_error(
+                "hostname",
+                "Hostname must contain only letters, numbers, hyphens, and dots".to_string(),
+            );
+        } else {
+            // Check for leading/trailing hyphens
+            if hostname.starts_with('-') || hostname.ends_with('-') {
+                errors.add_error(
+                    "hostname",
+                    "Hostname cannot start or end with a hyphen".to_string(),
+                );
+            }
+        }
+    }
+
+    errors.into_result()
+}
+
 // ============================================================================
 // HELPER TYPE - For building validation errors
 // ============================================================================
@@ -957,5 +999,135 @@ mod tests {
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("dns_servers"));
+    }
+
+    // ========== Hostname Validation Tests ==========
+
+    #[test]
+    fn test_validate_hostname_valid() {
+        assert!(validate_hostname("server-01").is_ok());
+        assert!(validate_hostname("web.server").is_ok());
+        assert!(validate_hostname("app-server-01.example.com").is_ok());
+        assert!(validate_hostname("s").is_ok());
+        assert!(validate_hostname("server123").is_ok());
+        assert!(validate_hostname("my-server.local").is_ok());
+    }
+
+    #[test]
+    fn test_validate_hostname_empty() {
+        let result = validate_hostname("");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("hostname"));
+        assert!(errors.get("hostname").unwrap().contains("required"));
+    }
+
+    #[test]
+    fn test_validate_hostname_too_long() {
+        // Create a hostname that's 254 characters (exceeds 253 limit)
+        let long_hostname = "a".repeat(254);
+        let result = validate_hostname(&long_hostname);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("hostname"));
+        assert!(
+            errors
+                .get("hostname")
+                .unwrap()
+                .contains("less than 253 characters")
+        );
+    }
+
+    #[test]
+    fn test_validate_hostname_max_length_valid() {
+        // Exactly 253 characters should be valid
+        let max_hostname = "a".repeat(253);
+        assert!(validate_hostname(&max_hostname).is_ok());
+    }
+
+    #[test]
+    fn test_validate_hostname_invalid_characters() {
+        let result = validate_hostname("server_01");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("hostname"));
+        assert!(
+            errors
+                .get("hostname")
+                .unwrap()
+                .contains("only letters, numbers, hyphens, and dots")
+        );
+
+        // Test other invalid characters
+        assert!(validate_hostname("server@example").is_err());
+        assert!(validate_hostname("server#01").is_err());
+        assert!(validate_hostname("server 01").is_err());
+        assert!(validate_hostname("server!01").is_err());
+    }
+
+    #[test]
+    fn test_validate_hostname_leading_hyphen() {
+        let result = validate_hostname("-server");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("hostname"));
+        assert!(
+            errors
+                .get("hostname")
+                .unwrap()
+                .contains("cannot start or end with a hyphen")
+        );
+    }
+
+    #[test]
+    fn test_validate_hostname_trailing_hyphen() {
+        let result = validate_hostname("server-");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("hostname"));
+        assert!(
+            errors
+                .get("hostname")
+                .unwrap()
+                .contains("cannot start or end with a hyphen")
+        );
+    }
+
+    #[test]
+    fn test_validate_hostname_both_hyphens() {
+        let result = validate_hostname("-server-");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("hostname"));
+    }
+
+    #[test]
+    fn test_validate_hostname_hyphen_in_middle() {
+        // Hyphens in the middle are allowed
+        assert!(validate_hostname("my-server").is_ok());
+        assert!(validate_hostname("app-server-01").is_ok());
+    }
+
+    #[test]
+    fn test_validate_hostname_dots_allowed() {
+        assert!(validate_hostname("server.example.com").is_ok());
+        assert!(validate_hostname("web.local").is_ok());
+    }
+
+    #[test]
+    fn test_validate_hostname_numbers_allowed() {
+        assert!(validate_hostname("server01").is_ok());
+        assert!(validate_hostname("123server").is_ok());
+        assert!(validate_hostname("123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_hostname_multiple_errors() {
+        // Empty string triggers required error only
+        let result = validate_hostname("");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        // Should have at least the "required" error
+        assert!(errors.contains_key("hostname"));
     }
 }
