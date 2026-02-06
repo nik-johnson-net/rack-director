@@ -11,6 +11,7 @@ use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::roles::RolesStore;
 use crate::storage::ImageStore;
 
+mod ipmi;
 mod store;
 
 pub use common::device_attributes::NetworkInterface;
@@ -98,6 +99,7 @@ impl Director {
                 os_store: &self.os_store,
                 roles_store: &self.roles_store,
                 image_store: &self.image_store,
+                director: None, // Director not needed for boot target resolution
             };
 
             // Return appropriate boot target based on the current action
@@ -129,6 +131,77 @@ impl Director {
         self.plans_store
             .get_active_plan_for_device(device_uuid)
             .await
+    }
+
+    /// Handle device boot event
+    ///
+    /// Called when a device boots via iPXE. If the current action's advance_on_boot()
+    /// returns true, the action is automatically marked as successful and the plan advances.
+    /// This is used for actions like RebootDevice that complete when the device boots.
+    pub async fn on_boot(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
+        // Get the current active plan
+        let mut plan = match self
+            .plans_store
+            .get_active_plan_for_device(device_uuid)
+            .await?
+        {
+            Some(plan) => plan,
+            None => {
+                // No active plan - this is normal for devices that have completed their lifecycle
+                log::debug!("No active plan for device {} on boot", device_uuid);
+                return Ok(());
+            }
+        };
+
+        // Start the plan if it's pending
+        let plan_was_pending = plan.status == PlanStatus::Pending;
+        if plan_was_pending {
+            plan.start();
+        }
+
+        // Check if current action should advance on boot
+        let should_advance = if let Some(action) = plan.get_current_action() {
+            if action.advance_on_boot() {
+                log::info!(
+                    "Device {} booted - advancing action {:?}",
+                    device_uuid,
+                    action
+                );
+
+                // Mark current action as successful and advance
+                let _result = plan.mark_action_success();
+                true
+            } else {
+                log::debug!(
+                    "Device {} booted but current action {:?} does not advance on boot",
+                    device_uuid,
+                    action
+                );
+                false
+            }
+        } else {
+            false
+        };
+
+        // Update the plan in the database if it was started or advanced
+        if plan_was_pending || should_advance {
+            self.plans_store
+                .update_plan_status(
+                    plan.id.unwrap(),
+                    plan.status.clone(),
+                    plan.current_step,
+                    plan.error_message.as_deref(),
+                )
+                .await?;
+
+            // Handle lifecycle transition if plan is complete
+            if plan.status == PlanStatus::Success {
+                self.handle_plan_completion_success(plan.id.unwrap())
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn mark_action_success(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
@@ -261,6 +334,36 @@ impl Director {
             LifecycleTransition::new(*device_uuid, current_lifecycle, to_state, Some(plan_id));
 
         let transition_id = self.lifecycle_store.create_transition(&transition).await?;
+
+        // Get the newly created plan to access its current action
+        let plan = self
+            .plans_store
+            .get_active_plan_for_device(device_uuid)
+            .await?
+            .expect("Plan should exist immediately after creation");
+
+        // If there's a current action, run its start() hook
+        if let Some(action) = plan.get_current_action() {
+            let device = self.get_device(device_uuid).await?;
+            let ctx = crate::plans::actions::ActionContext {
+                root_url: &self.root_url,
+                device: &device,
+                os_store: &self.os_store,
+                roles_store: &self.roles_store,
+                image_store: &self.image_store,
+                director: Some(self), // Provide director for actions that need it (e.g., RebootDevice)
+            };
+
+            log::debug!("Starting action {:?} for device {}", action, device_uuid);
+            if let Err(e) = action.start(&ctx).await {
+                log::warn!(
+                    "Failed to execute start() for action {:?} on device {}: {}",
+                    action,
+                    device_uuid,
+                    e
+                );
+            }
+        }
 
         Ok(transition_id)
     }
@@ -429,6 +532,73 @@ impl Director {
 
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         self.store.find_device_by_bmc_mac(mac).await
+    }
+
+    /// Issue an IPMI power reset command to the device's BMC
+    ///
+    /// This is a best-effort operation - if the BMC IP or credentials are missing,
+    /// or if the IPMI command fails, the error is logged but not propagated.
+    /// This allows lifecycle transitions to proceed even if IPMI reboot fails
+    /// (the device can be manually rebooted).
+    pub async fn reboot(&self, uuid: &Uuid) -> anyhow::Result<()> {
+        // Get BMC IP address
+        let bmc_ip = match self.get_bmc_ip(uuid).await? {
+            Some(ip) => ip,
+            None => {
+                log::info!("No BMC IP for device {}, skipping power reset", uuid);
+                return Ok(());
+            }
+        };
+
+        // Get BMC credentials
+        let (username, password) = match self.get_bmc_credentials(uuid).await? {
+            Some(creds) => creds,
+            None => {
+                log::info!(
+                    "No BMC credentials for device {}, skipping power reset",
+                    uuid
+                );
+                return Ok(());
+            }
+        };
+
+        // Create IPMI client and send power reset
+        let ipmi = ipmi::IpmiClient::new(bmc_ip.clone(), username, password);
+        match ipmi.power_reset().await {
+            Ok(_) => {
+                log::info!("IPMI power reset sent to device {} at {}", uuid, bmc_ip);
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to send IPMI power reset to device {} at {}: {}",
+                    uuid,
+                    bmc_ip,
+                    e
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get BMC IP address from device attributes
+    async fn get_bmc_ip(&self, uuid: &Uuid) -> anyhow::Result<Option<String>> {
+        let device = self.store.get_device(uuid).await?;
+        Ok(device.attributes.bmc.and_then(|bmc| bmc.ip_address))
+    }
+
+    /// Get BMC credentials from device attributes
+    async fn get_bmc_credentials(&self, uuid: &Uuid) -> anyhow::Result<Option<(String, String)>> {
+        let device = self.store.get_device(uuid).await?;
+        let bmc_config = device.attributes.bmc_config;
+
+        match bmc_config {
+            Some(config) => match (config.username, config.password) {
+                (Some(u), Some(p)) => Ok(Some((u, p))),
+                _ => Ok(None),
+            },
+            None => Ok(None),
+        }
     }
 }
 
@@ -669,5 +839,283 @@ mod tests {
             BootTarget::LocalDisk => {} // Expected
             _ => panic!("Expected LocalDisk after discovery completion"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_reboot_with_bmc_info() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC info and credentials
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc".to_string(),
+            serde_json::json!({
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "ip_address": "10.0.0.100"
+            }),
+        );
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "username": "RACKDIRECTOR",
+                "password": "test_password"
+            }),
+        );
+        director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        // Call reboot - should not fail even if ipmitool is not installed
+        // (it's best-effort)
+        let result = director.reboot(&test_uuid).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_reboot_without_bmc_ip() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440021").unwrap();
+
+        // Register device without BMC info
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Call reboot - should succeed (gracefully skip IPMI)
+        let result = director.reboot(&test_uuid).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_reboot_without_bmc_credentials() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440022").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC IP but no credentials
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc".to_string(),
+            serde_json::json!({
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "ip_address": "10.0.0.100"
+            }),
+        );
+        director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        // Call reboot - should succeed (gracefully skip IPMI)
+        let result = director.reboot(&test_uuid).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_on_boot_advances_reboot_action() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440023").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create a plan with RebootDevice and InstallOs actions
+        let actions = vec![
+            crate::plans::Action::RebootDevice,
+            crate::plans::Action::InstallOs,
+        ];
+        let plan = crate::plans::Plan::new(test_uuid, actions);
+        director.create_plan(&plan).await.unwrap();
+
+        // Verify plan is active with RebootDevice as current action
+        let active_plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.current_step, 0);
+        assert_eq!(plan.actions[0], crate::plans::Action::RebootDevice);
+
+        // Call on_boot - should advance past RebootDevice
+        director.on_boot(&test_uuid).await.unwrap();
+
+        // Verify plan advanced to next action
+        let active_plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.current_step, 1);
+        assert_eq!(plan.actions[1], crate::plans::Action::InstallOs);
+    }
+
+    #[tokio::test]
+    async fn test_on_boot_does_not_advance_other_actions() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440024").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create a plan with DiscoverHardware action
+        let actions = vec![crate::plans::Action::DiscoverHardware];
+        let plan = crate::plans::Plan::new(test_uuid, actions);
+        director.create_plan(&plan).await.unwrap();
+
+        // Verify plan is initially Pending
+        let active_plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        assert_eq!(active_plan.unwrap().status, PlanStatus::Pending);
+
+        // Call on_boot - should start the plan but NOT advance (DiscoverHardware doesn't advance on boot)
+        director.on_boot(&test_uuid).await.unwrap();
+
+        // Verify plan is now Running but did not advance to next step
+        let active_plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.current_step, 0);
+        assert_eq!(plan.status, PlanStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_on_boot_without_active_plan() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440025").unwrap();
+
+        // Register device without a plan
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Call on_boot - should succeed without error
+        let result = director.on_boot(&test_uuid).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_bmc_ip_with_valid_bmc() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440026").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC IP
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc".to_string(),
+            serde_json::json!({
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "ip_address": "10.0.0.100"
+            }),
+        );
+        director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        // Get BMC IP
+        let bmc_ip = director.get_bmc_ip(&test_uuid).await.unwrap();
+        assert_eq!(bmc_ip, Some("10.0.0.100".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_bmc_ip_without_bmc() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440027").unwrap();
+
+        // Register device without BMC
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Get BMC IP
+        let bmc_ip = director.get_bmc_ip(&test_uuid).await.unwrap();
+        assert_eq!(bmc_ip, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_bmc_credentials_with_valid_config() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440028").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set BMC credentials
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "dhcp",
+                "username": "RACKDIRECTOR",
+                "password": "test_password"
+            }),
+        );
+        director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        // Get BMC credentials
+        let creds = director.get_bmc_credentials(&test_uuid).await.unwrap();
+        assert_eq!(
+            creds,
+            Some(("RACKDIRECTOR".to_string(), "test_password".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_bmc_credentials_without_config() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440029").unwrap();
+
+        // Register device without BMC config
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Get BMC credentials
+        let creds = director.get_bmc_credentials(&test_uuid).await.unwrap();
+        assert_eq!(creds, None);
     }
 }

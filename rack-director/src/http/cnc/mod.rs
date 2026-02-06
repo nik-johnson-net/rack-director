@@ -74,6 +74,12 @@ async fn ipxe_handler(
             .await;
     }
 
+    // Handle boot event - advance plan if current action supports it
+    // This must happen before we check the boot target, because on_boot() might advance the plan
+    if let Err(e) = state.director.on_boot(&uuid).await {
+        log::warn!("Failed to handle boot event for {}: {:?}", uuid, e);
+    }
+
     // Store network info from DHCP lease (reuse the MAC address lookup from above)
     if let Some(mac) = &mac_address {
         if let Ok(Some(lease)) = state.dhcp_store.get_lease_by_mac(mac).await {

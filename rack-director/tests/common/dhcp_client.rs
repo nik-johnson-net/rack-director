@@ -8,6 +8,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 /// Client System Architecture types from RFC 4578
+#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub enum Architecture {
     /// x86 BIOS (Intel x86PC)
@@ -65,6 +66,7 @@ impl DhcpClient {
     }
 
     /// Set the GUID (Client Machine Identifier) for this client
+    #[allow(unused)]
     pub fn set_guid(&mut self, guid: Uuid) {
         self.guid = Some(guid);
     }
@@ -179,6 +181,7 @@ impl DhcpClient {
     }
 
     /// Send DHCP REQUEST as iPXE (second-stage boot) and receive HTTP boot script URL
+    #[allow(unused)]
     pub fn request_as_ipxe(
         &mut self,
         requested_ip: Ipv4Addr,

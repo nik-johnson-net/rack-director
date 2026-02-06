@@ -19,6 +19,7 @@ pub enum Action {
     ConfigureBmc,
     InstallOs,
     PartitionDisks,
+    RebootDevice,
 }
 
 /// Context required for converting Actions to BootTargets
@@ -28,6 +29,7 @@ pub struct ActionContext<'a> {
     pub os_store: &'a OperatingSystemsStore,
     pub roles_store: &'a RolesStore,
     pub image_store: &'a Arc<dyn ImageStore>,
+    pub director: Option<&'a crate::director::Director>,
 }
 
 impl Action {
@@ -43,6 +45,43 @@ impl Action {
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
             // All other actions default to local disk boot
             _ => Ok(BootTarget::LocalDisk),
+        }
+    }
+
+    /// Execute startup logic when transitioning to this action
+    ///
+    /// Some actions need to trigger side effects when they become active.
+    /// For example, RebootDevice needs to send an IPMI power reset command.
+    /// Most actions don't need startup logic and return Ok(()).
+    pub async fn start(&self, ctx: &ActionContext<'_>) -> Result<()> {
+        match self {
+            Action::RebootDevice => {
+                // Trigger reboot via IPMI
+                if let Some(director) = ctx.director {
+                    log::debug!("RebootDevice action started for device {}", ctx.device.uuid);
+                    director.reboot(&ctx.device.uuid).await?;
+                } else {
+                    log::warn!(
+                        "Cannot execute RebootDevice action: director not available in context"
+                    );
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Check if this action should auto-advance when the device boots
+    ///
+    /// Some actions (like RebootDevice) are complete once the device boots.
+    /// Other actions require explicit success/failure reporting from the agent.
+    ///
+    /// Returns true if the action should automatically advance to the next
+    /// step when director.on_boot() is called.
+    pub fn advance_on_boot(&self) -> bool {
+        match self {
+            Action::RebootDevice => true,
+            _ => false,
         }
     }
 }
@@ -168,6 +207,7 @@ mod tests {
             Action::ConfigureBmc,
             Action::InstallOs,
             Action::PartitionDisks,
+            Action::RebootDevice,
         ];
 
         for action in actions {
@@ -220,6 +260,7 @@ mod tests {
             os_store: &os_store,
             roles_store: &roles_store,
             image_store: &image_store,
+            director: None,
         };
 
         let action = Action::DiscoverHardware;
@@ -264,6 +305,7 @@ mod tests {
             os_store: &os_store,
             roles_store: &roles_store,
             image_store: &image_store,
+            director: None,
         };
 
         let action = Action::ConfigureBmc;
@@ -354,6 +396,7 @@ mod tests {
             os_store: &os_store,
             roles_store: &roles_store,
             image_store: &image_store,
+            director: None,
         };
 
         let action = Action::InstallOs;
@@ -397,6 +440,7 @@ mod tests {
             os_store: &os_store,
             roles_store: &roles_store,
             image_store: &image_store,
+            director: None,
         };
 
         let action = Action::InstallOs;
@@ -478,6 +522,7 @@ mod tests {
             os_store: &os_store,
             roles_store: &roles_store,
             image_store: &image_store,
+            director: None,
         };
 
         let action = Action::InstallOs;
@@ -522,6 +567,7 @@ mod tests {
             os_store: &os_store,
             roles_store: &roles_store,
             image_store: &image_store,
+            director: None,
         };
 
         let action = Action::PartitionDisks;
@@ -531,6 +577,101 @@ mod tests {
             BootTarget::LocalDisk => {} // Expected
             BootTarget::NetBoot { .. } => {
                 panic!("Expected LocalDisk for PartitionDisks, got NetBoot")
+            }
+        }
+    }
+
+    #[test]
+    fn test_reboot_device_serialization() {
+        let action = Action::RebootDevice;
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"type":"reboot_device"}"#);
+    }
+
+    #[test]
+    fn test_reboot_device_deserialization() {
+        let json = r#"{"type":"reboot_device"}"#;
+        let action: Action = serde_json::from_str(json).unwrap();
+        assert_eq!(action, Action::RebootDevice);
+    }
+
+    #[test]
+    fn test_advance_on_boot_reboot_device() {
+        // RebootDevice should advance on boot
+        assert!(Action::RebootDevice.advance_on_boot());
+    }
+
+    #[test]
+    fn test_advance_on_boot_other_actions() {
+        // Other actions should NOT advance on boot
+        assert!(!Action::DiscoverHardware.advance_on_boot());
+        assert!(!Action::ConfigureBmc.advance_on_boot());
+        assert!(!Action::InstallOs.advance_on_boot());
+        assert!(!Action::PartitionDisks.advance_on_boot());
+    }
+
+    #[tokio::test]
+    async fn test_reboot_device_start() {
+        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
+
+        let device = Device {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440007").unwrap(),
+            architecture: Architecture::X86_64,
+            lifecycle: None,
+            role_id: None,
+            attributes: common::device_attributes::DeviceAttributes::default(),
+            created_at: None,
+            first_seen_at: None,
+            last_seen_at: None,
+        };
+
+        let ctx = ActionContext {
+            root_url: "http://localhost:8080",
+            device: &device,
+            os_store: &os_store,
+            roles_store: &roles_store,
+            image_store: &image_store,
+            director: None,
+        };
+
+        let action = Action::RebootDevice;
+        // start() should succeed without error
+        let result = action.start(&ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_reboot_device_boot_target() {
+        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
+
+        let device = Device {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440008").unwrap(),
+            architecture: Architecture::X86_64,
+            lifecycle: None,
+            role_id: None,
+            attributes: common::device_attributes::DeviceAttributes::default(),
+            created_at: None,
+            first_seen_at: None,
+            last_seen_at: None,
+        };
+
+        let ctx = ActionContext {
+            root_url: "http://localhost:8080",
+            device: &device,
+            os_store: &os_store,
+            roles_store: &roles_store,
+            image_store: &image_store,
+            director: None,
+        };
+
+        let action = Action::RebootDevice;
+        let boot_target = action.to_boot_target(&ctx).await.unwrap();
+
+        // RebootDevice should boot to local disk (the action is just to trigger the reboot)
+        match boot_target {
+            BootTarget::LocalDisk => {} // Expected
+            BootTarget::NetBoot { .. } => {
+                panic!("Expected LocalDisk for RebootDevice, got NetBoot")
             }
         }
     }
