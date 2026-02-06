@@ -19,6 +19,7 @@ import {
   type DhcpPool,
   type StaticReservation,
   type DhcpLease,
+  type PendingDevice,
 } from "@/lib/client";
 
 type LoaderData = {
@@ -26,6 +27,7 @@ type LoaderData = {
   pools: DhcpPool[];
   reservations: StaticReservation[];
   leases: DhcpLease[];
+  pendingDevices: PendingDevice[];
 };
 
 function NetworkDetail() {
@@ -39,6 +41,7 @@ function NetworkDetail() {
   const [pools, setPools] = useState(initialData.pools);
   const [reservations, setReservations] = useState(initialData.reservations);
   const [leases] = useState(initialData.leases);
+  const [pendingDevices] = useState(initialData.pendingDevices);
 
   const [name, setName] = useState(network.name);
   const [subnet, setSubnet] = useState(network.subnet);
@@ -306,6 +309,7 @@ function NetworkDetail() {
                 network={network}
                 networkId={networkId}
                 leases={leases}
+                pendingDevices={pendingDevices}
                 onReservationCreated={(reservation) => {
                   setReservations([...reservations, reservation]);
                 }}

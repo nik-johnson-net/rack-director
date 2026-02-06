@@ -54,13 +54,14 @@ const router = createBrowserRouter([
         path: "/networks/:id",
         loader: async ({ params }) => {
           const networkId = parseInt(params.id!);
-          const [network, pools, reservations, leases] = await Promise.all([
+          const [network, pools, reservations, leases, pendingDevices] = await Promise.all([
             getNetwork(networkId),
             getPoolsForNetwork(networkId),
             getStaticReservations(networkId),
             getLeasesForNetwork(networkId),
+            getPendingDevices(),
           ]);
-          return { network, pools, reservations, leases };
+          return { network, pools, reservations, leases, pendingDevices };
         },
         Component: NetworkDetail,
         HydrateFallback: Loading

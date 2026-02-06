@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
-import type { DhcpLease, DhcpNetwork, StaticReservation, Device } from "@/lib/client";
+import type { DhcpLease, DhcpNetwork, StaticReservation, Device, PendingDevice } from "@/lib/client";
 import { createPendingDevice, makeLeaseStatic, getDevicesIndex } from "@/lib/client";
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
@@ -33,11 +33,12 @@ interface LeasesTableProps {
   network: DhcpNetwork;
   networkId: number;
   leases: DhcpLease[];
+  pendingDevices: PendingDevice[];
   onLeasesChange?: (leases: DhcpLease[]) => void;
   onReservationCreated?: (reservation: StaticReservation) => void;
 }
 
-export default function LeasesTable({ network, networkId, leases, onLeasesChange, onReservationCreated }: LeasesTableProps) {
+export default function LeasesTable({ network, networkId, leases, pendingDevices, onLeasesChange, onReservationCreated }: LeasesTableProps) {
   const navigate = useNavigate();
   const [isCreating, setIsCreating] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +72,13 @@ export default function LeasesTable({ network, networkId, leases, onLeasesChange
   const findDeviceByBmcMac = (mac: string): Device | undefined => {
     return devices.find(device =>
       device.attributes?.bmc?.mac_address?.toLowerCase() === mac.toLowerCase()
+    );
+  };
+
+  // Helper function to check if MAC has a pending device
+  const hasPendingDevice = (mac: string): boolean => {
+    return pendingDevices.some(
+      pd => pd.mac_address.toLowerCase() === mac.toLowerCase() && !pd.completed_at
     );
   };
 
@@ -270,8 +278,9 @@ export default function LeasesTable({ network, networkId, leases, onLeasesChange
                   <Button
                     variant="default"
                     size="sm"
-                    disabled={isCreating === lease.mac_address}
+                    disabled={isCreating === lease.mac_address || hasPendingDevice(lease.mac_address)}
                     aria-label="Create device from lease"
+                    title={hasPendingDevice(lease.mac_address) ? "A pending device already exists for this MAC" : "Create a new device from this lease"}
                   >
                     {isCreating === lease.mac_address ? "Creating..." : "Create Device"}
                   </Button>
