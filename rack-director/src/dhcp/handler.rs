@@ -333,7 +333,54 @@ impl DhcpHandler {
 
         debug!("Requested IP: {}", requested_ip);
 
-        // Validate request matches our offer
+        // Check for static reservation - takes priority over everything
+        let static_reservation = self
+            .store
+            .get_static_reservation(network.id, &req_ctx.mac)
+            .await?;
+
+        if let Some(reservation) = &static_reservation {
+            let reserved_ip: Ipv4Addr = reservation.ip_address.parse()?;
+
+            // If client is requesting a different IP than the static reservation, NAK it
+            if requested_ip != reserved_ip {
+                warn!(
+                    "NAKing DHCPREQUEST from {} - requested {} but static reservation is {}",
+                    req_ctx.mac, requested_ip, reserved_ip
+                );
+                return Ok(Some(self.build_nak(msg)?));
+            }
+
+            // Static reservation matches requested IP - update or create lease
+            self.store
+                .create_or_update_lease_with_network(
+                    &req_ctx.mac,
+                    &reserved_ip,
+                    dev_ctx.device_uuid.as_ref(),
+                    LeaseState::Active,
+                    network.lease_duration,
+                    network.id,
+                )
+                .await?;
+
+            if let Some(uuid) = &dev_ctx.device_uuid {
+                self.device_resolver
+                    .on_lease_activated(uuid, &reserved_ip.to_string(), &req_ctx.mac)
+                    .await?;
+            }
+
+            let ack = self
+                .build_ack(msg, reserved_ip, network, &req_ctx, &dev_ctx)
+                .await?;
+            info!(
+                "DHCP ACK {} to MAC {} on network '{}' (static reservation)",
+                reserved_ip, req_ctx.mac, network.name
+            );
+
+            return Ok(Some(ack));
+        }
+
+        // No static reservation - validate request matches our offer
         let lease = self.store.get_lease_by_mac(&req_ctx.mac).await?;
         if let Some(lease) = lease {
             let lease_ip: Ipv4Addr = lease.ip_address.parse()?;
@@ -1318,6 +1365,298 @@ mod tests {
         assert_eq!(
             msg_type, MessageType::Ack,
             "Should respond with ACK to INIT-REBOOT"
+        );
+    }
+
+    // Static Reservation Tests
+
+    #[tokio::test]
+    async fn test_static_reservation_nak_on_wrong_requested_ip() {
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
+        let requested_ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+
+        // Create static reservation
+        store
+            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+            .await
+            .unwrap();
+
+        // Create a REQUEST with different IP than reservation
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::RequestedIpAddress(requested_ip));
+
+        let network = store.get_network(network_id).await.unwrap();
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should receive NAK
+        assert!(response.is_some(), "Should respond with NAK");
+
+        let nak = response.unwrap();
+        let msg_type = nak
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::MessageType(mt) = opt {
+                    Some(*mt)
+                } else {
+                    None
+                }
+            })
+            .expect("Message type should be present");
+
+        assert_eq!(
+            msg_type, MessageType::Nak,
+            "Should NAK request for wrong IP when static reservation exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_static_reservation_nak_on_wrong_ciaddr() {
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
+        let ciaddr: Ipv4Addr = "10.0.0.100".parse().unwrap();
+
+        // Create static reservation
+        store
+            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+            .await
+            .unwrap();
+
+        // Create a renewal REQUEST (with ciaddr) for different IP
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request.set_ciaddr(ciaddr); // Client renewing with wrong IP
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+
+        let network = store.get_network(network_id).await.unwrap();
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should receive NAK
+        assert!(response.is_some(), "Should respond with NAK");
+
+        let nak = response.unwrap();
+        let msg_type = nak
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::MessageType(mt) = opt {
+                    Some(*mt)
+                } else {
+                    None
+                }
+            })
+            .expect("Message type should be present");
+
+        assert_eq!(
+            msg_type, MessageType::Nak,
+            "Should NAK renewal with wrong ciaddr when static reservation exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_static_reservation_ack_on_correct_ip() {
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
+
+        // Create static reservation
+        store
+            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+            .await
+            .unwrap();
+
+        // Create a REQUEST with matching IP
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::RequestedIpAddress(reserved_ip));
+
+        let network = store.get_network(network_id).await.unwrap();
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should receive ACK
+        assert!(response.is_some(), "Should respond with ACK");
+
+        let ack = response.unwrap();
+        let msg_type = ack
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::MessageType(mt) = opt {
+                    Some(*mt)
+                } else {
+                    None
+                }
+            })
+            .expect("Message type should be present");
+
+        assert_eq!(
+            msg_type, MessageType::Ack,
+            "Should ACK request with correct reserved IP"
+        );
+
+        // Verify the ACK contains the reserved IP
+        assert_eq!(
+            ack.yiaddr(),
+            reserved_ip,
+            "ACK should contain the reserved IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_static_reservation_overrides_existing_lease() {
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let old_ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+        let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
+
+        // Create an active lease for the old IP
+        store
+            .create_or_update_lease_with_network(mac, &old_ip, None, LeaseState::Active, 3600, network_id)
+            .await
+            .unwrap();
+
+        // Admin creates static reservation for different IP
+        store
+            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+            .await
+            .unwrap();
+
+        // Client tries to renew the old IP
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request.set_ciaddr(old_ip); // Renewing old IP
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+
+        let network = store.get_network(network_id).await.unwrap();
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should receive NAK because old IP doesn't match static reservation
+        assert!(response.is_some(), "Should respond with NAK");
+
+        let nak = response.unwrap();
+        let msg_type = nak
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::MessageType(mt) = opt {
+                    Some(*mt)
+                } else {
+                    None
+                }
+            })
+            .expect("Message type should be present");
+
+        assert_eq!(
+            msg_type, MessageType::Nak,
+            "Should NAK renewal when static reservation changes to different IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_static_reservation_full_workflow() {
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let old_ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+        let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
+
+        // Step 1: Client gets IP from pool
+        store
+            .create_or_update_lease_with_network(mac, &old_ip, None, LeaseState::Active, 3600, network_id)
+            .await
+            .unwrap();
+
+        // Step 2: Admin creates static reservation for different IP
+        store
+            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+            .await
+            .unwrap();
+
+        // Step 3: Client tries to renew old IP and gets NAKed
+        let mut renew_request = Message::default();
+        renew_request.set_opcode(Opcode::BootRequest);
+        renew_request.set_xid(0x12345678);
+        renew_request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        renew_request.set_ciaddr(old_ip);
+        renew_request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+
+        let network = store.get_network(network_id).await.unwrap();
+        let response = handler.handle_request(&renew_request, &network).await.unwrap();
+
+        assert!(response.is_some());
+        let msg = response.unwrap();
+        let msg_type = msg.opts().msg_type().expect("Message type should be present");
+        assert_eq!(msg_type, MessageType::Nak, "Should NAK renewal of old IP");
+
+        // Step 4: Client rediscovers and requests the reserved IP
+        let mut new_request = Message::default();
+        new_request.set_opcode(Opcode::BootRequest);
+        new_request.set_xid(0x87654321);
+        new_request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        new_request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        new_request
+            .opts_mut()
+            .insert(v4::DhcpOption::RequestedIpAddress(reserved_ip));
+
+        let response = handler.handle_request(&new_request, &network).await.unwrap();
+
+        // Should receive ACK with reserved IP
+        assert!(response.is_some());
+        let ack = response.unwrap();
+        let msg_type = ack.opts().msg_type().expect("Message type should be present");
+        assert_eq!(msg_type, MessageType::Ack, "Should ACK request for reserved IP");
+        assert_eq!(
+            ack.yiaddr(),
+            reserved_ip,
+            "ACK should contain the reserved IP"
+        );
+
+        // Verify lease was updated to new IP
+        let lease = store.get_lease_by_mac(mac).await.unwrap();
+        assert!(lease.is_some());
+        let lease = lease.unwrap();
+        assert_eq!(
+            lease.ip_address, reserved_ip.to_string(),
+            "Lease should be updated to reserved IP"
+        );
+        assert_eq!(
+            lease.state,
+            LeaseState::Active,
+            "Lease should be active"
         );
     }
 }

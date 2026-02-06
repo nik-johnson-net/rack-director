@@ -289,6 +289,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_static_reservation_overrides_existing_lease() {
+        let (allocator, network_id, _temp_dir) = create_test_allocator().await;
+        let mac = "aa:bb:cc:dd:ee:ff";
+
+        // First, allocate IP from pool
+        let ip1 = allocator
+            .allocate_for_mac_in_network(mac, network_id)
+            .await
+            .unwrap();
+        assert_eq!(ip1.to_string(), "10.0.0.100"); // First IP in pool
+
+        // Create an active lease for this IP
+        allocator
+            .store
+            .create_or_update_lease_with_network(
+                mac,
+                &ip1,
+                None,
+                LeaseState::Active,
+                3600,
+                network_id,
+            )
+            .await
+            .unwrap();
+
+        // Admin creates a static reservation for a different IP
+        let static_ip = "10.0.0.50";
+        allocator
+            .store
+            .create_static_reservation(network_id, mac, static_ip, None)
+            .await
+            .unwrap();
+
+        // Next allocation should return the static IP, not the existing lease IP
+        let ip2 = allocator
+            .allocate_for_mac_in_network(mac, network_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            ip2.to_string(),
+            static_ip,
+            "Static reservation should override existing lease"
+        );
+    }
+
+    #[tokio::test]
     async fn test_parse_ip_range() {
         let range: Vec<Ipv4Addr> = parse_ip_range("10.0.0.1", "10.0.0.5").unwrap().collect();
 
