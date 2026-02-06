@@ -1,6 +1,7 @@
 use super::super::{AppState, error::Error as HttpError};
 use super::validation::{validate_create_network_request, validate_update_network_request};
 use crate::dhcp::{DhcpNetwork, DhcpPool, Lease, StaticReservation};
+use crate::director::Device;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -10,6 +11,7 @@ use axum::{
 use common::Ipv4Subnet;
 use serde::Deserialize;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
@@ -290,11 +292,29 @@ async fn delete_static_reservation(
 // ========== Lease Handlers ==========
 
 /// List all leases for a specific network
+///
+/// This endpoint associates leases with devices by searching for the lease's MAC address
+/// across all device network interfaces (including secondary NICs and BMCs).
 async fn list_leases_by_network(
     State(state): State<Arc<AppState>>,
     Path(network_id): Path<i64>,
 ) -> Result<Json<Vec<Lease>>, HttpError> {
-    let leases = state.dhcp_store.get_leases_by_network(network_id).await?;
+    // Fetch leases for the network
+    let mut leases = state.dhcp_store.get_leases_by_network(network_id).await?;
+
+    // Fetch all devices for MAC lookup
+    let devices = state.director.get_all_devices().await?;
+
+    // For each lease without a device_uuid, try to find it by MAC address
+    for lease in &mut leases {
+        if lease.device_uuid.is_none() {
+            // Search all device NICs (including secondary NICs and BMCs) for this MAC
+            if let Some(device_uuid) = find_device_uuid_by_mac(&devices, &lease.mac_address) {
+                lease.device_uuid = Some(device_uuid);
+            }
+        }
+    }
+
     Ok(Json(leases))
 }
 
@@ -345,4 +365,289 @@ async fn make_lease_static(
         .await?;
 
     Ok((StatusCode::CREATED, Json(reservation)))
+}
+
+// ========== Helper Functions ==========
+
+/// Find a device UUID by searching for a MAC address across all device network interfaces.
+///
+/// This function searches for the given MAC address in:
+/// 1. Device network_interfaces array (all NICs)
+/// 2. Legacy mac_address field
+/// 3. BMC mac_address field
+///
+/// The MAC comparison is case-insensitive.
+///
+/// # Arguments
+/// * `devices` - Slice of all devices to search through
+/// * `mac` - The MAC address to search for (in any case format)
+///
+/// # Returns
+/// * `Some(Uuid)` - The UUID of the device with this MAC
+/// * `None` - If no device has this MAC address
+fn find_device_uuid_by_mac(devices: &[Device], mac: &str) -> Option<Uuid> {
+    let mac_lower = mac.to_lowercase();
+
+    for device in devices {
+        // Check network_interfaces array (primary and secondary NICs)
+        for interface in &device.attributes.network_interfaces {
+            if interface.mac_address.to_lowercase() == mac_lower {
+                return Some(device.uuid);
+            }
+        }
+
+        // Check legacy mac_address field
+        if let Some(legacy_mac) = &device.attributes.mac_address
+            && legacy_mac.to_lowercase() == mac_lower
+        {
+            return Some(device.uuid);
+        }
+
+        // Check BMC MAC address
+        if let Some(bmc) = &device.attributes.bmc
+            && bmc.mac_address.to_lowercase() == mac_lower
+        {
+            return Some(device.uuid);
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::device_attributes::{BmcInfo, DeviceAttributes, NetworkInterface};
+    use crate::operating_systems::Architecture;
+
+    fn create_test_device(
+        uuid: Uuid,
+        network_interfaces: Vec<NetworkInterface>,
+        mac_address: Option<String>,
+        bmc: Option<BmcInfo>,
+    ) -> Device {
+        Device {
+            uuid,
+            architecture: Architecture::X86_64,
+            lifecycle: None,
+            role_id: None,
+            attributes: DeviceAttributes {
+                network_interfaces,
+                mac_address,
+                bmc,
+                ..Default::default()
+            },
+            created_at: None,
+            first_seen_at: None,
+            last_seen_at: None,
+        }
+    }
+
+    #[test]
+    fn test_find_device_by_primary_nic_mac() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        let devices = vec![create_test_device(
+            uuid,
+            vec![NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+                network_id: Some(1),
+                disabled: false,
+                warning_label: None,
+            }],
+            None,
+            None,
+        )];
+
+        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:01");
+        assert_eq!(result, Some(uuid));
+    }
+
+    #[test]
+    fn test_find_device_by_secondary_nic_mac() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap();
+        let devices = vec![create_test_device(
+            uuid,
+            vec![
+                NetworkInterface {
+                    interface_name: "eth0".to_string(),
+                    mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                    ip_address: Some("10.0.0.100".to_string()),
+                    is_primary: true,
+                    network_id: Some(1),
+                    disabled: false,
+                    warning_label: None,
+                },
+                NetworkInterface {
+                    interface_name: "eth1".to_string(),
+                    mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                    ip_address: Some("10.0.0.101".to_string()),
+                    is_primary: false,
+                    network_id: Some(1),
+                    disabled: false,
+                    warning_label: None,
+                },
+            ],
+            None,
+            None,
+        )];
+
+        // Should find device by secondary NIC MAC
+        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:02");
+        assert_eq!(result, Some(uuid));
+    }
+
+    #[test]
+    fn test_find_device_by_legacy_mac() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440003").unwrap();
+        let devices = vec![create_test_device(
+            uuid,
+            vec![],
+            Some("aa:bb:cc:dd:ee:ff".to_string()),
+            None,
+        )];
+
+        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(result, Some(uuid));
+    }
+
+    #[test]
+    fn test_find_device_by_bmc_mac() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440004").unwrap();
+        let devices = vec![create_test_device(
+            uuid,
+            vec![],
+            None,
+            Some(BmcInfo {
+                mac_address: "11:22:33:44:55:66".to_string(),
+                ip_address: Some("10.0.1.10".to_string()),
+                ip_address_source: Some("DHCP".to_string()),
+            }),
+        )];
+
+        let result = find_device_uuid_by_mac(&devices, "11:22:33:44:55:66");
+        assert_eq!(result, Some(uuid));
+    }
+
+    #[test]
+    fn test_find_device_by_mac_case_insensitive() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440005").unwrap();
+        let devices = vec![create_test_device(
+            uuid,
+            vec![NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "AA:BB:CC:DD:EE:01".to_string(), // Uppercase in storage
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+                network_id: Some(1),
+                disabled: false,
+                warning_label: None,
+            }],
+            None,
+            None,
+        )];
+
+        // Should find with lowercase query
+        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:01");
+        assert_eq!(result, Some(uuid));
+
+        // Should find with uppercase query
+        let result = find_device_uuid_by_mac(&devices, "AA:BB:CC:DD:EE:01");
+        assert_eq!(result, Some(uuid));
+
+        // Should find with mixed case query
+        let result = find_device_uuid_by_mac(&devices, "Aa:Bb:Cc:Dd:Ee:01");
+        assert_eq!(result, Some(uuid));
+    }
+
+    #[test]
+    fn test_find_device_unknown_mac_returns_none() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440006").unwrap();
+        let devices = vec![create_test_device(
+            uuid,
+            vec![NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: Some("10.0.0.100".to_string()),
+                is_primary: true,
+                network_id: Some(1),
+                disabled: false,
+                warning_label: None,
+            }],
+            None,
+            None,
+        )];
+
+        let result = find_device_uuid_by_mac(&devices, "ff:ff:ff:ff:ff:ff");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_device_with_multiple_devices() {
+        let uuid1 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        let uuid2 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap();
+        let uuid3 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440003").unwrap();
+
+        let devices = vec![
+            create_test_device(
+                uuid1,
+                vec![NetworkInterface {
+                    interface_name: "eth0".to_string(),
+                    mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                    ip_address: Some("10.0.0.100".to_string()),
+                    is_primary: true,
+                    network_id: Some(1),
+                    disabled: false,
+                    warning_label: None,
+                }],
+                None,
+                None,
+            ),
+            create_test_device(
+                uuid2,
+                vec![NetworkInterface {
+                    interface_name: "eth0".to_string(),
+                    mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                    ip_address: Some("10.0.0.101".to_string()),
+                    is_primary: true,
+                    network_id: Some(1),
+                    disabled: false,
+                    warning_label: None,
+                }],
+                None,
+                None,
+            ),
+            create_test_device(
+                uuid3,
+                vec![],
+                None,
+                Some(BmcInfo {
+                    mac_address: "11:22:33:44:55:66".to_string(),
+                    ip_address: Some("10.0.1.10".to_string()),
+                    ip_address_source: Some("DHCP".to_string()),
+                }),
+            ),
+        ];
+
+        // Find first device
+        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:01");
+        assert_eq!(result, Some(uuid1));
+
+        // Find second device
+        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:02");
+        assert_eq!(result, Some(uuid2));
+
+        // Find third device by BMC
+        let result = find_device_uuid_by_mac(&devices, "11:22:33:44:55:66");
+        assert_eq!(result, Some(uuid3));
+    }
+
+    #[test]
+    fn test_find_device_empty_list() {
+        let devices = vec![];
+        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:01");
+        assert_eq!(result, None);
+    }
 }
