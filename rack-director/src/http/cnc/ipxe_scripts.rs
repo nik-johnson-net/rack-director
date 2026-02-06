@@ -10,7 +10,7 @@ use axum::{
 pub fn generate_boot_local_script() -> String {
     r#"#!ipxe
 # Boot to local disk for known device
-sanboot --no-describe --drive 0x80
+exit
 "#
     .to_string()
 }
