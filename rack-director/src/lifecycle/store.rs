@@ -135,22 +135,17 @@ impl LifecycleStore {
         conn: &Connection,
         device_uuid: &Uuid,
     ) -> Result<Option<LifecycleTransition>> {
-        let mut stmt = conn.prepare(
+        let transition = crate::database::query_optional::<LifecycleTransition>(
+            conn,
             "SELECT id, device_uuid, from_state, to_state, plan_id, created_at, completed_at, success, error_message
              FROM lifecycle_transitions
              WHERE device_uuid = ?1 AND success IS NULL
              ORDER BY created_at DESC
-             LIMIT 1"
+             LIMIT 1",
+            &[device_uuid],
         )?;
 
-        let mut transition_iter =
-            stmt.query_map([device_uuid], |row| self.map_row_to_transition(row))?;
-
-        if let Some(transition_result) = transition_iter.next() {
-            return Ok(Some(transition_result?));
-        }
-
-        Ok(None)
+        Ok(transition)
     }
 
     fn complete_transition_internal(
@@ -186,15 +181,11 @@ impl LifecycleStore {
              ORDER BY created_at DESC"
         };
 
-        let mut stmt = conn.prepare(query)?;
-
-        let transition_iter =
-            stmt.query_map([device_uuid], |row| self.map_row_to_transition(row))?;
-
-        let mut transitions = Vec::new();
-        for transition_result in transition_iter {
-            transitions.push(transition_result?);
-        }
+        let transitions = crate::database::query_map_all::<LifecycleTransition>(
+            conn,
+            query,
+            &[device_uuid],
+        )?;
 
         Ok(transitions)
     }
@@ -204,36 +195,14 @@ impl LifecycleStore {
         conn: &Connection,
         plan_id: i64,
     ) -> Result<Option<LifecycleTransition>> {
-        let mut stmt = conn.prepare(
+        let transition = crate::database::query_optional::<LifecycleTransition>(
+            conn,
             "SELECT id, device_uuid, from_state, to_state, plan_id, created_at, completed_at, success, error_message
-             FROM lifecycle_transitions 
-             WHERE plan_id = ?1"
+             FROM lifecycle_transitions
+             WHERE plan_id = ?1",
+            &[&plan_id],
         )?;
 
-        let mut transition_iter =
-            stmt.query_map([plan_id], |row| self.map_row_to_transition(row))?;
-
-        if let Some(transition_result) = transition_iter.next() {
-            return Ok(Some(transition_result?));
-        }
-
-        Ok(None)
-    }
-
-    fn map_row_to_transition(&self, row: &rusqlite::Row) -> rusqlite::Result<LifecycleTransition> {
-        let from_state_str: String = row.get(2)?;
-        let to_state_str: String = row.get(3)?;
-
-        Ok(LifecycleTransition {
-            id: Some(row.get(0)?),
-            device_uuid: row.get(1)?,
-            from_state: DeviceLifecycle::from(from_state_str),
-            to_state: DeviceLifecycle::from(to_state_str),
-            plan_id: row.get(4)?,
-            started_at: row.get(5)?,
-            completed_at: row.get(6)?,
-            success: row.get(7)?,
-            error_message: row.get(8)?,
-        })
+        Ok(transition)
     }
 }

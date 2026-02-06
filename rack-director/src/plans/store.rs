@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::plans::{Action, Plan, PlanStatus};
+use crate::plans::{Plan, PlanStatus};
 use anyhow::Result;
 use rusqlite::Connection;
 use tokio::sync::Mutex;
@@ -72,47 +72,18 @@ impl PlansStore {
         conn: &Connection,
         device_uuid: &Uuid,
     ) -> Result<Option<Plan>> {
-        let mut stmt = conn.prepare(
+        let plan = crate::database::query_optional::<Plan>(
+            conn,
             "SELECT id, device_uuid, status, current_step, total_steps, actions, error_message,
                     created_at, started_at, completed_at
              FROM plans
              WHERE device_uuid = ?1 AND status IN ('pending', 'running')
              ORDER BY created_at DESC
              LIMIT 1",
+            &[device_uuid],
         )?;
 
-        let mut plan_iter = stmt.query_map([device_uuid], |row| {
-            let actions_json: String = row.get(5)?;
-            let actions: Vec<Action> = serde_json::from_str(&actions_json).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    5,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-
-            let status_str: String = row.get(2)?;
-            let status = PlanStatus::from(status_str);
-
-            Ok(Plan {
-                id: Some(row.get(0)?),
-                device_uuid: row.get(1)?,
-                status,
-                current_step: row.get(3)?,
-                total_steps: row.get(4)?,
-                actions,
-                error_message: row.get(6)?,
-                created_at: row.get(7)?,
-                started_at: row.get(8)?,
-                completed_at: row.get(9)?,
-            })
-        })?;
-
-        if let Some(plan_result) = plan_iter.next() {
-            return Ok(Some(plan_result?));
-        }
-
-        Ok(None)
+        Ok(plan)
     }
 
     fn update_plan_status_internal(

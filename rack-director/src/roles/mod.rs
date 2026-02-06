@@ -5,6 +5,8 @@ pub use store::RolesStore;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::database::FromRow;
+
 /// A Role defines how a device should be provisioned
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Role {
@@ -18,6 +20,26 @@ pub struct Role {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl FromRow for Role {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let disk_layout_json: String = row.get("disk_layout")?;
+        let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
+        let config_json: Option<String> = row.get("config_template")?;
+        let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
+
+        Ok(Role {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            description: row.get("description")?,
+            os_id: row.get("os_id")?,
+            disk_layout,
+            config_template,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
 }
 
 /// Disk layout configuration defining partition scheme

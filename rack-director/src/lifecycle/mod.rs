@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::database::FromRow;
+
 pub mod store;
 pub use store::LifecycleStore;
 
@@ -86,6 +88,25 @@ pub struct LifecycleTransition {
     pub completed_at: Option<DateTime<Utc>>,
     pub success: Option<bool>,
     pub error_message: Option<String>,
+}
+
+impl FromRow for LifecycleTransition {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let from_state_str: String = row.get("from_state")?;
+        let to_state_str: String = row.get("to_state")?;
+
+        Ok(LifecycleTransition {
+            id: Some(row.get("id")?),
+            device_uuid: row.get("device_uuid")?,
+            from_state: DeviceLifecycle::from(from_state_str),
+            to_state: DeviceLifecycle::from(to_state_str),
+            plan_id: row.get("plan_id")?,
+            started_at: row.get("created_at")?,
+            completed_at: row.get("completed_at")?,
+            success: row.get("success")?,
+            error_message: row.get("error_message")?,
+        })
+    }
 }
 
 impl LifecycleTransition {

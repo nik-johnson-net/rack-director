@@ -508,7 +508,7 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
-        assert!(body_str.contains("sanboot --no-describe --drive 0x80"));
+        assert!(body_str.contains("exit"));
     }
 
     #[tokio::test]

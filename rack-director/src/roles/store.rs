@@ -55,30 +55,13 @@ impl RolesStore {
     pub async fn get(&self, id: i64) -> Result<Role> {
         let conn = self.db.lock().await;
 
-        let mut stmt = conn.prepare(
+        let role = crate::database::query_one::<Role>(
+            &conn,
             "SELECT id, name, description, os_id, disk_layout, config_template, created_at, updated_at
              FROM roles WHERE id = ?1",
-        )?;
-
-        let role = stmt
-            .query_row(params![id], |row| {
-                let disk_layout_json: String = row.get(4)?;
-                let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
-                let config_json: Option<String> = row.get(5)?;
-                let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
-
-                Ok(Role {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    os_id: row.get(3)?,
-                    disk_layout,
-                    config_template,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
-            .context("Role not found")?;
+            &[&id],
+        )
+        .context("Role not found")?;
 
         Ok(role)
     }
@@ -127,33 +110,12 @@ impl RolesStore {
     pub async fn list(&self) -> Result<Vec<Role>> {
         let conn = self.db.lock().await;
 
-        let mut stmt = conn.prepare(
+        let roles = crate::database::query_map_all::<Role>(
+            &conn,
             "SELECT id, name, description, os_id, disk_layout, config_template, created_at, updated_at
              FROM roles ORDER BY name",
+            &[],
         )?;
-
-        let rows = stmt.query_map(params![], |row| {
-            let disk_layout_json: String = row.get(4)?;
-            let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
-            let config_json: Option<String> = row.get(5)?;
-            let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
-
-            Ok(Role {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                os_id: row.get(3)?,
-                disk_layout,
-                config_template,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
-        })?;
-
-        let mut roles = Vec::new();
-        for row in rows {
-            roles.push(row?);
-        }
 
         Ok(roles)
     }

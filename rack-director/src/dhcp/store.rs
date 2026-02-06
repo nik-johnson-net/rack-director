@@ -1,11 +1,13 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+use crate::database::FromRow;
 
 #[derive(Debug, Clone)]
 pub struct DhcpStore {
@@ -23,6 +25,26 @@ pub struct Lease {
     pub state: LeaseState,
     pub hostname: Option<String>,
     pub network_id: Option<i64>,
+}
+
+impl FromRow for Lease {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let lease_start_str: String = row.get("lease_start")?;
+        let lease_end_str: String = row.get("lease_end")?;
+        let state_str: String = row.get("state")?;
+
+        Ok(Lease {
+            id: row.get("id")?,
+            mac_address: row.get("mac_address")?,
+            ip_address: row.get("ip_address")?,
+            device_uuid: row.get("device_uuid")?,
+            lease_start: lease_start_str.parse().unwrap(),
+            lease_end: lease_end_str.parse().unwrap(),
+            state: state_str.parse().unwrap(),
+            hostname: row.get("hostname")?,
+            network_id: row.get("network_id")?,
+        })
+    }
 }
 
 impl Lease {
@@ -79,6 +101,30 @@ pub struct DhcpNetwork {
     pub updated_at: DateTime<Utc>,
 }
 
+impl FromRow for DhcpNetwork {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let dns_servers_json: String = row.get("dns_servers")?;
+        let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
+            .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
+
+        let created_at_str: String = row.get("created_at")?;
+        let updated_at_str: String = row.get("updated_at")?;
+
+        Ok(DhcpNetwork {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            subnet: row.get("subnet")?,
+            gateway: row.get("gateway")?,
+            dns_servers,
+            lease_duration: row.get("lease_duration")?,
+            relay_agent_address: row.get("relay_agent_address")?,
+            enable_autodiscovery: row.get("enable_autodiscovery")?,
+            created_at: parse_datetime(&created_at_str).unwrap(),
+            updated_at: parse_datetime(&updated_at_str).unwrap(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DhcpPool {
     pub id: i64,
@@ -90,6 +136,23 @@ pub struct DhcpPool {
     pub updated_at: DateTime<Utc>,
 }
 
+impl FromRow for DhcpPool {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let created_at_str: String = row.get("created_at")?;
+        let updated_at_str: String = row.get("updated_at")?;
+
+        Ok(DhcpPool {
+            id: row.get("id")?,
+            network_id: row.get("network_id")?,
+            name: row.get("name")?,
+            range_start: row.get("range_start")?,
+            range_end: row.get("range_end")?,
+            created_at: parse_datetime(&created_at_str).unwrap(),
+            updated_at: parse_datetime(&updated_at_str).unwrap(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticReservation {
     pub id: i64,
@@ -99,6 +162,23 @@ pub struct StaticReservation {
     pub hostname: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl FromRow for StaticReservation {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let created_at_str: String = row.get("created_at")?;
+        let updated_at_str: String = row.get("updated_at")?;
+
+        Ok(StaticReservation {
+            id: row.get("id")?,
+            network_id: row.get("network_id")?,
+            mac_address: row.get("mac_address")?,
+            ip_address: row.get("ip_address")?,
+            hostname: row.get("hostname")?,
+            created_at: parse_datetime(&created_at_str).unwrap(),
+            updated_at: parse_datetime(&updated_at_str).unwrap(),
+        })
+    }
 }
 
 impl DhcpStore {
@@ -152,26 +232,12 @@ impl DhcpStore {
     pub async fn get_lease_by_mac(&self, mac: &str) -> Result<Option<Lease>> {
         let db = self.db.lock().await;
 
-        let mut stmt = db.prepare(
+        let lease = crate::database::query_optional::<Lease>(
+            &db,
             "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname, network_id
              FROM dhcp_leases WHERE mac_address = ?",
+            &[&mac],
         )?;
-
-        let lease = stmt
-            .query_row(params![mac], |row| {
-                Ok(Lease {
-                    id: row.get(0)?,
-                    mac_address: row.get(1)?,
-                    ip_address: row.get(2)?,
-                    device_uuid: row.get(3)?,
-                    lease_start: row.get::<_, String>(4)?.parse().unwrap(),
-                    lease_end: row.get::<_, String>(5)?.parse().unwrap(),
-                    state: row.get::<_, String>(6)?.parse().unwrap(),
-                    hostname: row.get(7)?,
-                    network_id: row.get(8)?,
-                })
-            })
-            .optional()?;
 
         Ok(lease)
     }
@@ -180,26 +246,12 @@ impl DhcpStore {
     pub async fn get_lease_by_id(&self, id: i64) -> Result<Option<Lease>> {
         let db = self.db.lock().await;
 
-        let mut stmt = db.prepare(
+        let lease = crate::database::query_optional::<Lease>(
+            &db,
             "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname, network_id
              FROM dhcp_leases WHERE id = ?",
+            &[&id],
         )?;
-
-        let lease = stmt
-            .query_row(params![id], |row| {
-                Ok(Lease {
-                    id: row.get(0)?,
-                    mac_address: row.get(1)?,
-                    ip_address: row.get(2)?,
-                    device_uuid: row.get(3)?,
-                    lease_start: row.get::<_, String>(4)?.parse().unwrap(),
-                    lease_end: row.get::<_, String>(5)?.parse().unwrap(),
-                    state: row.get::<_, String>(6)?.parse().unwrap(),
-                    hostname: row.get(7)?,
-                    network_id: row.get(8)?,
-                })
-            })
-            .optional()?;
 
         Ok(lease)
     }
@@ -235,26 +287,13 @@ impl DhcpStore {
     /// Get all leases (for API/management)
     pub async fn get_all_leases(&self) -> Result<Vec<Lease>> {
         let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+
+        let leases = crate::database::query_map_all::<Lease>(
+            &db,
             "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname, network_id
              FROM dhcp_leases ORDER BY updated_at DESC",
+            &[],
         )?;
-
-        let leases = stmt
-            .query_map([], |row| {
-                Ok(Lease {
-                    id: row.get(0)?,
-                    mac_address: row.get(1)?,
-                    ip_address: row.get(2)?,
-                    device_uuid: row.get(3)?,
-                    lease_start: row.get::<_, String>(4)?.parse().unwrap(),
-                    lease_end: row.get::<_, String>(5)?.parse().unwrap(),
-                    state: row.get::<_, String>(6)?.parse().unwrap(),
-                    hostname: row.get(7)?,
-                    network_id: row.get(8)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(leases)
     }
@@ -267,26 +306,12 @@ impl DhcpStore {
             .try_lock()
             .map_err(|_| anyhow::anyhow!("Could not lock database"))?;
 
-        let mut stmt = db.prepare(
+        let lease = crate::database::query_optional::<Lease>(
+            &db,
             "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname, network_id
              FROM dhcp_leases WHERE device_uuid = ? AND state = 'active' ORDER BY lease_end DESC LIMIT 1",
+            &[device_uuid],
         )?;
-
-        let lease = stmt
-            .query_row(params![device_uuid], |row| {
-                Ok(Lease {
-                    id: row.get(0)?,
-                    mac_address: row.get(1)?,
-                    ip_address: row.get(2)?,
-                    device_uuid: row.get(3)?,
-                    lease_start: row.get::<_, String>(4)?.parse().unwrap(),
-                    lease_end: row.get::<_, String>(5)?.parse().unwrap(),
-                    state: row.get::<_, String>(6)?.parse().unwrap(),
-                    hostname: row.get(7)?,
-                    network_id: row.get(8)?,
-                })
-            })
-            .optional()?;
 
         Ok(lease)
     }
@@ -296,29 +321,13 @@ impl DhcpStore {
     /// Get a network by ID
     pub async fn get_network(&self, id: i64) -> Result<DhcpNetwork> {
         let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+
+        let network = crate::database::query_one::<DhcpNetwork>(
+            &db,
             "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks WHERE id = ?",
+            &[&id],
         )?;
-
-        let network = stmt.query_row(params![id], |row| {
-            let dns_servers_json: String = row.get(4)?;
-            let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
-                .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
-
-            Ok(DhcpNetwork {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                subnet: row.get(2)?,
-                gateway: row.get(3)?,
-                dns_servers,
-                lease_duration: row.get(5)?,
-                relay_agent_address: row.get(6)?,
-                enable_autodiscovery: row.get(7)?,
-                created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
-                updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
-            })
-        })?;
 
         Ok(network)
     }
@@ -331,31 +340,12 @@ impl DhcpStore {
         let db = self.db.lock().await;
         let relay_str = relay.map(|r| r.to_string());
 
-        let mut stmt = db.prepare(
+        let network = crate::database::query_optional::<DhcpNetwork>(
+            &db,
             "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks WHERE relay_agent_address IS ? OR (relay_agent_address IS NULL AND ? IS NULL)",
+            &[&relay_str, &relay_str],
         )?;
-
-        let network = stmt
-            .query_row(params![relay_str, relay_str], |row| {
-                let dns_servers_json: String = row.get(4)?;
-                let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
-                    .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
-
-                Ok(DhcpNetwork {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    subnet: row.get(2)?,
-                    gateway: row.get(3)?,
-                    dns_servers,
-                    lease_duration: row.get(5)?,
-                    relay_agent_address: row.get(6)?,
-                    enable_autodiscovery: row.get(7)?,
-                    created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
-                })
-            })
-            .optional()?;
 
         Ok(network)
     }
@@ -364,31 +354,12 @@ impl DhcpStore {
     pub async fn get_network_by_name(&self, name: &str) -> Result<Option<DhcpNetwork>> {
         let db = self.db.lock().await;
 
-        let mut stmt = db.prepare(
+        let network = crate::database::query_optional::<DhcpNetwork>(
+            &db,
             "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks WHERE name = ?",
+            &[&name],
         )?;
-
-        let network = stmt
-            .query_row(params![name], |row| {
-                let dns_servers_json: String = row.get(4)?;
-                let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
-                    .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
-
-                Ok(DhcpNetwork {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    subnet: row.get(2)?,
-                    gateway: row.get(3)?,
-                    dns_servers,
-                    lease_duration: row.get(5)?,
-                    relay_agent_address: row.get(6)?,
-                    enable_autodiscovery: row.get(7)?,
-                    created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
-                })
-            })
-            .optional()?;
 
         Ok(network)
     }
@@ -404,58 +375,20 @@ impl DhcpStore {
         // 1. None or Some("") - Default L2 network (NULL or empty string)
         // 2. Some(address) - Specific relay agent address
         let network = match relay_agent_address {
-            None | Some("") => {
-                let mut stmt = db.prepare(
-                    "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
-                     FROM dhcp_networks WHERE relay_agent_address IS NULL OR relay_agent_address = ''",
-                )?;
-
-                stmt.query_row([], |row| {
-                    let dns_servers_json: String = row.get(4)?;
-                    let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
-                        .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
-
-                    Ok(DhcpNetwork {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        subnet: row.get(2)?,
-                        gateway: row.get(3)?,
-                        dns_servers,
-                        lease_duration: row.get(5)?,
-                        relay_agent_address: row.get(6)?,
-                        enable_autodiscovery: row.get(7)?,
-                        created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
-                        updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
-                    })
-                })
-                .optional()?
-            }
+            None | Some("") => crate::database::query_optional::<DhcpNetwork>(
+                &db,
+                "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
+                 FROM dhcp_networks WHERE relay_agent_address IS NULL OR relay_agent_address = ''",
+                &[],
+            )?,
             Some(addr) => {
                 let addr_string = addr.to_string();
-                let mut stmt = db.prepare(
+                crate::database::query_optional::<DhcpNetwork>(
+                    &db,
                     "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
                      FROM dhcp_networks WHERE relay_agent_address = ?",
-                )?;
-
-                stmt.query_row(params![addr_string], |row| {
-                    let dns_servers_json: String = row.get(4)?;
-                    let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
-                        .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
-
-                    Ok(DhcpNetwork {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        subnet: row.get(2)?,
-                        gateway: row.get(3)?,
-                        dns_servers,
-                        lease_duration: row.get(5)?,
-                        relay_agent_address: row.get(6)?,
-                        enable_autodiscovery: row.get(7)?,
-                        created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
-                        updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
-                    })
-                })
-                .optional()?
+                    &[&addr_string],
+                )?
             }
         };
 
@@ -465,31 +398,13 @@ impl DhcpStore {
     /// List all networks
     pub async fn list_networks(&self) -> Result<Vec<DhcpNetwork>> {
         let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+
+        let networks = crate::database::query_map_all::<DhcpNetwork>(
+            &db,
             "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
              FROM dhcp_networks ORDER BY name",
+            &[],
         )?;
-
-        let networks = stmt
-            .query_map([], |row| {
-                let dns_servers_json: String = row.get(4)?;
-                let dns_servers: Vec<String> = serde_json::from_str(&dns_servers_json)
-                    .unwrap_or_else(|_| vec!["8.8.8.8".to_string()]);
-
-                Ok(DhcpNetwork {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    subnet: row.get(2)?,
-                    gateway: row.get(3)?,
-                    dns_servers,
-                    lease_duration: row.get(5)?,
-                    relay_agent_address: row.get(6)?,
-                    enable_autodiscovery: row.get(7)?,
-                    created_at: parse_datetime(&row.get::<_, String>(8)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(9)?).unwrap(),
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(networks)
     }
@@ -598,22 +513,13 @@ impl DhcpStore {
     /// Get a pool by ID
     pub async fn get_pool(&self, id: i64) -> Result<DhcpPool> {
         let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+
+        let pool = crate::database::query_one::<DhcpPool>(
+            &db,
             "SELECT id, network_id, name, range_start, range_end, created_at, updated_at
              FROM dhcp_pools WHERE id = ?",
+            &[&id],
         )?;
-
-        let pool = stmt.query_row(params![id], |row| {
-            Ok(DhcpPool {
-                id: row.get(0)?,
-                network_id: row.get(1)?,
-                name: row.get(2)?,
-                range_start: row.get(3)?,
-                range_end: row.get(4)?,
-                created_at: parse_datetime(&row.get::<_, String>(5)?).unwrap(),
-                updated_at: parse_datetime(&row.get::<_, String>(6)?).unwrap(),
-            })
-        })?;
 
         Ok(pool)
     }
@@ -621,24 +527,13 @@ impl DhcpStore {
     /// List all pools for a network
     pub async fn list_pools_for_network(&self, network_id: i64) -> Result<Vec<DhcpPool>> {
         let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+
+        let pools = crate::database::query_map_all::<DhcpPool>(
+            &db,
             "SELECT id, network_id, name, range_start, range_end, created_at, updated_at
              FROM dhcp_pools WHERE network_id = ? ORDER BY name",
+            &[&network_id],
         )?;
-
-        let pools = stmt
-            .query_map(params![network_id], |row| {
-                Ok(DhcpPool {
-                    id: row.get(0)?,
-                    network_id: row.get(1)?,
-                    name: row.get(2)?,
-                    range_start: row.get(3)?,
-                    range_end: row.get(4)?,
-                    created_at: parse_datetime(&row.get::<_, String>(5)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(6)?).unwrap(),
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(pools)
     }
@@ -716,24 +611,13 @@ impl DhcpStore {
         mac: &str,
     ) -> Result<Option<StaticReservation>> {
         let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+
+        let reservation = crate::database::query_optional::<StaticReservation>(
+            &db,
             "SELECT id, network_id, mac_address, ip_address, hostname, created_at, updated_at
              FROM dhcp_static_reservations WHERE network_id = ? AND mac_address = ?",
+            &[&network_id, &mac],
         )?;
-
-        let reservation = stmt
-            .query_row(params![network_id, mac], |row| {
-                Ok(StaticReservation {
-                    id: row.get(0)?,
-                    network_id: row.get(1)?,
-                    mac_address: row.get(2)?,
-                    ip_address: row.get(3)?,
-                    hostname: row.get(4)?,
-                    created_at: parse_datetime(&row.get::<_, String>(5)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(6)?).unwrap(),
-                })
-            })
-            .optional()?;
 
         Ok(reservation)
     }
@@ -744,24 +628,13 @@ impl DhcpStore {
         network_id: i64,
     ) -> Result<Vec<StaticReservation>> {
         let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+
+        let reservations = crate::database::query_map_all::<StaticReservation>(
+            &db,
             "SELECT id, network_id, mac_address, ip_address, hostname, created_at, updated_at
              FROM dhcp_static_reservations WHERE network_id = ? ORDER BY ip_address",
+            &[&network_id],
         )?;
-
-        let reservations = stmt
-            .query_map(params![network_id], |row| {
-                Ok(StaticReservation {
-                    id: row.get(0)?,
-                    network_id: row.get(1)?,
-                    mac_address: row.get(2)?,
-                    ip_address: row.get(3)?,
-                    hostname: row.get(4)?,
-                    created_at: parse_datetime(&row.get::<_, String>(5)?).unwrap(),
-                    updated_at: parse_datetime(&row.get::<_, String>(6)?).unwrap(),
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(reservations)
     }
@@ -784,26 +657,14 @@ impl DhcpStore {
         )?;
 
         let id = db.last_insert_rowid();
-        drop(db);
 
         // Fetch and return the created reservation
-        let db = self.db.lock().await;
-        let mut stmt = db.prepare(
+        let reservation = crate::database::query_one::<StaticReservation>(
+            &db,
             "SELECT id, network_id, mac_address, ip_address, hostname, created_at, updated_at
              FROM dhcp_static_reservations WHERE id = ?",
+            &[&id],
         )?;
-
-        let reservation = stmt.query_row(params![id], |row| {
-            Ok(StaticReservation {
-                id: row.get(0)?,
-                network_id: row.get(1)?,
-                mac_address: row.get(2)?,
-                ip_address: row.get(3)?,
-                hostname: row.get(4)?,
-                created_at: parse_datetime(&row.get::<_, String>(5)?).unwrap(),
-                updated_at: parse_datetime(&row.get::<_, String>(6)?).unwrap(),
-            })
-        })?;
 
         Ok(reservation)
     }

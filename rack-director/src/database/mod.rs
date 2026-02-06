@@ -5,6 +5,54 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
+/// Trait for types that can be constructed from a database row.
+/// Provides a standard interface for row-to-struct conversion.
+pub trait FromRow: Sized {
+    /// Construct an instance of Self from a rusqlite Row.
+    ///
+    /// This method should use named column access (e.g., `row.get("column_name")`)
+    /// rather than positional access for better maintainability and robustness.
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
+}
+
+/// Execute a query and map all rows to a Vec<T>.
+///
+/// This is a convenience function for queries that return multiple rows.
+/// Uses the FromRow trait to convert each row to the target type.
+pub fn query_map_all<T: FromRow>(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::types::ToSql],
+) -> rusqlite::Result<Vec<T>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| T::from_row(row))?;
+    rows.collect()
+}
+
+/// Execute a query and return the first row as T.
+///
+/// Returns an error if no rows are found (rusqlite::Error::QueryReturnedNoRows).
+pub fn query_one<T: FromRow>(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::types::ToSql],
+) -> rusqlite::Result<T> {
+    conn.query_row(sql, params, |row| T::from_row(row))
+}
+
+/// Execute a query and return the first row as Option<T>.
+///
+/// Returns Ok(None) if no rows are found, Ok(Some(T)) if a row exists.
+pub fn query_optional<T: FromRow>(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::types::ToSql],
+) -> rusqlite::Result<Option<T>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(sql, params, |row| T::from_row(row))
+        .optional()
+}
+
 const LATEST_VERSION: i32 = 11;
 const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/1.sql"),

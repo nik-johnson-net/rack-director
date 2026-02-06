@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::database::FromRow;
+
 pub mod actions;
 pub mod store;
 
@@ -51,6 +53,35 @@ pub struct Plan {
     pub created_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl FromRow for Plan {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let actions_json: String = row.get("actions")?;
+        let actions: Vec<Action> = serde_json::from_str(&actions_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
+
+        let status_str: String = row.get("status")?;
+        let status = PlanStatus::from(status_str);
+
+        Ok(Plan {
+            id: Some(row.get("id")?),
+            device_uuid: row.get("device_uuid")?,
+            status,
+            current_step: row.get("current_step")?,
+            total_steps: row.get("total_steps")?,
+            actions,
+            error_message: row.get("error_message")?,
+            created_at: row.get("created_at")?,
+            started_at: row.get("started_at")?,
+            completed_at: row.get("completed_at")?,
+        })
+    }
 }
 
 impl Plan {

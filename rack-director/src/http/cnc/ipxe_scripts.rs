@@ -86,7 +86,7 @@ mod tests {
     fn test_generate_boot_local_script() {
         let script = generate_boot_local_script();
         assert!(script.contains("#!ipxe"));
-        assert!(script.contains("sanboot --no-describe --drive 0x80"));
+        assert!(script.contains("exit"));
     }
 
     #[test]

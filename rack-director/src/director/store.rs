@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::database::FromRow;
 use crate::lifecycle::DeviceLifecycle;
 use crate::operating_systems::Architecture;
 
@@ -19,6 +20,44 @@ pub struct Device {
     pub created_at: Option<String>,
     pub first_seen_at: Option<String>,
     pub last_seen_at: Option<String>,
+}
+
+impl FromRow for Device {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let uuid = row.get("uuid")?;
+        let architecture_str: String = row.get("architecture")?;
+        let lifecycle_str: Option<String> = row.get("lifecycle")?;
+        let role_id: Option<i64> = row.get("role_id")?;
+        let attributes_json: Option<String> = row.get("attributes")?;
+
+        // Timestamps can be stored as either TEXT (ISO 8601) or INTEGER (Unix timestamp)
+        // Try to get as string first, if that fails try as integer
+        let created_at: Option<String> = row.get("created_at").ok();
+        let first_seen_at: Option<String> = row.get("first_seen_at").ok();
+        let last_seen_at: Option<String> = row.get("last_seen_at").ok();
+
+        let attributes = match attributes_json {
+            Some(json_str) => {
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
+                    .unwrap_or_else(|_| serde_json::Map::new())
+            }
+            None => serde_json::Map::new(),
+        };
+
+        let architecture = Architecture::from_str(&architecture_str).unwrap_or(Architecture::X86_64);
+        let lifecycle = lifecycle_str.map(DeviceLifecycle::from);
+
+        Ok(Device {
+            uuid,
+            architecture,
+            lifecycle,
+            role_id,
+            attributes,
+            created_at,
+            first_seen_at,
+            last_seen_at,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +85,19 @@ pub struct PendingDevice {
     pub network_id: i64,
     pub created_at: String,
     pub completed_at: Option<String>,
+}
+
+impl FromRow for PendingDevice {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(PendingDevice {
+            id: row.get("id")?,
+            mac_address: row.get("mac_address")?,
+            device_uuid: row.get("device_uuid")?,
+            network_id: row.get("network_id")?,
+            created_at: row.get("created_at")?,
+            completed_at: row.get("completed_at")?,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -117,45 +169,11 @@ impl DirectorStore {
     pub async fn get_device(&self, uuid: &Uuid) -> Result<Device> {
         let conn = self.conn.lock().await;
 
-        let mut stmt = conn.prepare(
-            "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1"
+        let device = crate::database::query_one::<Device>(
+            &conn,
+            "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
+            &[uuid],
         )?;
-        let device = stmt.query_row(params![uuid], |row| {
-            let uuid = row.get(0)?;
-            let architecture_str: String = row.get(1)?;
-            let lifecycle_str: Option<String> = row.get(2)?;
-            let role_id: Option<i64> = row.get(3)?;
-            let attributes_json: Option<String> = row.get(4)?;
-            // Timestamps can be stored as either TEXT (ISO 8601) or INTEGER (Unix timestamp)
-            // Try to get as string first, if that fails try as integer
-            let created_at: Option<String> = row.get(5).ok();
-            let first_seen_at: Option<String> = row.get(6).ok();
-            let last_seen_at: Option<String> = row.get(7).ok();
-
-            let attributes = match attributes_json {
-                Some(json_str) => {
-                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
-                        .unwrap_or_else(|_| serde_json::Map::new())
-                }
-                None => serde_json::Map::new(),
-            };
-
-            let architecture =
-                Architecture::from_str(&architecture_str).unwrap_or(Architecture::X86_64);
-
-            let lifecycle = lifecycle_str.map(DeviceLifecycle::from);
-
-            Ok(Device {
-                uuid,
-                architecture,
-                lifecycle,
-                role_id,
-                attributes,
-                created_at,
-                first_seen_at,
-                last_seen_at,
-            })
-        })?;
 
         Ok(device)
     }
@@ -163,50 +181,11 @@ impl DirectorStore {
     pub async fn get_all_devices(&self) -> Result<Vec<Device>> {
         let conn = self.conn.lock().await;
 
-        let mut stmt = conn.prepare(
-            "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices"
+        let devices = crate::database::query_map_all::<Device>(
+            &conn,
+            "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
+            &[],
         )?;
-        let rows = stmt.query_map([], |row| {
-            let uuid = row.get(0)?;
-            let architecture_str: String = row.get(1)?;
-            let lifecycle_str: Option<String> = row.get(2)?;
-            let role_id: Option<i64> = row.get(3)?;
-            let attributes_json: Option<String> = row.get(4)?;
-            // Timestamps can be stored as either TEXT (ISO 8601) or INTEGER (Unix timestamp)
-            // Try to get as string first, if that fails try as integer
-            let created_at: Option<String> = row.get(5).ok();
-            let first_seen_at: Option<String> = row.get(6).ok();
-            let last_seen_at: Option<String> = row.get(7).ok();
-
-            let attributes = match attributes_json {
-                Some(json_str) => {
-                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
-                        .unwrap_or_else(|_| serde_json::Map::new())
-                }
-                None => serde_json::Map::new(),
-            };
-
-            let architecture =
-                Architecture::from_str(&architecture_str).unwrap_or(Architecture::X86_64);
-
-            let lifecycle = lifecycle_str.map(DeviceLifecycle::from);
-
-            Ok(Device {
-                uuid,
-                architecture,
-                lifecycle,
-                role_id,
-                attributes,
-                created_at,
-                first_seen_at,
-                last_seen_at,
-            })
-        })?;
-
-        let mut devices = Vec::new();
-        for row in rows {
-            devices.push(row?);
-        }
 
         Ok(devices)
     }
@@ -471,28 +450,14 @@ impl DirectorStore {
     pub async fn get_pending_devices(&self) -> Result<Vec<PendingDevice>> {
         let conn = self.conn.lock().await;
 
-        let mut stmt = conn.prepare(
+        let devices = crate::database::query_map_all::<PendingDevice>(
+            &conn,
             "SELECT id, mac_address, device_uuid, network_id, created_at, completed_at
              FROM pending_devices
              WHERE completed_at IS NULL
              ORDER BY created_at DESC",
+            &[],
         )?;
-
-        let rows = stmt.query_map([], |row| {
-            Ok(PendingDevice {
-                id: row.get(0)?,
-                mac_address: row.get(1)?,
-                device_uuid: row.get(2)?,
-                network_id: row.get(3)?,
-                created_at: row.get(4)?,
-                completed_at: row.get(5)?,
-            })
-        })?;
-
-        let mut devices = Vec::new();
-        for row in rows {
-            devices.push(row?);
-        }
 
         Ok(devices)
     }
