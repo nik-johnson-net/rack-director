@@ -473,7 +473,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_identifier_in_offer() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a minimal DISCOVER message
         let mut discover = Message::default();
@@ -485,7 +485,7 @@ mod tests {
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&discover);
@@ -527,9 +527,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_server_identifier_in_nak() {
-        let handler = create_test_handler();
+    #[tokio::test]
+    async fn test_server_identifier_in_nak() {
+        let handler = create_test_handler().await;
 
         // Create a minimal REQUEST message
         let mut request = Message::default();
@@ -577,6 +577,27 @@ mod tests {
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
+
+        // Create test network (migration 12 removed the default network)
+        let network = store
+            .create_network(
+                "Default",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Create test pool
+        store
+            .create_pool(network.id, "Default Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
         let director = Director::new(
             db.clone(),
             Arc::new(MemoryImageStore::new()),
@@ -614,8 +635,8 @@ mod tests {
             "Handler should store custom server identifier"
         );
 
-        // Get default network
-        let network = store.get_network(1).await.unwrap();
+        // Get the test network we just created
+        let network = store.get_network(network.id).await.unwrap();
 
         // Build an OFFER and verify it uses the custom identifier
         let mut discover = Message::default();
@@ -664,7 +685,7 @@ mod tests {
         );
     }
 
-    fn create_test_handler_with_store() -> (DhcpHandler, DhcpStore) {
+    async fn create_test_handler_with_store() -> (DhcpHandler, DhcpStore, i64, tempfile::TempDir) {
         use super::super::device_resolution::DirectorDeviceResolver;
         use crate::boot_files::FilesystemBootFileProvider;
         use crate::database;
@@ -678,6 +699,27 @@ mod tests {
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
+
+        // Create test network (migration 12 removed the default network)
+        let network = store
+            .create_network(
+                "Default",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Create test pool
+        store
+            .create_pool(network.id, "Default Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
         let director = Director::new(
             db.clone(),
             Arc::new(MemoryImageStore::new()),
@@ -707,11 +749,11 @@ mod tests {
             boot_config,
             server_identifier,
         );
-        (handler, store)
+        (handler, store, network.id, temp_dir)
     }
 
-    fn create_test_handler() -> DhcpHandler {
-        let (handler, _store) = create_test_handler_with_store();
+    async fn create_test_handler() -> DhcpHandler {
+        let (handler, _store, _network_id, _temp_dir) = create_test_handler_with_store().await;
         handler
     }
 
@@ -751,7 +793,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_option_60_default_pxe() {
-        let handler = create_test_handler();
+        let handler = create_test_handler().await;
 
         // Create a minimal REQUEST message without architecture
         let mut request = Message::default();
@@ -885,7 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vendor_class_identifier_in_offer_http_boot() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a DISCOVER message with HTTP boot architecture (14)
         let mut discover = Message::default();
@@ -902,7 +944,7 @@ mod tests {
             ));
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&discover);
@@ -946,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vendor_class_identifier_in_offer_traditional_pxe() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a DISCOVER message with traditional UEFI architecture (7)
         let mut discover = Message::default();
@@ -963,7 +1005,7 @@ mod tests {
             ));
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&discover);
@@ -1007,7 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vendor_class_identifier_in_ack_http_boot() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a REQUEST message with HTTP boot architecture (15)
         let mut request = Message::default();
@@ -1024,7 +1066,7 @@ mod tests {
             ));
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&request);
@@ -1070,13 +1112,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_matching_server_id() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, 1)
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, network_id)
             .await
             .unwrap();
 
@@ -1096,7 +1138,7 @@ mod tests {
             .insert(v4::DhcpOption::ServerIdentifier(handler.server_identifier));
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request
         let response = handler.handle_request(&request, &network).await.unwrap();
@@ -1125,13 +1167,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_non_matching_server_id() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, 1)
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, network_id)
             .await
             .unwrap();
 
@@ -1157,7 +1199,7 @@ mod tests {
             .insert(v4::DhcpOption::ServerIdentifier(wrong_server_id));
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request
         let response = handler.handle_request(&request, &network).await.unwrap();
@@ -1171,13 +1213,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_without_server_id() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, 1)
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, network_id)
             .await
             .unwrap();
 
@@ -1195,7 +1237,7 @@ mod tests {
         // Note: No ServerIdentifier option added
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request
         let response = handler.handle_request(&request, &network).await.unwrap();
@@ -1224,13 +1266,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_init_reboot_without_server_id() {
-        let (handler, store) = create_test_handler_with_store();
+        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         store
-            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Active, 3600, 1)
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Active, 3600, network_id)
             .await
             .unwrap();
 
@@ -1249,7 +1291,7 @@ mod tests {
         // No ServerIdentifier - characteristic of INIT-REBOOT
 
         // Get default network
-        let network = store.get_network(1).await.unwrap();
+        let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request
         let response = handler.handle_request(&request, &network).await.unwrap();

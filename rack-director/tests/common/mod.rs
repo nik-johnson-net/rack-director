@@ -39,6 +39,46 @@ impl TestRackDirectorHandle {
     }
 }
 
+/// Creates a test DHCP network via the HTTP API.
+/// Returns the network ID.
+pub async fn create_test_network(http_port: u16) -> Result<u64, anyhow::Error> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{}/ui/dhcp/networks", http_port))
+        .json(&json!({
+            "name": "Test",
+            "subnet": "10.0.0.0/24",
+            "gateway": "10.0.0.1",
+            "dns_servers": ["8.8.8.8"],
+            "lease_duration": 3600,
+            "enable_autodiscovery": false
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let network: serde_json::Value = response.json().await?;
+    Ok(network["id"].as_u64().unwrap())
+}
+
+/// Creates a test DHCP pool for a given network via the HTTP API.
+pub async fn create_test_pool(http_port: u16, network_id: u64) -> Result<(), anyhow::Error> {
+    let client = reqwest::Client::new();
+    client
+        .post(format!(
+            "http://127.0.0.1:{}/ui/dhcp/networks/{}/pools",
+            http_port, network_id
+        ))
+        .json(&json!({
+            "name": "Test Pool",
+            "range_start": "10.0.0.100",
+            "range_end": "10.0.0.200"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 pub async fn start_rack_director() -> Result<TestRackDirectorHandle, anyhow::Error> {
     // Initialize Logger for tests. Will be called multiple times, so throw away the result.
     let _ = env_logger::builder()

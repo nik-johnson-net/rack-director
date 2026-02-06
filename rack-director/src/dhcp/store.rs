@@ -734,17 +734,39 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    async fn create_test_store() -> (DhcpStore, tempfile::TempDir) {
+    async fn create_test_store() -> (DhcpStore, i64, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let conn = crate::database::open(db_path).unwrap();
-        (DhcpStore::new(Arc::new(Mutex::new(conn))), temp_dir)
+        let store = DhcpStore::new(Arc::new(Mutex::new(conn)));
+
+        // Create test network (migration 12 removed the default network)
+        let network = store
+            .create_network(
+                "Default",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Create test pool
+        store
+            .create_pool(network.id, "Default Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        (store, network.id, temp_dir)
     }
 
     #[tokio::test]
     async fn test_get_default_network() {
-        let (store, _temp_dir) = create_test_store().await;
-        let network = store.get_network(1).await.unwrap();
+        let (store, network_id, _temp_dir) = create_test_store().await;
+        let network = store.get_network(network_id).await.unwrap();
         assert_eq!(network.name, "Default");
         assert_eq!(network.subnet, "10.0.0.0/24");
         assert_eq!(network.gateway, "10.0.0.1");
@@ -752,7 +774,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_network_by_name() {
-        let (store, _temp_dir) = create_test_store().await;
+        let (store, _network_id, _temp_dir) = create_test_store().await;
 
         // Test existing network
         let network = store.get_network_by_name("Default").await.unwrap();
@@ -767,7 +789,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_network_by_relay_string() {
-        let (store, _temp_dir) = create_test_store().await;
+        let (store, _network_id, _temp_dir) = create_test_store().await;
 
         // Create a network with a relay agent
         store

@@ -10,7 +10,11 @@ use std::net::Ipv4Addr;
 async fn test_pxe_boot_x86_bios() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // Step 1: First DHCP exchange (firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]; // Test MAC address
@@ -131,7 +135,11 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
 async fn test_pxe_boot_x64_uefi() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // Step 1: First DHCP exchange (UEFI firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x57]; // Different MAC
@@ -250,7 +258,11 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
 async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // Step 1: First DHCP exchange (ARM64 UEFI firmware requesting bootloader)
     let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x58]; // Different MAC

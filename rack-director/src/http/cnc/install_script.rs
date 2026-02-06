@@ -171,6 +171,23 @@ mod tests {
         let db = database::open(&db_path).unwrap();
         let db_tokio = Arc::new(Mutex::new(db));
 
+        // Create test network (migration 12 removed the default network)
+        {
+            let conn = db_tokio.lock().await;
+            conn.execute(
+                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
+                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
+                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
+                [],
+            )
+            .unwrap();
+        }
+
         let storage_path = temp_dir.path().join("images");
         let image_store = crate::storage::LocalImageStore::new(
             storage_path,

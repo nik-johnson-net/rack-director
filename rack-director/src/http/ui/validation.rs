@@ -526,8 +526,19 @@ mod tests {
     async fn test_validate_create_network_request_duplicate_default_l2() {
         let (store, _temp_dir) = create_test_store().await;
 
-        // The test database already has a Default network with no relay agent
-        // (created by the migration)
+        // Create a default L2 network (no relay agent) first
+        store
+            .create_network(
+                "Default L2",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
 
         // Try to create another Default L2 network (no relay agent)
         let req = CreateNetworkRequest {

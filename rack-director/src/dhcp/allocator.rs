@@ -161,30 +161,50 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Mutex;
 
-    async fn create_test_allocator() -> (IpAllocator, tempfile::TempDir) {
+    async fn create_test_allocator() -> (IpAllocator, i64, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
-        (IpAllocator::new(store), temp_dir)
+
+        // Create test network (migration 12 removed the default network)
+        let network = store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Create test pool
+        store
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        (IpAllocator::new(store), network.id, temp_dir)
     }
 
     #[tokio::test]
     async fn test_allocate_for_mac_in_network() {
-        let (allocator, _temp_dir) = create_test_allocator().await;
+        let (allocator, network_id, _temp_dir) = create_test_allocator().await;
         let mac = "aa:bb:cc:dd:ee:ff";
 
-        // Default network (id=1) should exist after migration
-        let ip = allocator.allocate_for_mac_in_network(mac, 1).await.unwrap();
-        assert_eq!(ip.to_string(), "10.0.0.100"); // First IP in default range
+        // Allocate IP in test network
+        let ip = allocator.allocate_for_mac_in_network(mac, network_id).await.unwrap();
+        assert_eq!(ip.to_string(), "10.0.0.100"); // First IP in test range
     }
 
     #[tokio::test]
     async fn test_allocate_reuses_existing_lease() {
-        let (allocator, _temp_dir) = create_test_allocator().await;
+        let (allocator, network_id, _temp_dir) = create_test_allocator().await;
         let mac = "aa:bb:cc:dd:ee:ff";
-        let network_id = 1;
 
         // First allocation
         let ip1 = allocator
@@ -216,10 +236,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_allocate_different_ips_for_different_macs() {
-        let (allocator, _temp_dir) = create_test_allocator().await;
+        let (allocator, network_id, _temp_dir) = create_test_allocator().await;
         let mac1 = "aa:bb:cc:dd:ee:ff";
         let mac2 = "11:22:33:44:55:66";
-        let network_id = 1;
 
         let ip1 = allocator
             .allocate_for_mac_in_network(mac1, network_id)
@@ -250,9 +269,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_takes_priority() {
-        let (allocator, _temp_dir) = create_test_allocator().await;
+        let (allocator, network_id, _temp_dir) = create_test_allocator().await;
         let mac = "aa:bb:cc:dd:ee:ff";
-        let network_id = 1;
         let static_ip = "10.0.0.50";
 
         // Create static reservation

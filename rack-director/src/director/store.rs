@@ -584,7 +584,26 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let conn = crate::database::open(&db_path).unwrap();
-        (DirectorStore::new(Arc::new(Mutex::new(conn))), temp_dir)
+        let db = Arc::new(Mutex::new(conn));
+
+        // Create test network (migration 12 removed the default network)
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
+                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
+                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
+                [],
+            )
+            .unwrap();
+        }
+
+        (DirectorStore::new(db), temp_dir)
     }
 
     #[test]

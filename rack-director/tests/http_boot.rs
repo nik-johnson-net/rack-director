@@ -10,7 +10,11 @@ use std::net::Ipv4Addr;
 async fn test_http_boot_x86_uefi_http() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // DHCP exchange for HTTP Boot client (architecture 14)
     let mac = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x01]; // Test MAC address
@@ -96,7 +100,11 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
 async fn test_http_boot_x64_uefi_http() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // DHCP exchange for HTTP Boot client (architecture 15)
     let mac = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x02]; // Test MAC address
@@ -181,7 +189,11 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
 async fn test_http_boot_arm64_uefi_http() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // DHCP exchange for HTTP Boot client (architecture 16)
     let mac = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x03]; // Test MAC address
@@ -266,7 +278,11 @@ async fn test_http_boot_arm64_uefi_http() -> Result<()> {
 async fn test_tftp_boot_still_works_x86_bios() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // DHCP exchange for traditional TFTP Boot client (architecture 0)
     let mac = [0x52, 0x54, 0x00, 0xCC, 0xDD, 0x01]; // Test MAC address
@@ -336,7 +352,11 @@ async fn test_tftp_boot_still_works_x86_bios() -> Result<()> {
 async fn test_tftp_boot_still_works_x64_uefi() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
-    handle.set_network_autodiscover(1, true).await?;
+
+    // Create test network and pool
+    let network_id = common::create_test_network(handle.handle.http_port).await?;
+    common::create_test_pool(handle.handle.http_port, network_id).await?;
+    handle.set_network_autodiscover(network_id as u16, true).await?;
 
     // DHCP exchange for traditional TFTP Boot client (architecture 7)
     let mac = [0x52, 0x54, 0x00, 0xCC, 0xDD, 0x02]; // Test MAC address
