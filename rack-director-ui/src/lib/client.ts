@@ -195,6 +195,8 @@ export type LifecycleTransition = {
   started_at: string;
   completed_at?: string;
   plan_id?: number;
+  success?: boolean;
+  error_message?: string;
 }
 
 export type DeviceStatus = {

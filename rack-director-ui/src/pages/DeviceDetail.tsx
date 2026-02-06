@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { TransitionStatusBadge } from "@/components/ui/transition-status-badge";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { Label } from "@/components/ui/label";
 import {
@@ -42,7 +43,7 @@ import {
   type DhcpNetwork,
   type BmcConfig,
 } from "@/lib/client";
-import { ArrowLeft, CheckCircle, Clock, Pin, Trash2 } from "lucide-react";
+import { ArrowLeft, AlertCircle, Clock, Pin, Trash2 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -779,38 +780,48 @@ function DeviceDetail() {
         </CardHeader>
         <CardContent>
           {transitions.length === 0 ? (
-            <p className="text-center text-gray-400 py-4">No transitions yet</p>
+            <p className="text-center text-muted-foreground py-4">No transitions yet</p>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-3">
               {transitions.map((transition) => (
                 <div
                   key={transition.id}
-                  className="flex items-center gap-3 p-3 border rounded hover:bg-gray-50"
+                  className="border rounded-lg p-4 space-y-2"
                 >
-                  {transition.completed_at ? (
-                    <CheckCircle className="h-5 w-5 text-green-600 flex-shrink-0" />
-                  ) : (
-                    <Clock className="h-5 w-5 text-yellow-600 flex-shrink-0 animate-pulse" />
-                  )}
-
-                  <div className="flex-1">
+                  <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <StatusBadge status={transition.from_state} />
                       <span className="text-muted-foreground">→</span>
                       <StatusBadge status={transition.to_state} />
+                      <TransitionStatusBadge transition={transition} />
                     </div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      Started: {new Date(transition.started_at).toLocaleString()}
-                      {transition.completed_at && (
-                        <> • Completed: {new Date(transition.completed_at).toLocaleString()}</>
-                      )}
-                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      {new Date(transition.started_at).toLocaleString()}
+                    </span>
                   </div>
 
                   {transition.plan_id && (
                     <Badge variant="secondary" className="text-xs">
                       Plan #{transition.plan_id}
                     </Badge>
+                  )}
+
+                  {transition.error_message && (
+                    <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-md p-3 text-sm">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                        <div>
+                          <p className="font-medium">Transition Failed</p>
+                          <p className="mt-1 text-xs">{transition.error_message}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {transition.completed_at && (
+                    <div className="text-xs text-muted-foreground">
+                      Completed: {new Date(transition.completed_at).toLocaleString()}
+                    </div>
                   )}
                 </div>
               ))}
