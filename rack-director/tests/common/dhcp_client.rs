@@ -86,7 +86,8 @@ impl DhcpClient {
     }
 
     /// Send DHCP DISCOVER and receive DHCP OFFER
-    pub fn discover(&mut self) -> Result<Ipv4Addr> {
+    /// Returns (offered_ip, server_identifier)
+    pub fn discover(&mut self) -> Result<(Ipv4Addr, Ipv4Addr)> {
         // Build DHCP DISCOVER message
         let mut msg = Message::default();
         msg.set_xid(self.xid)
@@ -152,7 +153,20 @@ impl DhcpClient {
         // Extract offered IP
         let offered_ip = offer.yiaddr();
 
-        Ok(offered_ip)
+        // Extract server identifier from OFFER (Option 54)
+        let server_identifier = offer
+            .opts()
+            .get(OptionCode::ServerIdentifier)
+            .and_then(|opt| {
+                if let DhcpOption::ServerIdentifier(ip) = opt {
+                    Some(*ip)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow!("No Server Identifier in DHCP OFFER"))?;
+
+        Ok((offered_ip, server_identifier))
     }
 
     /// Send DHCP REQUEST and receive DHCP ACK with boot options

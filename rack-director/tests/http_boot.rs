@@ -20,8 +20,8 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::X86UefiHttp, dhcp_port)?;
-            let offered_ip = dhcp_client.discover()?;
-            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, Ipv4Addr::LOCALHOST)?;
+            let (offered_ip, server_id) = dhcp_client.discover()?;
+            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, server_id)?;
             Ok((offered_ip, leased_ip, boot_options))
         })
         .await??;
@@ -106,8 +106,8 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::X64UefiHttp, dhcp_port)?;
-            let offered_ip = dhcp_client.discover()?;
-            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, Ipv4Addr::LOCALHOST)?;
+            let (offered_ip, server_id) = dhcp_client.discover()?;
+            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, server_id)?;
             Ok((offered_ip, leased_ip, boot_options))
         })
         .await??;
@@ -191,8 +191,8 @@ async fn test_http_boot_arm64_uefi_http() -> Result<()> {
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::Arm64UefiHttp, dhcp_port)?;
-            let offered_ip = dhcp_client.discover()?;
-            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, Ipv4Addr::LOCALHOST)?;
+            let (offered_ip, server_id) = dhcp_client.discover()?;
+            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, server_id)?;
             Ok((offered_ip, leased_ip, boot_options))
         })
         .await??;
@@ -276,8 +276,8 @@ async fn test_tftp_boot_still_works_x86_bios() -> Result<()> {
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::X86Bios, dhcp_port)?;
-            let offered_ip = dhcp_client.discover()?;
-            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, Ipv4Addr::LOCALHOST)?;
+            let (offered_ip, server_id) = dhcp_client.discover()?;
+            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, server_id)?;
             Ok((offered_ip, leased_ip, boot_options))
         })
         .await??;
@@ -346,8 +346,8 @@ async fn test_tftp_boot_still_works_x64_uefi() -> Result<()> {
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut dhcp_client = DhcpClient::new(mac, Architecture::X64Uefi, dhcp_port)?;
-            let offered_ip = dhcp_client.discover()?;
-            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, Ipv4Addr::LOCALHOST)?;
+            let (offered_ip, server_id) = dhcp_client.discover()?;
+            let (leased_ip, boot_options) = dhcp_client.request(offered_ip, server_id)?;
             Ok((offered_ip, leased_ip, boot_options))
         })
         .await??;

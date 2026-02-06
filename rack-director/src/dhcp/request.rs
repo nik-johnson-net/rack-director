@@ -4,6 +4,35 @@ use uuid::Uuid;
 
 use super::store::format_mac;
 
+/// Extract Server Identifier (Option 54) from a DHCP message.
+///
+/// Per RFC 2131, the Server Identifier option is used by clients to identify
+/// which DHCP server sent an OFFER, and by servers to determine if a REQUEST
+/// is intended for them.
+///
+/// # Arguments
+/// * `msg` - The DHCP message to extract the server identifier from
+///
+/// # Returns
+/// * `Some(Ipv4Addr)` - The server identifier if present and valid
+/// * `None` - If the option is missing or malformed
+///
+/// # RFC 2131 Context
+/// - In SELECTING state: Client includes Server Identifier from chosen OFFER
+/// - In INIT-REBOOT state: No Server Identifier (client verifying old IP)
+/// - In RENEWING/REBINDING state: No Server Identifier (lease renewal)
+pub fn extract_server_identifier(msg: &Message) -> Option<Ipv4Addr> {
+    msg.opts()
+        .get(OptionCode::ServerIdentifier)
+        .and_then(|opt| {
+            if let DhcpOption::ServerIdentifier(ip) = opt {
+                Some(*ip)
+            } else {
+                None
+            }
+        })
+}
+
 /// Pre-parsed DHCP request options extracted in a single pass.
 pub struct RequestContext {
     pub mac: String,
@@ -228,5 +257,67 @@ mod tests {
             ctx.guid.is_none(),
             "RequestContext should have None GUID when option is missing"
         );
+    }
+
+    #[test]
+    fn test_extract_server_identifier_present() {
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+
+        let expected_server_id: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        msg.opts_mut()
+            .insert(DhcpOption::ServerIdentifier(expected_server_id));
+
+        let server_id = extract_server_identifier(&msg);
+        assert_eq!(
+            server_id,
+            Some(expected_server_id),
+            "Server Identifier should be extracted when present"
+        );
+    }
+
+    #[test]
+    fn test_extract_server_identifier_missing() {
+        let mut msg = Message::default();
+        msg.set_opcode(Opcode::BootRequest);
+        msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        msg.opts_mut()
+            .insert(DhcpOption::MessageType(MessageType::Request));
+
+        let server_id = extract_server_identifier(&msg);
+        assert_eq!(
+            server_id, None,
+            "Server Identifier should be None when option is missing"
+        );
+    }
+
+    #[test]
+    fn test_extract_server_identifier_from_various_ips() {
+        let test_cases = vec![
+            "192.168.1.1",
+            "10.0.0.254",
+            "172.16.0.1",
+            "127.0.0.1",
+            "255.255.255.255",
+        ];
+
+        for ip_str in test_cases {
+            let mut msg = Message::default();
+            msg.set_opcode(Opcode::BootRequest);
+            msg.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+
+            let expected_ip: Ipv4Addr = ip_str.parse().unwrap();
+            msg.opts_mut()
+                .insert(DhcpOption::ServerIdentifier(expected_ip));
+
+            let server_id = extract_server_identifier(&msg);
+            assert_eq!(
+                server_id,
+                Some(expected_ip),
+                "Server Identifier should correctly extract IP {}",
+                ip_str
+            );
+        }
     }
 }

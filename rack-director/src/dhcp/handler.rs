@@ -15,7 +15,7 @@ use super::allocator::IpAllocator;
 use super::boot_config::BootConfigProvider;
 use super::device_resolution::{DeviceContext, DeviceResolver};
 use super::message_builder;
-use super::request::RequestContext;
+use super::request::{RequestContext, extract_server_identifier};
 use super::store::{DhcpNetwork, DhcpStore, LeaseState, format_mac};
 
 /// Determines the appropriate vendor class identifier (Option 60) based on client architecture.
@@ -276,6 +276,21 @@ impl DhcpHandler {
         network: &DhcpNetwork,
     ) -> Result<Option<Message>> {
         let req_ctx = RequestContext::from_message(msg);
+
+        // Check Server Identifier option (Option 54) per RFC 2131 Section 4.3.2
+        // If present, only respond if it matches our server identifier
+        if let Some(server_id) = extract_server_identifier(msg)
+            && server_id != self.server_identifier
+        {
+            // This request is for a different DHCP server - ignore it
+            debug!(
+                "Ignoring DHCPREQUEST from {} - server identifier {} doesn't match ours {}",
+                req_ctx.mac, server_id, self.server_identifier
+            );
+            return Ok(None);
+        }
+        // Note: If no Server Identifier is present, this is an INIT-REBOOT, RENEWING,
+        // or REBINDING request and should be processed normally per RFC 2131
 
         info!(
             "DHCP REQUEST from MAC {} on network '{}'{}",
@@ -1048,6 +1063,219 @@ mod tests {
         assert_eq!(
             class_ident, b"HTTPClient",
             "HTTP boot client (arch 15) should receive HTTPClient vendor class identifier in ACK"
+        );
+    }
+
+    // Server Identifier Matching Tests
+
+    #[tokio::test]
+    async fn test_handle_request_matching_server_id() {
+        let (handler, store) = create_test_handler_with_store();
+
+        // Create a lease first
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+        store
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, 1)
+            .await
+            .unwrap();
+
+        // Create a REQUEST message with matching server ID
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::RequestedIpAddress(ip));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::ServerIdentifier(handler.server_identifier));
+
+        // Get default network
+        let network = store.get_network(1).await.unwrap();
+
+        // Handle the request
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should receive an ACK
+        assert!(
+            response.is_some(),
+            "Should process request with matching server ID"
+        );
+
+        let ack = response.unwrap();
+        let msg_type = ack
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::MessageType(mt) = opt {
+                    Some(*mt)
+                } else {
+                    None
+                }
+            })
+            .expect("Message type should be present");
+
+        assert_eq!(msg_type, MessageType::Ack, "Should respond with ACK");
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_non_matching_server_id() {
+        let (handler, store) = create_test_handler_with_store();
+
+        // Create a lease first
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+        store
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, 1)
+            .await
+            .unwrap();
+
+        // Create a REQUEST message with non-matching server ID
+        let wrong_server_id: Ipv4Addr = "192.168.1.99".parse().unwrap();
+        assert_ne!(
+            wrong_server_id, handler.server_identifier,
+            "Test setup: wrong server ID should differ from handler's server ID"
+        );
+
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::RequestedIpAddress(ip));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::ServerIdentifier(wrong_server_id));
+
+        // Get default network
+        let network = store.get_network(1).await.unwrap();
+
+        // Handle the request
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should NOT respond (silently ignore)
+        assert!(
+            response.is_none(),
+            "Should silently ignore request with non-matching server ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_without_server_id() {
+        let (handler, store) = create_test_handler_with_store();
+
+        // Create a lease first
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+        store
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Offered, 3600, 1)
+            .await
+            .unwrap();
+
+        // Create a REQUEST message WITHOUT server ID (RENEWING or INIT-REBOOT)
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::RequestedIpAddress(ip));
+        // Note: No ServerIdentifier option added
+
+        // Get default network
+        let network = store.get_network(1).await.unwrap();
+
+        // Handle the request
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should process the request (RENEWING/REBINDING case)
+        assert!(
+            response.is_some(),
+            "Should process request without server ID (RENEWING/REBINDING)"
+        );
+
+        let ack = response.unwrap();
+        let msg_type = ack
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::MessageType(mt) = opt {
+                    Some(*mt)
+                } else {
+                    None
+                }
+            })
+            .expect("Message type should be present");
+
+        assert_eq!(msg_type, MessageType::Ack, "Should respond with ACK");
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_init_reboot_without_server_id() {
+        let (handler, store) = create_test_handler_with_store();
+
+        // Create a lease first
+        let mac = "aa:bb:cc:dd:ee:ff";
+        let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+        store
+            .create_or_update_lease_with_network(mac, &ip, None, LeaseState::Active, 3600, 1)
+            .await
+            .unwrap();
+
+        // Create an INIT-REBOOT REQUEST (has requested IP, no server ID, no ciaddr)
+        let mut request = Message::default();
+        request.set_opcode(Opcode::BootRequest);
+        request.set_xid(0x12345678);
+        request.set_chaddr(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        request.set_ciaddr(Ipv4Addr::UNSPECIFIED); // No ciaddr in INIT-REBOOT
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::MessageType(MessageType::Request));
+        request
+            .opts_mut()
+            .insert(v4::DhcpOption::RequestedIpAddress(ip));
+        // No ServerIdentifier - characteristic of INIT-REBOOT
+
+        // Get default network
+        let network = store.get_network(1).await.unwrap();
+
+        // Handle the request
+        let response = handler.handle_request(&request, &network).await.unwrap();
+
+        // Should process INIT-REBOOT request
+        assert!(
+            response.is_some(),
+            "Should process INIT-REBOOT request (no server ID)"
+        );
+
+        let ack = response.unwrap();
+        let msg_type = ack
+            .opts()
+            .iter()
+            .find_map(|(_, opt)| {
+                if let v4::DhcpOption::MessageType(mt) = opt {
+                    Some(*mt)
+                } else {
+                    None
+                }
+            })
+            .expect("Message type should be present");
+
+        assert_eq!(
+            msg_type, MessageType::Ack,
+            "Should respond with ACK to INIT-REBOOT"
         );
     }
 }
