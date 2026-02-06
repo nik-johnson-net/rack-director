@@ -6,8 +6,6 @@ import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tan
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 import { Network, Eye, Pin } from "lucide-react";
 import {
   AlertDialog,
@@ -20,14 +18,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { MakeStaticDialog } from "./make-static-dialog";
 
 interface LeasesTableProps {
   network: DhcpNetwork;
@@ -47,9 +38,6 @@ export default function LeasesTable({ network, networkId, leases, pendingDevices
   // Static IP dialog state
   const [staticDialogOpen, setStaticDialogOpen] = useState(false);
   const [selectedLease, setSelectedLease] = useState<DhcpLease | null>(null);
-  const [customIp, setCustomIp] = useState("");
-  const [hostname, setHostname] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Devices state for BMC lookup
   const [devices, setDevices] = useState<Device[]>([]);
@@ -113,54 +101,36 @@ export default function LeasesTable({ network, networkId, leases, pendingDevices
 
   const handleOpenStaticDialog = (lease: DhcpLease) => {
     setSelectedLease(lease);
-    setCustomIp(lease.ip_address);
-    setHostname(lease.hostname || "");
     setStaticDialogOpen(true);
   };
 
-  const handleUseCurrentIp = () => {
-    if (selectedLease) {
-      setCustomIp(selectedLease.ip_address);
-    }
-  };
-
-  const handleMakeStatic = async () => {
+  const handleMakeStatic = async (ip: string, hostname?: string) => {
     if (!selectedLease) return;
 
     setError(null);
     setSuccessMessage(null);
-    setIsSubmitting(true);
 
-    try {
-      const reservation = await makeLeaseStatic(selectedLease.id, {
-        ip_address: customIp || undefined,
-        hostname: hostname || undefined,
-      });
+    const reservation = await makeLeaseStatic(selectedLease.id, {
+      ip_address: ip || undefined,
+      hostname: hostname || undefined,
+    });
 
-      setSuccessMessage(
-        `Static reservation created: ${reservation.ip_address} for ${reservation.mac_address}`
-      );
+    setSuccessMessage(
+      `Static reservation created: ${reservation.ip_address} for ${reservation.mac_address}`
+    );
 
-      // Auto-dismiss success message after 5 seconds
-      setTimeout(() => {
-        setSuccessMessage(null);
-      }, 5000);
+    // Auto-dismiss success message after 5 seconds
+    setTimeout(() => {
+      setSuccessMessage(null);
+    }, 5000);
 
-      // Call the callback if provided
-      if (onReservationCreated) {
-        onReservationCreated(reservation);
-      }
-
-      // Close dialog
-      setStaticDialogOpen(false);
-      setSelectedLease(null);
-      setCustomIp("");
-      setHostname("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to make lease static");
-    } finally {
-      setIsSubmitting(false);
+    // Call the callback if provided
+    if (onReservationCreated) {
+      onReservationCreated(reservation);
     }
+
+    // Reset selected lease
+    setSelectedLease(null);
   };
 
   const columns: ColumnDef<DhcpLease>[] = [
@@ -341,82 +311,13 @@ export default function LeasesTable({ network, networkId, leases, pendingDevices
         </div>
       )}
 
-      <Dialog open={staticDialogOpen} onOpenChange={setStaticDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Make IP Address Static</DialogTitle>
-            <DialogDescription>
-              Assign a static IP address to this MAC address. You can use the current lease IP or specify a custom one.
-            </DialogDescription>
-          </DialogHeader>
-
-          {selectedLease && (
-            <div className="space-y-4">
-              <div className="bg-muted p-3 rounded-md">
-                <div className="text-sm">
-                  <span className="font-medium">MAC Address: </span>
-                  <span className="font-mono">{selectedLease.mac_address}</span>
-                </div>
-                <div className="text-sm mt-1">
-                  <span className="font-medium">Current IP: </span>
-                  <span className="font-mono">{selectedLease.ip_address}</span>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="custom-ip">IP Address</Label>
-                <div className="flex gap-2">
-                  <Input
-                    id="custom-ip"
-                    value={customIp}
-                    onChange={(e) => setCustomIp(e.target.value)}
-                    placeholder="e.g., 192.168.1.100"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={handleUseCurrentIp}
-                  >
-                    Reset
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Subnet: {network.subnet}
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="hostname">Hostname (Optional)</Label>
-                <Input
-                  id="hostname"
-                  value={hostname}
-                  onChange={(e) => setHostname(e.target.value)}
-                  placeholder="e.g., server-01"
-                />
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setStaticDialogOpen(false)}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={handleMakeStatic}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? "Creating..." : "Create Static Reservation"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <MakeStaticDialog
+        open={staticDialogOpen}
+        onOpenChange={setStaticDialogOpen}
+        lease={selectedLease}
+        subnet={network.subnet}
+        onConfirm={handleMakeStatic}
+      />
 
       <div className="overflow-hidden rounded-md border">
         <Table>

@@ -8,17 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { FormField, FormTextareaField } from "@/components/ui/form-field";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
+import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import {
   Dialog,
   DialogContent,
@@ -66,6 +56,9 @@ function OperatingSystemEdit() {
   const [moduleName, setModuleName] = useState("");
   const [cmdlineArgs, setCmdlineArgs] = useState<Record<string, string>>({});
   const [savingCmdline, setSavingCmdline] = useState<string | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteArchDialogOpen, setDeleteArchDialogOpen] = useState(false);
+  const [archToDelete, setArchToDelete] = useState<Architecture | null>(null);
 
   useEffect(() => {
     // Expand all architectures by default and initialize cmdline args
@@ -105,12 +98,8 @@ function OperatingSystemEdit() {
   };
 
   const handleDelete = async () => {
-    try {
-      await deleteOperatingSystem(osId);
-      navigate('/operating-systems');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete operating system");
-    }
+    await deleteOperatingSystem(osId);
+    navigate('/operating-systems');
   };
 
   const handleAddArchitecture = async () => {
@@ -128,13 +117,16 @@ function OperatingSystemEdit() {
     }
   };
 
-  const handleDeleteArchitecture = async (arch: Architecture) => {
-    try {
-      await deleteOsArchitecture(osId, arch);
-      await refreshData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete architecture");
-    }
+  const openDeleteArchDialog = (arch: Architecture) => {
+    setArchToDelete(arch);
+    setDeleteArchDialogOpen(true);
+  };
+
+  const handleDeleteArchitecture = async () => {
+    if (!archToDelete) return;
+    await deleteOsArchitecture(osId, archToDelete);
+    await refreshData();
+    setArchToDelete(null);
   };
 
   const handleUploadModule = async (arch: Architecture, file: File) => {
@@ -185,27 +177,10 @@ function OperatingSystemEdit() {
         ]}
         title={`${data.name} ${data.version}`}
         actions={
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive">
-                <Trash2 className="h-4 w-4 mr-2" />
-                Delete
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Are you sure?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This will permanently delete this operating system. This action cannot be undone.
-                  Any roles using this OS will need to be updated.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={handleDelete}>Delete</AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete
+          </Button>
         }
       />
 
@@ -347,27 +322,13 @@ function OperatingSystemEdit() {
                         {archData.architecture}
                       </Badge>
                     </button>
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button variant="outline" size="sm">
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Delete Architecture?</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            This will remove all uploaded files for this architecture. This cannot be undone.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction onClick={() => handleDeleteArchitecture(archData.architecture)}>
-                            Delete
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openDeleteArchDialog(archData.architecture)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
                 </CardHeader>
 
@@ -508,6 +469,23 @@ function OperatingSystemEdit() {
           )}
         </CardContent>
       </Card>
+
+      <DeleteConfirmationDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title="Delete Operating System?"
+        description="This will permanently delete this operating system. This action cannot be undone. Any roles using this OS will need to be updated."
+        onConfirm={handleDelete}
+      />
+
+      <DeleteConfirmationDialog
+        open={deleteArchDialogOpen}
+        onOpenChange={setDeleteArchDialogOpen}
+        title="Delete Architecture?"
+        description="This will remove all uploaded files for this architecture. This cannot be undone."
+        itemName={archToDelete ?? undefined}
+        onConfirm={handleDeleteArchitecture}
+      />
     </div>
   );
 }

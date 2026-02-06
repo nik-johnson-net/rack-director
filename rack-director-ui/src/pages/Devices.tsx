@@ -7,16 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Clock, X } from "lucide-react";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 
 function DevicesEnhanced() {
   const { devices: initialDevices, dhcpLeases: initialDhcpLeases, pendingDevices: initialPendingDevices } = useLoaderData() as {
@@ -30,7 +21,6 @@ function DevicesEnhanced() {
   const [roles, setRoles] = useState<RoleWithOs[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingDeviceToCancel, setPendingDeviceToCancel] = useState<number | null>(null);
-  const [isCancelling, setIsCancelling] = useState(false);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -49,18 +39,10 @@ function DevicesEnhanced() {
   const handleCancelPendingDevice = async () => {
     if (pendingDeviceToCancel === null) return;
 
-    setIsCancelling(true);
-    try {
-      await deletePendingDevice(pendingDeviceToCancel);
-      // Refresh the pending devices list
-      revalidator.revalidate();
-      setPendingDeviceToCancel(null);
-    } catch (error) {
-      console.error('Failed to cancel pending device:', error);
-      alert('Failed to cancel pending device. Please try again.');
-    } finally {
-      setIsCancelling(false);
-    }
+    await deletePendingDevice(pendingDeviceToCancel);
+    // Refresh the pending devices list
+    revalidator.revalidate();
+    setPendingDeviceToCancel(null);
   };
 
   // Create roles map for quick lookup
@@ -127,26 +109,13 @@ function DevicesEnhanced() {
         rolesMap={rolesMap}
       />
 
-      <AlertDialog open={pendingDeviceToCancel !== null} onOpenChange={() => setPendingDeviceToCancel(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Cancel Pending Device</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to cancel this pending device registration? The DHCP lease will remain active.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isCancelling}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleCancelPendingDevice}
-              disabled={isCancelling}
-              className="bg-red-600 hover:bg-red-700"
-            >
-              {isCancelling ? 'Cancelling...' : 'Yes, Cancel'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <DeleteConfirmationDialog
+        open={pendingDeviceToCancel !== null}
+        onOpenChange={(open) => !open && setPendingDeviceToCancel(null)}
+        title="Cancel Pending Device"
+        description="Are you sure you want to cancel this pending device registration? The DHCP lease will remain active."
+        onConfirm={handleCancelPendingDevice}
+      />
     </div>
   );
 }

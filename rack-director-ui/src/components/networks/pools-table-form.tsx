@@ -9,7 +9,7 @@ interface PoolsTableFormProps {
   onSubmit: (e: React.FormEvent) => void;
   setFormData: (data: CreateDhcpPoolRequest) => void;
   isSubmitting: boolean;
-  error: String | null;
+  error: string | null;
   editingPool: boolean;
 }
 

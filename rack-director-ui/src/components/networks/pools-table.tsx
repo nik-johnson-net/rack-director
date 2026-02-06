@@ -6,14 +6,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Button } from "../ui/button";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -24,7 +16,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import PoolsTableForm from "./pools-table-form";
+import { PoolDialog } from "./pool-dialog";
 
 interface PoolsTableProps {
   networkId: number;
@@ -36,69 +28,27 @@ export default function PoolsTable({ networkId, pools, onPoolsChange }: PoolsTab
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingPool, setEditingPool] = useState<DhcpPool | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const [formData, setFormData] = useState<CreateDhcpPoolRequest>({
-    name: "",
-    range_start: "",
-    range_end: "",
-  });
-
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setIsSubmitting(true);
-
-    try {
-      const newPool = await createPool(networkId, formData);
-      onPoolsChange([...pools, newPool]);
-      setIsAddDialogOpen(false);
-      setFormData({ name: "", range_start: "", range_end: "" });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create pool");
-    } finally {
-      setIsSubmitting(false);
-    }
+  const handleAdd = async (pool: CreateDhcpPoolRequest) => {
+    const newPool = await createPool(networkId, pool);
+    onPoolsChange([...pools, newPool]);
   };
 
-  const handleEdit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleEdit = async (pool: CreateDhcpPoolRequest) => {
     if (!editingPool) return;
 
-    setError(null);
-    setIsSubmitting(true);
-
-    try {
-      const updated = await updatePool(editingPool.id, formData);
-      onPoolsChange(pools.map((p) => (p.id === updated.id ? updated : p)));
-      setIsEditDialogOpen(false);
-      setEditingPool(null);
-      setFormData({ name: "", range_start: "", range_end: "" });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update pool");
-    } finally {
-      setIsSubmitting(false);
-    }
+    const updated = await updatePool(editingPool.id, pool);
+    onPoolsChange(pools.map((p) => (p.id === updated.id ? updated : p)));
+    setEditingPool(null);
   };
 
   const handleDelete = async (id: number) => {
-    setError(null);
-    try {
-      await deletePool(id);
-      onPoolsChange(pools.filter((p) => p.id !== id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete pool");
-    }
+    await deletePool(id);
+    onPoolsChange(pools.filter((p) => p.id !== id));
   };
 
   const openEditDialog = (pool: DhcpPool) => {
     setEditingPool(pool);
-    setFormData({
-      name: pool.name,
-      range_start: pool.range_start,
-      range_end: pool.range_end,
-    });
     setIsEditDialogOpen(true);
   };
 
@@ -175,34 +125,24 @@ export default function PoolsTable({ networkId, pools, onPoolsChange }: PoolsTab
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
-          <DialogTrigger asChild>
-            <Button size="sm">
-              <Plus className="h-4 w-4 mr-2" />
-              Add Pool
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Add Pool</DialogTitle>
-              <DialogDescription>
-                Create a new IP address pool for this network.
-              </DialogDescription>
-            </DialogHeader>
-            <PoolsTableForm onSubmit={handleAdd} setFormData={setFormData} editingPool={editingPool !== null} formData={formData} isSubmitting={isSubmitting} error={error}/>
-          </DialogContent>
-        </Dialog>
+        <Button size="sm" onClick={() => setIsAddDialogOpen(true)}>
+          <Plus className="h-4 w-4 mr-2" />
+          Add Pool
+        </Button>
       </div>
 
-      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit Pool</DialogTitle>
-            <DialogDescription>Update the pool configuration.</DialogDescription>
-          </DialogHeader>
-          <PoolsTableForm onSubmit={handleEdit} setFormData={setFormData} editingPool={editingPool !== null} formData={formData} isSubmitting={isSubmitting} error={error}/>
-        </DialogContent>
-      </Dialog>
+      <PoolDialog
+        open={isAddDialogOpen}
+        onOpenChange={setIsAddDialogOpen}
+        onSave={handleAdd}
+      />
+
+      <PoolDialog
+        open={isEditDialogOpen}
+        onOpenChange={setIsEditDialogOpen}
+        pool={editingPool}
+        onSave={handleEdit}
+      />
 
       <div className="overflow-hidden rounded-md border">
         <Table>

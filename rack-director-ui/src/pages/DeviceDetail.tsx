@@ -8,17 +8,6 @@ import { TransitionStatusBadge } from "@/components/ui/transition-status-badge";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { Label } from "@/components/ui/label";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
-import {
   getDevice,
   getDeviceRole,
   getDeviceStatus,
@@ -45,16 +34,11 @@ import {
 } from "@/lib/client";
 import { ArrowLeft, AlertCircle, Clock, Pin, Trash2 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { EditableHostname } from "@/components/devices/editable-hostname";
+import { MakeStaticDialog } from "@/components/networks/make-static-dialog";
+import { TransitionDialog } from "@/components/devices/transition-dialog";
+import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 
 const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
 
@@ -76,16 +60,17 @@ function DeviceDetail() {
 
   // Static IP dialog state
   const [staticDialogOpen, setStaticDialogOpen] = useState(false);
-  const [selectedInterface, setSelectedInterface] = useState<{
-    mac: string;
-    ip?: string;
-    networkId?: number;
-    leaseId?: number;
-  } | null>(null);
-  const [customIp, setCustomIp] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [selectedLease, setSelectedLease] = useState<DhcpLease | null>(null);
+  const [selectedNetworkId, setSelectedNetworkId] = useState<number | null>(null);
   const [staticReservations, setStaticReservations] = useState<Map<string, StaticReservation>>(new Map());
   const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
+
+  // Transition dialog state
+  const [transitionDialogOpen, setTransitionDialogOpen] = useState(false);
+  const [targetState, setTargetState] = useState<DeviceLifecycle>("new");
+
+  // Delete dialog state
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   // BMC configuration state
   const [bmcMode, setBmcMode] = useState<"dhcp" | "static">("dhcp");
@@ -195,14 +180,19 @@ function DeviceDetail() {
     }
   };
 
-  const handleTransition = async (toState: DeviceLifecycle) => {
+  const openTransitionDialog = (toState: DeviceLifecycle) => {
+    setTargetState(toState);
+    setTransitionDialogOpen(true);
+  };
+
+  const handleTransition = async () => {
     if (!uuid) return;
 
     setTransitioning(true);
     setError(null);
 
     try {
-      await transitionDeviceLifecycle(uuid, toState);
+      await transitionDeviceLifecycle(uuid, targetState);
 
       // Refresh status and transitions
       const [updatedStatus, updatedTransitions] = await Promise.all([
@@ -267,34 +257,23 @@ function DeviceDetail() {
     }
   };
 
-  const handleMakeStatic = async () => {
-    if (!selectedInterface?.leaseId) return;
+  const handleMakeStatic = async (ip: string) => {
+    if (!selectedLease) return;
 
     setError(null);
-    setIsSubmitting(true);
 
-    try {
-      const reservation = await makeLeaseStatic(selectedInterface.leaseId, {
-        ip_address: customIp || undefined,
-      });
+    const reservation = await makeLeaseStatic(selectedLease.id, {
+      ip_address: ip || undefined,
+    });
 
-      // Update static reservations map
-      const updatedReservations = new Map(staticReservations);
-      updatedReservations.set(selectedInterface.mac, reservation);
-      setStaticReservations(updatedReservations);
+    // Update static reservations map
+    const updatedReservations = new Map(staticReservations);
+    updatedReservations.set(selectedLease.mac_address, reservation);
+    setStaticReservations(updatedReservations);
 
-      // Close dialog
-      setStaticDialogOpen(false);
-      setSelectedInterface(null);
-      setCustomIp("");
-
-      // Show success message
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to make lease static");
-    } finally {
-      setIsSubmitting(false);
-    }
+    // Reset selected lease
+    setSelectedLease(null);
+    setSelectedNetworkId(null);
   };
 
   const handleDeleteDevice = async () => {
@@ -302,12 +281,8 @@ function DeviceDetail() {
 
     setError(null);
 
-    try {
-      await deleteDevice(uuid);
-      navigate('/devices');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete device");
-    }
+    await deleteDevice(uuid);
+    navigate('/devices');
   };
 
   if (loading) {
@@ -363,64 +338,13 @@ function DeviceDetail() {
       )}
 
       {/* Static IP Dialog */}
-      <Dialog open={staticDialogOpen} onOpenChange={setStaticDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Make IP Address Static</DialogTitle>
-            <DialogDescription>
-              Assign a static IP address to this MAC address. You can use the current lease IP or specify a custom one.
-            </DialogDescription>
-          </DialogHeader>
-
-          {selectedInterface && (
-            <div className="space-y-4">
-              <div className="bg-muted p-3 rounded-md">
-                <div className="text-sm">
-                  <span className="font-medium">MAC Address: </span>
-                  <span className="font-mono">{selectedInterface.mac}</span>
-                </div>
-                <div className="text-sm mt-1">
-                  <span className="font-medium">Current IP: </span>
-                  <span className="font-mono">{selectedInterface.ip}</span>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="custom-ip">IP Address</Label>
-                <Input
-                  id="custom-ip"
-                  value={customIp}
-                  onChange={(e) => setCustomIp(e.target.value)}
-                  placeholder="e.g., 192.168.1.100"
-                />
-                {selectedInterface.networkId && networks.find(n => n.id === selectedInterface.networkId)?.subnet && (
-                  <p className="text-xs text-muted-foreground">
-                    Subnet: {networks.find(n => n.id === selectedInterface.networkId)?.subnet}
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setStaticDialogOpen(false)}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={handleMakeStatic}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? "Creating..." : "Create Static Reservation"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <MakeStaticDialog
+        open={staticDialogOpen}
+        onOpenChange={setStaticDialogOpen}
+        lease={selectedLease}
+        subnet={selectedNetworkId ? networks.find(n => n.id === selectedNetworkId)?.subnet : undefined}
+        onConfirm={handleMakeStatic}
+      />
 
       {/* Device Information */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -494,13 +418,8 @@ function DeviceDetail() {
                                       // Look up the lease by MAC to get lease ID
                                       const lease = await getDhcpLeaseByMac(nic.mac_address);
                                       if (lease) {
-                                        setSelectedInterface({
-                                          mac: nic.mac_address,
-                                          ip: nic.ip_address,
-                                          networkId: nic.network_id,
-                                          leaseId: lease.id
-                                        });
-                                        setCustomIp(nic.ip_address || "");
+                                        setSelectedLease(lease);
+                                        setSelectedNetworkId(nic.network_id ?? null);
                                         setStaticDialogOpen(true);
                                       } else {
                                         setError("No DHCP lease found for this interface");
@@ -748,36 +667,28 @@ function DeviceDetail() {
         <CardContent>
           <div className="flex flex-wrap gap-2">
             {LIFECYCLE_STATES.map((state) => (
-              <AlertDialog key={state}>
-                <AlertDialogTrigger asChild>
-                  <Button
-                    variant={status?.current_lifecycle === state ? "default" : "outline"}
-                    disabled={transitioning || status?.current_lifecycle === state}
-                    className="capitalize"
-                  >
-                    {state}
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Transition to {state}?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      This will transition the device from "{status?.current_lifecycle}" to "{state}".
-                      A lifecycle transition plan will be created.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                    <AlertDialogAction onClick={() => handleTransition(state)}>
-                      Transition
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
+              <Button
+                key={state}
+                variant={status?.current_lifecycle === state ? "default" : "outline"}
+                disabled={transitioning || status?.current_lifecycle === state}
+                className="capitalize"
+                onClick={() => openTransitionDialog(state)}
+              >
+                {state}
+              </Button>
             ))}
           </div>
         </CardContent>
       </Card>
+
+      {/* Transition Dialog */}
+      <TransitionDialog
+        open={transitionDialogOpen}
+        onOpenChange={setTransitionDialogOpen}
+        currentState={status?.current_lifecycle ?? "new"}
+        targetState={targetState}
+        onConfirm={handleTransition}
+      />
 
       {/* Transitions History */}
       <Card>
@@ -863,30 +774,25 @@ function DeviceDetail() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive" className="w-full">
-                <Trash2 className="h-4 w-4 mr-2" />
-                Delete Device
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete Device?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This will permanently delete this device and all associated plans, transitions, and leases. This action cannot be undone.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={handleDeleteDevice} className="bg-red-600 hover:bg-red-700">
-                  Delete
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <Button
+            variant="destructive"
+            className="w-full"
+            onClick={() => setDeleteDialogOpen(true)}
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete Device
+          </Button>
         </CardContent>
       </Card>
+
+      {/* Delete Device Dialog */}
+      <DeleteConfirmationDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title="Delete Device?"
+        description="This will permanently delete this device and all associated plans, transitions, and leases. This action cannot be undone."
+        onConfirm={handleDeleteDevice}
+      />
     </div>
   );
 }

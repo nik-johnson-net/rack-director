@@ -5,18 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { FormField, FormTextareaField, FormSelectField } from "@/components/ui/form-field";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import PartitionEditor from "@/components/roles/partition-editor";
+import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import {
   updateRole,
   deleteRole,
@@ -46,6 +36,7 @@ function RoleEdit() {
   const [assignedDevices, setAssignedDevices] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -105,12 +96,8 @@ function RoleEdit() {
   };
 
   const handleDelete = async () => {
-    try {
-      await deleteRole(roleId);
-      navigate('/roles');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete role");
-    }
+    await deleteRole(roleId);
+    navigate('/roles');
   };
 
   return (
@@ -127,31 +114,10 @@ function RoleEdit() {
           </Badge>
         }
         actions={
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive">
-                <Trash2 className="h-4 w-4 mr-2" />
-                Delete
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Are you sure?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This will permanently delete this role. This action cannot be undone.
-                  {assignedDevices.length > 0 && (
-                    <span className="block mt-2 font-semibold text-orange-600">
-                      Warning: This role is assigned to {assignedDevices.length} device(s).
-                    </span>
-                  )}
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={handleDelete}>Delete</AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete
+          </Button>
         }
       />
 
@@ -271,6 +237,19 @@ function RoleEdit() {
           </Button>
         </div>
       </form>
+
+      <DeleteConfirmationDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title="Delete Role?"
+        description="This will permanently delete this role. This action cannot be undone."
+        warningMessage={
+          assignedDevices.length > 0
+            ? `Warning: This role is assigned to ${assignedDevices.length} device(s).`
+            : undefined
+        }
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }
