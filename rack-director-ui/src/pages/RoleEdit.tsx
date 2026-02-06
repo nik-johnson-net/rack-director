@@ -1,12 +1,10 @@
 import { useState, useEffect } from "react";
 import { useLoaderData, useNavigate, useParams } from "react-router";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
+import { FormField, FormTextareaField, FormSelectField } from "@/components/ui/form-field";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -194,45 +192,34 @@ function RoleEdit() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">Name *</Label>
-              <Input
-                id="name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
-            </div>
+            <FormField
+              id="name"
+              label="Name"
+              required
+              value={name}
+              onChange={setName}
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={2}
-              />
-            </div>
+            <FormTextareaField
+              id="description"
+              label="Description"
+              value={description}
+              onChange={setDescription}
+              rows={2}
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="os">Operating System *</Label>
-              <select
-                id="os"
-                value={osId}
-                onChange={(e) => setOsId(parseInt(e.target.value))}
-                className="w-full border rounded-md px-3 py-2"
-                required
-              >
-                {operatingSystems.map((os) => (
-                  <option key={os.id} value={os.id}>
-                    {os.name} {os.version}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-gray-500">
-                Supported architectures are inferred from the selected OS
-              </p>
-            </div>
+            <FormSelectField
+              id="os"
+              label="Operating System"
+              required
+              value={osId}
+              onChange={(value) => setOsId(parseInt(value))}
+              options={operatingSystems.map((os) => ({
+                value: os.id!,
+                label: `${os.name} ${os.version}`
+              }))}
+              helperText="Supported architectures are inferred from the selected OS"
+            />
           </CardContent>
         </Card>
 
@@ -257,19 +244,17 @@ function RoleEdit() {
               Optional JSON configuration available in install scripts
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
-            <Label htmlFor="config">JSON Configuration</Label>
-            <Textarea
+          <CardContent>
+            <FormTextareaField
               id="config"
+              label="JSON Configuration"
               value={configTemplate}
-              onChange={(e) => setConfigTemplate(e.target.value)}
+              onChange={setConfigTemplate}
               placeholder={'{\n  "packages": ["nginx", "postgresql"],\n  "custom_setting": "value"\n}'}
               rows={8}
-              className="font-mono text-sm"
+              inputClassName="font-mono text-sm"
+              helperText="This configuration is accessible in install scripts via template variables"
             />
-            <p className="text-xs text-gray-500">
-              This configuration is accessible in install scripts via template variables
-            </p>
           </CardContent>
         </Card>
 

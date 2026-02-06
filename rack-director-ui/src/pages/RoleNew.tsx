@@ -1,11 +1,9 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
+import { FormField, FormTextareaField, FormSelectField } from "@/components/ui/form-field";
 import PartitionEditor from "@/components/roles/partition-editor";
 import { createRole, getOperatingSystems, type Partition, type OperatingSystem } from "@/lib/client";
 
@@ -132,47 +130,36 @@ function RoleNew() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">Name *</Label>
-              <Input
-                id="name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., web-server"
-                required
-              />
-            </div>
+            <FormField
+              id="name"
+              label="Name"
+              required
+              value={name}
+              onChange={setName}
+              placeholder="e.g., web-server"
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Optional description"
-                rows={2}
-              />
-            </div>
+            <FormTextareaField
+              id="description"
+              label="Description"
+              value={description}
+              onChange={setDescription}
+              placeholder="Optional description"
+              rows={2}
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="os">Operating System *</Label>
-              <select
-                id="os"
-                value={osId || ''}
-                onChange={(e) => setOsId(parseInt(e.target.value))}
-                className="w-full border rounded-md px-3 py-2"
-                required
-              >
-                {operatingSystems.map((os) => (
-                  <option key={os.id} value={os.id}>
-                    {os.name} {os.version}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-gray-500">
-                Supported architectures will be inferred from the selected OS
-              </p>
-            </div>
+            <FormSelectField
+              id="os"
+              label="Operating System"
+              required
+              value={osId || ''}
+              onChange={(value) => setOsId(parseInt(value))}
+              options={operatingSystems.map((os) => ({
+                value: os.id!,
+                label: `${os.name} ${os.version}`
+              }))}
+              helperText="Supported architectures will be inferred from the selected OS"
+            />
           </CardContent>
         </Card>
 
@@ -197,19 +184,17 @@ function RoleNew() {
               Optional JSON configuration that will be available in install scripts
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
-            <Label htmlFor="config">JSON Configuration</Label>
-            <Textarea
+          <CardContent>
+            <FormTextareaField
               id="config"
+              label="JSON Configuration"
               value={configTemplate}
-              onChange={(e) => setConfigTemplate(e.target.value)}
+              onChange={setConfigTemplate}
               placeholder={'{\n  "packages": ["nginx", "postgresql"],\n  "custom_setting": "value"\n}'}
               rows={8}
-              className="font-mono text-sm"
+              inputClassName="font-mono text-sm"
+              helperText="This configuration will be accessible in install scripts via template variables"
             />
-            <p className="text-xs text-gray-500">
-              This configuration will be accessible in install scripts via template variables
-            </p>
           </CardContent>
         </Card>
 

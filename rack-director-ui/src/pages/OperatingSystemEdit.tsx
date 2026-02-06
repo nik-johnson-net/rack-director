@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
+import { FormField, FormTextareaField } from "@/components/ui/form-field";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -223,33 +224,30 @@ function OperatingSystemEdit() {
         <CardContent>
           {editingBasic ? (
             <form onSubmit={handleUpdateBasic} className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="name">Name</Label>
-                <Input
-                  id="name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="version">Version</Label>
-                <Input
-                  id="version"
-                  value={version}
-                  onChange={(e) => setVersion(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="description">Description</Label>
-                <Textarea
-                  id="description"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  rows={3}
-                />
-              </div>
+              <FormField
+                id="name"
+                label="Name"
+                required
+                value={name}
+                onChange={setName}
+              />
+
+              <FormField
+                id="version"
+                label="Version"
+                required
+                value={version}
+                onChange={setVersion}
+              />
+
+              <FormTextareaField
+                id="description"
+                label="Description"
+                value={description}
+                onChange={setDescription}
+                rows={3}
+              />
+
               <div className="flex gap-2">
                 <Button type="submit" disabled={isSubmitting}>
                   {isSubmitting ? "Saving..." : "Save"}

@@ -1,11 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
+import { FormField, FormTextareaField } from "@/components/ui/form-field";
 import { createOperatingSystem } from "@/lib/client";
 
 function OperatingSystemNew() {
@@ -56,38 +54,32 @@ function OperatingSystemNew() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">Name *</Label>
-              <Input
-                id="name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g., Ubuntu"
-                required
-              />
-            </div>
+            <FormField
+              id="name"
+              label="Name"
+              required
+              value={name}
+              onChange={setName}
+              placeholder="e.g., Ubuntu"
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="version">Version *</Label>
-              <Input
-                id="version"
-                value={version}
-                onChange={(e) => setVersion(e.target.value)}
-                placeholder="e.g., 22.04"
-                required
-              />
-            </div>
+            <FormField
+              id="version"
+              label="Version"
+              required
+              value={version}
+              onChange={setVersion}
+              placeholder="e.g., 22.04"
+            />
 
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Optional description"
-                rows={3}
-              />
-            </div>
+            <FormTextareaField
+              id="description"
+              label="Description"
+              value={description}
+              onChange={setDescription}
+              placeholder="Optional description"
+              rows={3}
+            />
 
             {error && (
               <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
