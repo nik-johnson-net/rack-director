@@ -219,7 +219,9 @@ pub fn parse_ipxe_script(script: &str) -> IpxeScript {
                 result.chain_url = Some(parts[1].to_string());
             }
         } else if line.starts_with("sanboot ") {
-            result.is_local_boot = true;
+            result.is_sanboot = true;
+        } else if line.starts_with("exit") {
+            result.is_exit = true;
         }
     }
 
@@ -232,5 +234,6 @@ pub struct IpxeScript {
     pub initrd_url: Option<String>,
     pub cmdline: Option<String>,
     pub chain_url: Option<String>,
-    pub is_local_boot: bool,
+    pub is_sanboot: bool,
+    pub is_exit: bool,
 }

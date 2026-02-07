@@ -13,6 +13,8 @@ use crate::tftp;
 
 /// Represents the action to take based on the iPXE script
 enum BootAction {
+    /// Boot next device (exit)
+    NextDevice,
     /// Boot from local disk (sanboot command)
     Sanboot,
     /// Boot the rack-agent for hardware discovery
@@ -98,8 +100,10 @@ async fn follow_ipxe_chains(
         }
 
         // Check for local boot
-        if parsed.is_local_boot {
+        if parsed.is_sanboot {
             return Ok(BootAction::Sanboot);
+        } else if parsed.is_exit {
+            return Ok(BootAction::NextDevice);
         }
 
         // Check for kernel boot
@@ -168,6 +172,7 @@ pub async fn full_boot(
     let http = HttpClient::new(conn);
 
     let mut sanboot_count = 0;
+    let mut exit_count = 0;
     let mut reboot_count = 0;
     const MAX_REBOOTS: u32 = 10;
 
@@ -238,6 +243,20 @@ pub async fn full_boot(
                     break;
                 }
             }
+            BootAction::NextDevice => {
+                exit_count += 1;
+                output.info(&format!("Exit #{} detected (local disk boot)", exit_count));
+
+                if exit_count == 1 {
+                    output.info("First exit - simulating reboot to verify localboot persists...");
+                    state.clear_state();
+                    reboot_count += 1;
+                    continue;
+                } else {
+                    output.success("Second exit - localboot verified, boot sequence complete!");
+                    break;
+                }
+            }
             BootAction::BootAgent => {
                 output.step("Phase 3: Agent Execution");
                 agent::run(conn, &state, output).await?;
@@ -299,7 +318,7 @@ pub async fn ipxe_boot(
         .await?;
     let parsed2 = parse_ipxe_script(&script2);
 
-    if parsed2.is_local_boot {
+    if parsed2.is_sanboot {
         output.success("Boot target: Local disk");
         return Ok(());
     }
