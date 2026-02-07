@@ -71,6 +71,25 @@ impl Director {
         self.store
             .set_hostname(uuid, &generate_hostname_from_uuid(uuid))
             .await?;
+
+        // Set default BMC config to DHCP
+        // Credentials will be auto-generated on first agent fetch
+        let default_bmc_config = common::device_attributes::BmcConfig {
+            ip_address_source: "dhcp".to_string(),
+            ip_address: None,
+            netmask: None,
+            gateway: None,
+            username: None,
+            password: None,
+        };
+
+        let mut attrs = serde_json::Map::new();
+        attrs.insert(
+            "bmc_config".to_string(),
+            serde_json::to_value(&default_bmc_config)?,
+        );
+        self.store.update_attributes(uuid, attrs).await?;
+
         Ok(())
     }
 
@@ -1104,18 +1123,134 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_bmc_credentials_without_config() {
+    async fn test_get_bmc_credentials_without_credentials() {
         let (director, _temp_dir) = setup_test_director().await;
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440029").unwrap();
 
-        // Register device without BMC config
+        // Register device - will have default BMC config with no credentials
         director
             .register_device(&test_uuid, Architecture::X86_64)
             .await
             .unwrap();
 
-        // Get BMC credentials
+        // Get BMC credentials - should be None even though config exists
         let creds = director.get_bmc_credentials(&test_uuid).await.unwrap();
         assert_eq!(creds, None);
+    }
+
+    #[tokio::test]
+    async fn test_register_device_sets_default_bmc_config() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440030").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Get device and verify default BMC config
+        let device = director.get_device(&test_uuid).await.unwrap();
+
+        // Should have BMC config
+        assert!(device.attributes.bmc_config.is_some());
+
+        let bmc_config = device.attributes.bmc_config.unwrap();
+
+        // Should be set to DHCP by default
+        assert_eq!(bmc_config.ip_address_source, "dhcp");
+
+        // All other fields should be None
+        assert_eq!(bmc_config.ip_address, None);
+        assert_eq!(bmc_config.netmask, None);
+        assert_eq!(bmc_config.gateway, None);
+        assert_eq!(bmc_config.username, None);
+        assert_eq!(bmc_config.password, None);
+    }
+
+    #[tokio::test]
+    async fn test_default_bmc_config_does_not_override_existing() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440031").unwrap();
+
+        // Register device (sets default config)
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Manually set a custom BMC config
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.0.100",
+                "netmask": "255.255.255.0",
+                "gateway": "10.0.0.1",
+                "username": "CUSTOM",
+                "password": "custom_pass"
+            }),
+        );
+        director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        // Verify custom config is preserved
+        let device = director.get_device(&test_uuid).await.unwrap();
+        let bmc_config = device.attributes.bmc_config.unwrap();
+
+        assert_eq!(bmc_config.ip_address_source, "static");
+        assert_eq!(bmc_config.ip_address, Some("10.0.0.100".parse().unwrap()));
+        assert_eq!(bmc_config.netmask, Some("255.255.255.0".parse().unwrap()));
+        assert_eq!(bmc_config.gateway, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(bmc_config.username, Some("CUSTOM".to_string()));
+        assert_eq!(bmc_config.password, Some("custom_pass".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_default_bmc_config_preserves_other_attributes() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440032").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Verify hostname was set (from register_device)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(
+            device.attributes.hostname.as_ref().unwrap(),
+            "node-446655440032"
+        );
+
+        // Verify BMC config was also set
+        assert!(device.attributes.bmc_config.is_some());
+
+        // Add additional attributes
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "manufacturer".to_string(),
+            serde_json::Value::String("Dell Inc.".to_string()),
+        );
+        director
+            .update_attributes(&test_uuid, attributes)
+            .await
+            .unwrap();
+
+        // Verify all attributes are preserved
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(
+            device.attributes.hostname.as_ref().unwrap(),
+            "node-446655440032"
+        );
+        assert!(device.attributes.bmc_config.is_some());
+        assert_eq!(
+            device.attributes.manufacturer.as_ref().unwrap(),
+            "Dell Inc."
+        );
     }
 }

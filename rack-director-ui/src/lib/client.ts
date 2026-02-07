@@ -58,8 +58,6 @@ export type BmcConfig = {
   ip_address?: string;
   netmask?: string;
   gateway?: string;
-  username?: string;
-  password?: string;
 }
 
 export type Device = {

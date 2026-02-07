@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 
 /// Top-level device attributes structure
 ///
@@ -125,16 +126,19 @@ pub struct BmcConfig {
     pub ip_address_source: String,
 
     /// Static IP address (required if ip_address_source is "static")
+    /// Serializes as string in JSON (e.g., "192.168.1.100")
     #[serde(default)]
-    pub ip_address: Option<String>,
+    pub ip_address: Option<Ipv4Addr>,
 
     /// Netmask (required if ip_address_source is "static")
+    /// Serializes as string in JSON (e.g., "255.255.255.0")
     #[serde(default)]
-    pub netmask: Option<String>,
+    pub netmask: Option<Ipv4Addr>,
 
     /// Gateway (required if ip_address_source is "static")
+    /// Serializes as string in JSON (e.g., "192.168.1.1")
     #[serde(default)]
-    pub gateway: Option<String>,
+    pub gateway: Option<Ipv4Addr>,
 
     /// BMC admin username
     #[serde(default)]
@@ -476,6 +480,95 @@ mod tests {
 
         // Verify other fields preserved
         assert_eq!(merged.manufacturer, Some("Dell".to_string()));
+    }
+
+    #[test]
+    fn test_bmc_config_serialization_with_ipv4() {
+        let bmc = BmcConfig {
+            ip_address_source: "static".to_string(),
+            ip_address: Some("10.0.1.100".parse().unwrap()),
+            netmask: Some("255.255.255.0".parse().unwrap()),
+            gateway: Some("10.0.1.1".parse().unwrap()),
+            username: Some("admin".to_string()),
+            password: Some("secret".to_string()),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&bmc).unwrap();
+        println!("BmcConfig JSON:\n{}", json);
+
+        // Verify it uses string format
+        assert!(json.contains(r#""10.0.1.100""#));
+        assert!(json.contains(r#""255.255.255.0""#));
+        assert!(json.contains(r#""10.0.1.1""#));
+
+        // Deserialize back
+        let deserialized: BmcConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.ip_address, Some("10.0.1.100".parse().unwrap()));
+        assert_eq!(deserialized.netmask, Some("255.255.255.0".parse().unwrap()));
+        assert_eq!(deserialized.gateway, Some("10.0.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_ipv4addr_default_serialization() {
+        // Test how Ipv4Addr serializes by default with serde_json
+        use std::net::Ipv4Addr;
+
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct TestConfig {
+            ip_address: Option<Ipv4Addr>,
+            netmask: Option<Ipv4Addr>,
+        }
+
+        let config = TestConfig {
+            ip_address: Some("192.168.1.100".parse().unwrap()),
+            netmask: Some("255.255.255.0".parse().unwrap()),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        println!("Default Ipv4Addr serialization:\n{}", json);
+
+        // Check if it serializes as string or array
+        assert!(
+            json.contains(r#""192.168.1.100""#)
+                || json.contains("[192,168,1,100]")
+                || json.contains("[192, 168, 1, 100]"),
+            "JSON should contain IP address in some format"
+        );
+
+        // Try to deserialize from string format
+        let json_string = r#"{
+            "ip_address": "192.168.1.100",
+            "netmask": "255.255.255.0"
+        }"#;
+
+        let result_from_string = serde_json::from_str::<TestConfig>(json_string);
+        println!("Deserialize from string format: {:?}", result_from_string);
+
+        // Try to deserialize from array format
+        let json_array = r#"{
+            "ip_address": [192, 168, 1, 100],
+            "netmask": [255, 255, 255, 0]
+        }"#;
+
+        let result_from_array = serde_json::from_str::<TestConfig>(json_array);
+        println!("Deserialize from array format: {:?}", result_from_array);
+
+        // Determine which format works
+        if result_from_string.is_ok() {
+            println!("✓ String format works!");
+            assert_eq!(result_from_string.unwrap(), config);
+        } else if result_from_array.is_ok() {
+            println!("✓ Array format works!");
+            assert_eq!(result_from_array.unwrap(), config);
+        } else {
+            panic!(
+                "Neither string nor array format works! String error: {:?}, Array error: {:?}",
+                result_from_string.err(),
+                result_from_array.err()
+            );
+        }
     }
 
     #[test]

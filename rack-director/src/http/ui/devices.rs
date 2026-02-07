@@ -16,6 +16,7 @@ use crate::{
     lifecycle::{DeviceLifecycle, LifecycleTransition},
     operating_systems::Architecture,
 };
+use std::net::Ipv4Addr;
 
 /// Sanitize device attributes for UI consumption
 ///
@@ -27,6 +28,130 @@ fn sanitize_attributes_for_ui(attributes: &mut serde_json::Map<String, serde_jso
     {
         obj.remove("password");
     }
+}
+
+/// Validate BMC configuration fields
+///
+/// Ensures that:
+/// - ip_address_source is either "dhcp" or "static"
+/// - For static configurations, ip_address, netmask, and gateway are provided
+/// - All IP addresses are valid IPv4 addresses
+fn validate_bmc_config(
+    bmc_config: &serde_json::Value,
+) -> Result<(), std::collections::HashMap<String, String>> {
+    let mut errors = std::collections::HashMap::new();
+
+    let obj = match bmc_config.as_object() {
+        Some(o) => o,
+        None => {
+            errors.insert(
+                "bmc_config".to_string(),
+                "BMC config must be an object".to_string(),
+            );
+            return Err(errors);
+        }
+    };
+
+    // Validate ip_address_source
+    let ip_source = match obj.get("ip_address_source").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            errors.insert(
+                "bmc_config.ip_address_source".to_string(),
+                "IP address source is required".to_string(),
+            );
+            return Err(errors);
+        }
+    };
+
+    if ip_source != "dhcp" && ip_source != "static" {
+        errors.insert(
+            "bmc_config.ip_address_source".to_string(),
+            "IP address source must be either 'dhcp' or 'static'".to_string(),
+        );
+    }
+
+    // For static configurations, validate required fields
+    if ip_source == "static" {
+        // Validate IP address
+        if let Some(ip_str) = obj.get("ip_address").and_then(|v| v.as_str()) {
+            if ip_str.parse::<Ipv4Addr>().is_err() {
+                errors.insert(
+                    "bmc_config.ip_address".to_string(),
+                    format!("'{}' is not a valid IPv4 address", ip_str),
+                );
+            }
+        } else {
+            errors.insert(
+                "bmc_config.ip_address".to_string(),
+                "IP address is required for static configuration".to_string(),
+            );
+        }
+
+        // Validate netmask
+        if let Some(netmask_str) = obj.get("netmask").and_then(|v| v.as_str()) {
+            if let Ok(netmask) = netmask_str.parse::<Ipv4Addr>() {
+                // Validate that netmask is actually a valid subnet mask
+                if !is_valid_netmask(netmask) {
+                    errors.insert(
+                        "bmc_config.netmask".to_string(),
+                        format!("'{}' is not a valid subnet mask", netmask_str),
+                    );
+                }
+            } else {
+                errors.insert(
+                    "bmc_config.netmask".to_string(),
+                    format!("'{}' is not a valid IPv4 address", netmask_str),
+                );
+            }
+        } else {
+            errors.insert(
+                "bmc_config.netmask".to_string(),
+                "Netmask is required for static configuration".to_string(),
+            );
+        }
+
+        // Validate gateway
+        if let Some(gateway_str) = obj.get("gateway").and_then(|v| v.as_str()) {
+            if gateway_str.parse::<Ipv4Addr>().is_err() {
+                errors.insert(
+                    "bmc_config.gateway".to_string(),
+                    format!("'{}' is not a valid IPv4 address", gateway_str),
+                );
+            }
+        } else {
+            errors.insert(
+                "bmc_config.gateway".to_string(),
+                "Gateway is required for static configuration".to_string(),
+            );
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Check if an IPv4 address is a valid subnet mask
+///
+/// A valid subnet mask has all 1 bits followed by all 0 bits
+/// (e.g., 255.255.255.0 = 11111111.11111111.11111111.00000000)
+fn is_valid_netmask(netmask: Ipv4Addr) -> bool {
+    let bits = u32::from(netmask);
+
+    // A valid netmask has contiguous 1s followed by contiguous 0s
+    // This means (bits & -bits) should equal the complement of bits + 1
+    // Or more simply: bits should equal (!bits + 1) | bits
+
+    // Check if it's a valid netmask by ensuring that when we invert and add 1,
+    // we get a power of 2
+    let inverted = !bits;
+    let incremented = inverted.wrapping_add(1);
+
+    // Check if incremented is a power of 2 (only one bit set)
+    incremented != 0 && (incremented & (incremented.wrapping_sub(1))) == 0
 }
 
 #[derive(Deserialize, Serialize)]
@@ -238,6 +363,26 @@ async fn update_device_attributes(
                 "hostname".to_string(),
                 "Hostname must be a string".to_string(),
             );
+            return Err(HttpError::ValidationError(errors));
+        }
+    }
+
+    // Validate and reject username/password fields in bmc_config
+    if let Some(bmc_config) = payload.attributes.get("bmc_config") {
+        // First check for username/password (security)
+        if let Some(obj) = bmc_config.as_object()
+            && (obj.contains_key("username") || obj.contains_key("password"))
+        {
+            let mut errors = std::collections::HashMap::new();
+            errors.insert(
+                "bmc_config".to_string(),
+                "BMC username and password should not be provided via the UI API".to_string(),
+            );
+            return Err(HttpError::ValidationError(errors));
+        }
+
+        // Then validate IP addresses and configuration
+        if let Err(errors) = validate_bmc_config(bmc_config) {
             return Err(HttpError::ValidationError(errors));
         }
     }
@@ -1184,6 +1329,320 @@ mod tests {
             device.attributes.manufacturer,
             Some("Dell Inc.".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_bmc_config_rejects_password() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x39);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update bmc_config with password (should be rejected)
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.1.100",
+                "password": "secret123"
+            }),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response contains validation error
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("bmc_config"));
+        assert!(body_str.contains("username") || body_str.contains("password"));
+    }
+
+    #[tokio::test]
+    async fn test_update_bmc_config_rejects_username() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x3A);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Try to update bmc_config with username (should be rejected)
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "dhcp",
+                "username": "admin"
+            }),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Verify error response contains validation error
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("bmc_config"));
+        assert!(body_str.contains("username") || body_str.contains("password"));
+    }
+
+    #[tokio::test]
+    async fn test_update_bmc_config_allows_valid_fields() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x3B);
+
+        // Register device
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // Update bmc_config with valid fields only (should succeed)
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.1.100",
+                "netmask": "255.255.255.0",
+                "gateway": "10.0.1.1"
+            }),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify bmc_config was updated
+        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let bmc_config = device
+            .attributes
+            .bmc_config
+            .expect("bmc_config should be set");
+        assert_eq!(bmc_config.ip_address_source, "static");
+        assert_eq!(bmc_config.ip_address, Some("10.0.1.100".parse().unwrap()));
+    }
+
+    // ========== BMC IP Validation Tests ==========
+
+    #[tokio::test]
+    async fn test_update_bmc_config_invalid_ip_address() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x3C);
+
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "300.400.500.600",  // Invalid IP
+                "netmask": "255.255.255.0",
+                "gateway": "10.0.1.1"
+            }),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("ip_address"));
+        assert!(body_str.contains("valid"));
+    }
+
+    #[tokio::test]
+    async fn test_update_bmc_config_invalid_netmask() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x3D);
+
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static",
+                "ip_address": "10.0.1.100",
+                "netmask": "255.255.255.3",  // Invalid netmask (not contiguous bits)
+                "gateway": "10.0.1.1"
+            }),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("netmask"));
+        assert!(body_str.contains("subnet mask"));
+    }
+
+    #[tokio::test]
+    async fn test_update_bmc_config_missing_static_fields() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x3E);
+
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "static"
+                // Missing ip_address, netmask, gateway
+            }),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("required"));
+    }
+
+    #[tokio::test]
+    async fn test_update_bmc_config_dhcp_no_validation() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x3F);
+
+        state
+            .director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+
+        // DHCP mode should not require IP fields
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({
+                "ip_address_source": "dhcp"
+            }),
+        );
+
+        let payload = UpdateAttributesRequest { attributes };
+
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{}/attributes", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify bmc_config was updated
+        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let bmc_config = device
+            .attributes
+            .bmc_config
+            .expect("bmc_config should be set");
+        assert_eq!(bmc_config.ip_address_source, "dhcp");
+        assert!(bmc_config.ip_address.is_none());
     }
 
     // ========== Password Sanitization Tests ==========
