@@ -5,7 +5,7 @@ use crate::operating_systems::{
 use super::super::{AppState, error::Error as HttpError};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -14,6 +14,9 @@ use bytes::Bytes;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Set the maximum file upload size to 500MB. Only applies to File Upload routes.
+const MAX_UPLOAD_SIZE: usize = 500 * 1024 * 1024;
 
 /// Request to create a new operating system
 #[derive(Debug, Deserialize)]
@@ -74,15 +77,15 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route(
             "/ui/operating_systems/{id}/architectures/{arch}/kernel",
-            post(upload_kernel),
+            post(upload_kernel).layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE)),
         )
         .route(
             "/ui/operating_systems/{id}/architectures/{arch}/initramfs",
-            post(upload_initramfs),
+            post(upload_initramfs).layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE)),
         )
         .route(
             "/ui/operating_systems/{id}/architectures/{arch}/modules",
-            post(upload_module),
+            post(upload_module).layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE)),
         )
         .route(
             "/ui/operating_systems/{id}/architectures/{arch}/install_script",
