@@ -66,6 +66,7 @@ pub struct Args {
     // Storage configuration
     #[arg(
         long,
+        env,
         default_value = "local",
         help = "Image storage type: local or s3"
     )]
@@ -73,19 +74,29 @@ pub struct Args {
 
     #[arg(
         long,
+        env,
         default_value = DEFAULT_LOCAL_IMAGES_PATH,
         help = "Local storage path (when storage-type=local)"
     )]
     storage_path: String,
 
-    #[arg(long, help = "S3 endpoint URL (when storage-type=s3)")]
+    #[arg(
+        long,
+        env = "AWS_ENDPOINT_URL",
+        help = "S3 endpoint URL (when storage-type=s3)"
+    )]
     s3_endpoint: Option<String>,
 
-    #[arg(long, help = "S3 bucket name (when storage-type=s3)")]
+    #[arg(
+        long,
+        env = "AWS_BUCKET",
+        help = "S3 bucket name (when storage-type=s3)"
+    )]
     s3_bucket: Option<String>,
 
     #[arg(
         long,
+        env = "AWS_REGION",
         default_value = "us-east-1",
         help = "S3 region (when storage-type=s3)"
     )]
