@@ -512,7 +512,6 @@ impl DhcpHandler {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::MemoryImageStore;
     use chrono::DateTime;
     use dhcproto::v4::Opcode;
 
@@ -645,11 +644,7 @@ mod tests {
             .await
             .unwrap();
 
-        let director = Director::new(
-            db.clone(),
-            Arc::new(MemoryImageStore::new()),
-            "http://localhost:8080",
-        );
+        let director = Director::new(db.clone());
 
         let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
         let allocator = IpAllocator::new(store.clone());
@@ -767,11 +762,7 @@ mod tests {
             .await
             .unwrap();
 
-        let director = Director::new(
-            db.clone(),
-            Arc::new(MemoryImageStore::new()),
-            "http://localhost:8080",
-        );
+        let director = Director::new(db.clone());
 
         let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
         let allocator = IpAllocator::new(store.clone());

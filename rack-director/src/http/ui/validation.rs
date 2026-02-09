@@ -425,9 +425,9 @@ mod tests {
 
     #[test]
     fn test_validate_ipv4_list() {
-        assert!(validate_ipv4_list(&vec!["8.8.8.8".to_string()], "DNS", 1).is_none());
-        assert!(validate_ipv4_list(&vec![], "DNS", 1).is_some());
-        assert!(validate_ipv4_list(&vec!["invalid".to_string()], "DNS", 1).is_some());
+        assert!(validate_ipv4_list(&["8.8.8.8".to_string()], "DNS", 1).is_none());
+        assert!(validate_ipv4_list(&[], "DNS", 1).is_some());
+        assert!(validate_ipv4_list(&["invalid".to_string()], "DNS", 1).is_some());
     }
 
     #[test]
@@ -734,7 +734,7 @@ mod tests {
                 "Original Network",
                 "192.168.1.0/24",
                 "192.168.1.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
                 false,
@@ -769,7 +769,7 @@ mod tests {
                 "Network 1",
                 "192.168.1.0/24",
                 "192.168.1.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
                 false,
@@ -782,7 +782,7 @@ mod tests {
                 "Network 2",
                 "192.168.2.0/24",
                 "192.168.2.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.3"),
                 false,
@@ -821,7 +821,7 @@ mod tests {
                 "Test Network",
                 "192.168.1.0/24",
                 "192.168.1.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
                 false,
@@ -857,7 +857,7 @@ mod tests {
                 "Network 1",
                 "192.168.1.0/24",
                 "192.168.1.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
                 false,
@@ -870,7 +870,7 @@ mod tests {
                 "Network 2",
                 "192.168.2.0/24",
                 "192.168.2.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.3"),
                 false,
@@ -905,7 +905,7 @@ mod tests {
                 "Test Network",
                 "192.168.1.0/24",
                 "192.168.1.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
                 false,
@@ -941,7 +941,7 @@ mod tests {
                 "Test Network",
                 "192.168.1.0/24",
                 "192.168.1.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
                 false,
@@ -976,7 +976,7 @@ mod tests {
                 "Test Network",
                 "192.168.1.0/24",
                 "192.168.1.1",
-                &vec!["8.8.8.8".to_string()],
+                &["8.8.8.8".to_string()],
                 86400,
                 Some("10.0.0.2"),
                 false,

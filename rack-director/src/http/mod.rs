@@ -21,7 +21,7 @@ use crate::storage::ImageStore;
 pub struct AppState {
     pub director: Director,
     pub dhcp_store: DhcpStore,
-    pub image_store: Arc<dyn ImageStore>,
+    pub image_store: Arc<ImageStore>,
     pub os_store: OperatingSystemsStore,
     pub roles_store: RolesStore,
     pub agent_images_path: PathBuf,
@@ -36,7 +36,7 @@ pub struct StartResult {
 pub async fn start<T: Into<SocketAddr>, P: Into<PathBuf>>(
     director: Director,
     dhcp_store: DhcpStore,
-    image_store: Arc<dyn ImageStore>,
+    image_store: Arc<ImageStore>,
     os_store: OperatingSystemsStore,
     roles_store: RolesStore,
     bind: T,

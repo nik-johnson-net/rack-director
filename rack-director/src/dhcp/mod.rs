@@ -125,7 +125,6 @@ impl DhcpServer {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::MemoryImageStore;
 
     use super::*;
     use tempfile::tempdir;
@@ -138,11 +137,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let conn = crate::database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
-        let director = Director::new(
-            db.clone(),
-            Arc::new(MemoryImageStore::new()),
-            "http://localhost:8080",
-        );
+        let director = Director::new(db.clone());
 
         // Create a temporary boot files directory for testing
         let boot_files_dir = temp_dir.path().join("boot_files");

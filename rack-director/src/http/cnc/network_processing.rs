@@ -148,13 +148,13 @@ pub async fn complete_pending_devices_for_interfaces(
 mod tests {
     use super::*;
     use crate::database;
+    use crate::storage::ImageStore;
     use uuid::Uuid;
 
     fn test_uuid() -> Uuid {
         Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
     }
     use crate::director::Director;
-    use crate::storage::MemoryImageStore;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -183,12 +183,8 @@ mod tests {
             .unwrap();
         }
 
-        let storage_path = temp_dir.path().join("images");
-        let image_store = crate::storage::LocalImageStore::new(
-            storage_path,
-            "http://localhost:8080/images".to_string(),
-        )
-        .unwrap();
+        let _storage_path = temp_dir.path().join("images");
+        let image_store = ImageStore::memory("http://localhost:8080");
 
         let agent_images_path = temp_dir.path().join("agent-image");
         std::fs::create_dir_all(&agent_images_path).unwrap();
@@ -201,11 +197,7 @@ mod tests {
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
         let state = Arc::new(AppState {
-            director: Director::new(
-                db_tokio.clone(),
-                Arc::new(MemoryImageStore::new()),
-                "http://localhost:8080",
-            ),
+            director: Director::new(db_tokio.clone()),
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
@@ -300,7 +292,7 @@ mod tests {
 
         detect_and_mark_duplicates(&state, &uuid, &mut interfaces).await;
 
-        assert_eq!(interfaces[0].disabled, false);
+        assert!(!interfaces[0].disabled);
         assert_eq!(interfaces[0].warning_label, None);
     }
 

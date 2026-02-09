@@ -10,7 +10,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
-use bytes::Bytes;
+use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -212,13 +212,20 @@ async fn upload_kernel(
     State(state): State<Arc<AppState>>,
     Path((os_id, arch_str)): Path<(i64, String)>,
     Query(params): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
     let path = format!("os/{}/arch/{}/kernel", os_id, arch.as_str());
     let filename = params.get("filename").map(|s| s.as_str());
 
-    state.image_store.upload(&path, body.to_vec()).await?;
+    // Convert axum Body to DataStream
+    let stream = body
+        .into_data_stream()
+        .map(|result| result.map_err(std::io::Error::other));
+
+    // Send data to image_store
+    state.image_store.upload(&path, Box::pin(stream)).await?;
+
     state
         .os_store
         .update_architecture_field(os_id, arch, "kernel_path", &path)
@@ -240,13 +247,17 @@ async fn upload_initramfs(
     State(state): State<Arc<AppState>>,
     Path((os_id, arch_str)): Path<(i64, String)>,
     Query(params): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
     let path = format!("os/{}/arch/{}/initramfs", os_id, arch.as_str());
     let filename = params.get("filename").map(|s| s.as_str());
 
-    state.image_store.upload(&path, body.to_vec()).await?;
+    // Convert axum Body to DataStream
+    let stream = body
+        .into_data_stream()
+        .map(|result| result.map_err(std::io::Error::other));
+    state.image_store.upload(&path, Box::pin(stream)).await?;
     state
         .os_store
         .update_architecture_field(os_id, arch, "initramfs_path", &path)
@@ -268,7 +279,7 @@ async fn upload_module(
     State(state): State<Arc<AppState>>,
     Path((os_id, arch_str)): Path<(i64, String)>,
     Query(params): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
     let module_name = params
@@ -282,7 +293,11 @@ async fn upload_module(
         module_name
     );
 
-    state.image_store.upload(&path, body.to_vec()).await?;
+    // Convert axum Body to DataStream
+    let stream = body
+        .into_data_stream()
+        .map(|result| result.map_err(std::io::Error::other));
+    state.image_store.upload(&path, Box::pin(stream)).await?;
 
     // Add module to the architecture's modules list
     let mut os_arch = state.os_store.get_architecture(os_id, arch).await?;
@@ -304,13 +319,17 @@ async fn upload_install_script(
     State(state): State<Arc<AppState>>,
     Path((os_id, arch_str)): Path<(i64, String)>,
     Query(params): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
     let path = format!("os/{}/arch/{}/install_script", os_id, arch.as_str());
     let filename = params.get("filename").map(|s| s.as_str());
 
-    state.image_store.upload(&path, body.to_vec()).await?;
+    // Convert axum Body to DataStream
+    let stream = body
+        .into_data_stream()
+        .map(|result| result.map_err(std::io::Error::other));
+    state.image_store.upload(&path, Box::pin(stream)).await?;
     state
         .os_store
         .update_architecture_field(os_id, arch, "install_script_path", &path)
@@ -358,11 +377,12 @@ async fn download_component(
         }
     };
 
-    let data = state.image_store.download(&path).await?;
+    let stream = state.image_store.download(&path).await?;
+    let body = axum::body::Body::from_stream(stream);
 
     Ok((
         StatusCode::OK,
         [("Content-Type", "application/octet-stream")],
-        data,
+        body,
     ))
 }

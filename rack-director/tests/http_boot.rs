@@ -4,7 +4,7 @@ use anyhow::Result;
 use common::dhcp_client::{Architecture, DhcpClient};
 use std::net::Ipv4Addr;
 
-/// Test HTTP Boot flow for x86 UEFI HTTP architecture (Architecture 14)
+/// Test HTTP Boot flow for x86 UEFI HTTP architecture (Architecture 15)
 /// Expected flow: DHCP → HTTP URL in bootfile name
 #[tokio::test]
 async fn test_http_boot_x86_uefi_http() -> Result<()> {
@@ -18,7 +18,7 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
         .set_network_autodiscover(network_id as u16, true)
         .await?;
 
-    // DHCP exchange for HTTP Boot client (architecture 14)
+    // DHCP exchange for HTTP Boot client (architecture 15)
     let mac = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x01]; // Test MAC address
     let dhcp_port = handle.handle.dhcp_port;
     let http_port = handle.handle.http_port;
@@ -47,7 +47,7 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
     let expected_url = "http://10.0.0.1/cnc/boot/ipxe.efi";
     assert_eq!(
         boot_options.bootfile_name, expected_url,
-        "Bootfile should be HTTP URL for architecture 14"
+        "Bootfile should be HTTP URL for architecture 15"
     );
 
     // Verify bootfile is an HTTP URL (starts with http://)
@@ -96,7 +96,7 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
     Ok(())
 }
 
-/// Test HTTP Boot flow for x64 UEFI HTTP architecture (Architecture 15)
+/// Test HTTP Boot flow for x64 UEFI HTTP architecture (Architecture 16)
 /// Expected flow: DHCP → HTTP URL in bootfile name
 #[tokio::test]
 async fn test_http_boot_x64_uefi_http() -> Result<()> {
@@ -110,7 +110,7 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
         .set_network_autodiscover(network_id as u16, true)
         .await?;
 
-    // DHCP exchange for HTTP Boot client (architecture 15)
+    // DHCP exchange for HTTP Boot client (architecture 16)
     let mac = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0x02]; // Test MAC address
     let dhcp_port = handle.handle.dhcp_port;
     let http_port = handle.handle.http_port;
@@ -139,7 +139,7 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
     let expected_url = "http://10.0.0.1/cnc/boot/ipxe.efi";
     assert_eq!(
         boot_options.bootfile_name, expected_url,
-        "Bootfile should be HTTP URL for architecture 15"
+        "Bootfile should be HTTP URL for architecture 16"
     );
 
     // Verify bootfile is an HTTP URL (starts with http://)
@@ -190,7 +190,7 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
 /// Test HTTP Boot flow for ARM64 UEFI HTTP architecture (Architecture 16)
 /// Expected flow: DHCP → HTTP URL in bootfile name
 #[tokio::test]
-async fn test_http_boot_arm64_uefi_http() -> Result<()> {
+async fn test_http_boot_ebc_uefi_http() -> Result<()> {
     // Start rack-director with all services
     let handle = common::start_rack_director().await?;
 
@@ -208,7 +208,7 @@ async fn test_http_boot_arm64_uefi_http() -> Result<()> {
 
     let (offered_ip, leased_ip, boot_options) =
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let mut dhcp_client = DhcpClient::new(mac, Architecture::Arm64UefiHttp, dhcp_port)?;
+            let mut dhcp_client = DhcpClient::new(mac, Architecture::EbcUefiHttp, dhcp_port)?;
             let (offered_ip, server_id) = dhcp_client.discover()?;
             let (leased_ip, boot_options) = dhcp_client.request(offered_ip, server_id)?;
             Ok((offered_ip, leased_ip, boot_options))
@@ -230,7 +230,7 @@ async fn test_http_boot_arm64_uefi_http() -> Result<()> {
     let expected_url = "http://10.0.0.1/cnc/boot/ipxe.efi";
     assert_eq!(
         boot_options.bootfile_name, expected_url,
-        "Bootfile should be HTTP URL for architecture 16"
+        "Bootfile should be HTTP URL for architecture 17"
     );
 
     // Verify bootfile is an HTTP URL (starts with http://)

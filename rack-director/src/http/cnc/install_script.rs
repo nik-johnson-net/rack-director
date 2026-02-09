@@ -1,10 +1,12 @@
 use crate::http::{AppState, error::Error};
 use crate::templates;
+use anyhow::anyhow;
 use axum::{
     http::{StatusCode, header},
     response::Response,
 };
 use common::Ipv4Subnet;
+use futures::TryStreamExt;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -66,12 +68,24 @@ pub async fn render_for_device(
         .ok_or_else(|| Error::NotFound("No install script for this OS architecture".to_string()))?;
 
     // Download install script template from storage
-    let script_bytes = state
+    let stream = state
         .image_store
         .download(&script_path)
         .await
         .map_err(|e| {
             Error::ServerInternalError(anyhow::anyhow!("Failed to download script: {}", e))
+        })?;
+
+    // Collect stream into bytes (install scripts are small text files)
+    let script_bytes = stream
+        .try_fold(Vec::new(), |mut vec, data| async move {
+            vec.extend_from_slice(&data);
+            Ok(vec)
+        })
+        .await
+        .map_err(|e| {
+            log::warn!("Error retrieving install script {}: {}", script_path, e);
+            Error::ServerInternalError(anyhow!(""))
         })?;
 
     let template = String::from_utf8(script_bytes).map_err(|e| {
@@ -150,7 +164,7 @@ mod tests {
     use super::*;
     use crate::database;
     use crate::director::Director;
-    use crate::storage::MemoryImageStore;
+    use crate::storage::ImageStore;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -184,12 +198,8 @@ mod tests {
             .unwrap();
         }
 
-        let storage_path = temp_dir.path().join("images");
-        let image_store = crate::storage::LocalImageStore::new(
-            storage_path,
-            "http://localhost:8080/images".to_string(),
-        )
-        .unwrap();
+        let _storage_path = temp_dir.path().join("images");
+        let image_store = ImageStore::memory("http://localhost:8080");
 
         let agent_images_path = temp_dir.path().join("agent-image");
         std::fs::create_dir_all(&agent_images_path).unwrap();
@@ -202,11 +212,7 @@ mod tests {
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
         let state = Arc::new(AppState {
-            director: Director::new(
-                db_tokio.clone(),
-                Arc::new(MemoryImageStore::new()),
-                "http://localhost:8080",
-            ),
+            director: Director::new(db_tokio.clone()),
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),

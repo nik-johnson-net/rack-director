@@ -1651,7 +1651,7 @@ MAC Address             : 0c:c4:7a:02:11:fe
             .filter(|(i, _)| *i != checksum_offset)
             .map(|(_, &b)| b)
             .fold(0u8, |acc, b| acc.wrapping_add(b));
-        (0u8.wrapping_sub(sum)) & 0xFF
+        0u8.wrapping_sub(sum)
     }
 
     /// Test that parse_dmi_sysfs correctly handles separate entry point and structures data

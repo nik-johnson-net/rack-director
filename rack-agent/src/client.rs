@@ -1,9 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use mockito;
-
 pub struct RackDirector {
     client: reqwest::Client,
     url: String,

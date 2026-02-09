@@ -583,8 +583,7 @@ mod tests {
 
     #[test]
     fn test_to_bytes_rrq_with_options() {
-        let mut options = Vec::new();
-        options.push(TftpOption::BlkSize(1024));
+        let options = vec![TftpOption::BlkSize(1024)];
 
         let packet = Packet::Rrq {
             filename: "test.txt".to_string(),
@@ -600,9 +599,7 @@ mod tests {
 
     #[test]
     fn test_to_bytes_oack() {
-        let mut options = Vec::new();
-        options.push(TftpOption::BlkSize(1024));
-        options.push(TftpOption::TSize(5000));
+        let options = vec![TftpOption::BlkSize(1024), TftpOption::TSize(5000)];
 
         let packet = Packet::Oack { options };
         let bytes = packet.to_bytes();

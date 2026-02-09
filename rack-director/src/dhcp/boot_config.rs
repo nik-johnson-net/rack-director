@@ -57,7 +57,7 @@ impl BootConfigProvider {
     /// Decision logic (in order):
     /// 1. Check if client requested any boot options — skip if not requested
     /// 2. iPXE client → filename = HTTP boot script URL (no file size)
-    /// 3. HTTP boot arch (14/15/16) → filename = HTTP URL for iPXE firmware
+    /// 3. HTTP boot arch (15/16/17) → filename = HTTP URL for iPXE firmware
     /// 4. UEFI arch (7, 11) → next_server = TFTP server, filename = ipxe.efi
     /// 5. BIOS arch (0, 9, default) → next_server = TFTP server, filename = undionly.kpxe
     ///
@@ -85,10 +85,16 @@ impl BootConfigProvider {
         }
 
         // 3. Determine boot file and lookup size
+        log::debug!(
+            "DHCP: Matching boot args to client arch {:?}",
+            req_ctx.client_arch
+        );
         let boot_opts = match req_ctx.client_arch {
-            // HTTP Boot architectures (14/15/16) → HTTP URL for iPXE firmware
+            // HTTP Boot architectures (15/16/17) → HTTP URL for iPXE firmware
             Some(
-                Architecture::Unknown(14) | Architecture::Unknown(15) | Architecture::Unknown(16),
+                Architecture::Unknown(15)
+                | Architecture::Unknown(16)
+                | Architecture::Unknown(17),
             ) => {
                 let filename = "ipxe.efi";
                 let file_size_blocks = self.lookup_file_size_blocks(filename).await;
@@ -99,6 +105,7 @@ impl BootConfigProvider {
                 }
             }
             // UEFI architectures (7, 11) → TFTP ipxe.efi
+            // NOTE: Bug in library mis-maps BC to 7, and x86_64 to 9. The spec has been amended for x86_64 to be 7.
             Some(Architecture::BC | Architecture::Unknown(11)) => {
                 let filename = "ipxe.efi";
                 let file_size_blocks = self.lookup_file_size_blocks(filename).await;
@@ -426,9 +433,9 @@ mod tests {
 
     // HTTP Boot architecture tests (14/15/16)
     #[tokio::test]
-    async fn test_populate_boot_options_http_boot_arch_14() {
+    async fn test_populate_boot_options_http_boot_arch_17() {
         let provider = make_provider();
-        let req_ctx = make_req_ctx(Some(Architecture::Unknown(14)), false, true, true, true);
+        let req_ctx = make_req_ctx(Some(Architecture::Unknown(17)), false, true, true, true);
         let mut msg = Message::default();
         msg.set_opcode(Opcode::BootReply);
 
@@ -749,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn test_populate_boot_options_http_boot_only_bootfile_applicable() {
         let provider = make_provider();
-        let req_ctx = make_req_ctx(Some(Architecture::Unknown(14)), false, true, true, true);
+        let req_ctx = make_req_ctx(Some(Architecture::Unknown(15)), false, true, true, true);
         let mut msg = Message::default();
         msg.set_opcode(Opcode::BootReply);
 

@@ -7,9 +7,9 @@ use crate::director::store::DirectorStore;
 use crate::director::store::generate_hostname_from_uuid;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, LifecycleTransition};
 use crate::operating_systems::{Architecture, OperatingSystemsStore};
+use crate::plans::actions::BootTarget;
 use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::roles::RolesStore;
-use crate::storage::ImageStore;
 
 mod ipmi;
 mod store;
@@ -18,16 +18,6 @@ pub use common::device_attributes::NetworkInterface;
 pub use store::Device;
 pub use store::PendingDevice;
 
-#[derive(Debug)]
-pub enum BootTarget {
-    LocalDisk,
-    NetBoot {
-        ramdisk: String,
-        kernel: String,
-        cmdline: String,
-    },
-}
-
 #[derive(Clone)]
 pub struct Director {
     store: DirectorStore,
@@ -35,16 +25,10 @@ pub struct Director {
     lifecycle_store: LifecycleStore,
     os_store: OperatingSystemsStore,
     roles_store: RolesStore,
-    image_store: Arc<dyn ImageStore>,
-    root_url: String,
 }
 
 impl Director {
-    pub fn new<T: Into<String>>(
-        conn: Arc<Mutex<rusqlite::Connection>>,
-        image_store: Arc<dyn ImageStore>,
-        root_url: T,
-    ) -> Self {
+    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
         let store = DirectorStore::new(conn.clone());
         let plans_store = PlansStore::new(conn.clone());
         let lifecycle_store = LifecycleStore::new(conn.clone());
@@ -56,8 +40,6 @@ impl Director {
             lifecycle_store,
             os_store,
             roles_store,
-            image_store,
-            root_url: root_url.into(),
         }
     }
 
@@ -113,11 +95,9 @@ impl Director {
 
             // Create ActionContext for the action
             let ctx = crate::plans::actions::ActionContext {
-                root_url: &self.root_url,
                 device: &device,
                 os_store: &self.os_store,
                 roles_store: &self.roles_store,
-                image_store: &self.image_store,
                 director: None, // Director not needed for boot target resolution
             };
 
@@ -365,11 +345,9 @@ impl Director {
         if let Some(action) = plan.get_current_action() {
             let device = self.get_device(device_uuid).await?;
             let ctx = crate::plans::actions::ActionContext {
-                root_url: &self.root_url,
                 device: &device,
                 os_store: &self.os_store,
                 roles_store: &self.roles_store,
-                image_store: &self.image_store,
                 director: Some(self), // Provide director for actions that need it (e.g., RebootDevice)
             };
 
@@ -624,7 +602,7 @@ impl Director {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{database, plans::PlanStatus, storage::MemoryImageStore};
+    use crate::{database, plans::PlanStatus};
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -633,11 +611,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
-        let director = Director::new(
-            Arc::new(Mutex::new(db)),
-            Arc::new(MemoryImageStore::new()),
-            "http://localhost:0",
-        );
+        let director = Director::new(Arc::new(Mutex::new(db)));
         (director, temp_dir)
     }
 
@@ -792,17 +766,10 @@ mod tests {
         // Verify the device gets the right boot target for first action (discover_hardware)
         let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
         match boot_target {
-            BootTarget::NetBoot {
-                ramdisk,
-                kernel,
-                cmdline,
-            } => {
-                assert!(kernel.contains("/cnc/agent-images/vmlinuz"));
-                assert!(ramdisk.contains("/cnc/agent-images/initramfs.img"));
-                assert!(cmdline.contains("rackdirector.url="));
-                assert!(cmdline.contains("device-scan"));
+            BootTarget::AgentImage { action, cmdline: _ } => {
+                assert_eq!(action, "device-scan");
             }
-            BootTarget::LocalDisk => panic!("Expected NetBoot, got LocalDisk"),
+            _ => panic!("Expected NetBoot, got LocalDisk"),
         }
 
         // Simulate discovery action completion
@@ -819,16 +786,9 @@ mod tests {
 
         // Verify the device gets BMC config boot target for second action
         let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
-        match boot_target {
-            BootTarget::NetBoot {
-                ramdisk: _,
-                kernel: _,
-                cmdline,
-            } => {
-                assert!(cmdline.contains("configure-bmc"));
-            }
-            BootTarget::LocalDisk => panic!("Expected NetBoot, got LocalDisk"),
-        }
+        assert!(
+            matches!(boot_target, BootTarget::AgentImage { action, cmdline } if action == "configure-bmc")
+        );
 
         // Simulate BMC configuration completion
         director.mark_action_success(&test_uuid).await.unwrap();

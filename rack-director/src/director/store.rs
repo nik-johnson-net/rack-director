@@ -1449,7 +1449,7 @@ mod tests {
         };
 
         store
-            .set_network_interfaces(&uuid, &[interface.clone()])
+            .set_network_interfaces(&uuid, std::slice::from_ref(&interface))
             .await
             .unwrap();
 
@@ -1457,7 +1457,7 @@ mod tests {
         let retrieved = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].network_id, Some(1));
-        assert_eq!(retrieved[0].disabled, true);
+        assert!(retrieved[0].disabled);
         assert_eq!(
             retrieved[0].warning_label,
             Some("Duplicate MAC on network main".to_string())
@@ -1490,7 +1490,7 @@ mod tests {
         let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].network_id, None);
-        assert_eq!(interfaces[0].disabled, false);
+        assert!(!interfaces[0].disabled);
         assert_eq!(interfaces[0].warning_label, None);
     }
 

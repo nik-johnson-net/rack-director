@@ -83,7 +83,7 @@ pub async fn start_rack_director() -> Result<TestRackDirectorHandle, anyhow::Err
     // Initialize Logger for tests. Will be called multiple times, so throw away the result.
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Trace)
         .try_init();
 
     // Create a temporary directory for database

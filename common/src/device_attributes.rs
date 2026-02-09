@@ -556,12 +556,12 @@ mod tests {
         println!("Deserialize from array format: {:?}", result_from_array);
 
         // Determine which format works
-        if result_from_string.is_ok() {
+        if let Ok(item) = result_from_string {
             println!("✓ String format works!");
-            assert_eq!(result_from_string.unwrap(), config);
-        } else if result_from_array.is_ok() {
+            assert_eq!(item, config);
+        } else if let Ok(array) = result_from_array {
             println!("✓ Array format works!");
-            assert_eq!(result_from_array.unwrap(), config);
+            assert_eq!(array, config);
         } else {
             panic!(
                 "Neither string nor array format works! String error: {:?}, Array error: {:?}",

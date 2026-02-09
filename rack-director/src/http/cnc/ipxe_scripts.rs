@@ -3,38 +3,6 @@ use axum::{
     response::Response,
 };
 
-/// Generates an iPXE script that boots from the local disk.
-///
-/// This script instructs iPXE to boot from the first hard disk (0x80 in BIOS numbering).
-/// Used for devices that should boot from their locally installed OS.
-pub fn generate_boot_local_script() -> String {
-    r#"#!ipxe
-# Boot to local disk for known device
-exit
-"#
-    .to_string()
-}
-
-/// Generates an iPXE script that boots a custom kernel with ramdisk.
-///
-/// This script instructs iPXE to download and boot a custom Linux kernel and initramfs
-/// from the HTTP server. Used for device discovery, OS installation, or maintenance tasks.
-///
-/// # Arguments
-/// * `ramdisk` - The filename of the initramfs image
-/// * `kernel` - The filename of the kernel image
-/// * `cmdline` - Kernel command line arguments
-pub fn generate_kernel_script(ramdisk: &str, kernel: &str, cmdline: &str) -> String {
-    format!(
-        r#"#!ipxe
-# Boot custom linux image for new device intake
-kernel {kernel} {cmdline}
-initrd {ramdisk}
-boot
-"#
-    )
-}
-
 /// Generates an iPXE script that redirects to the main iPXE endpoint with UUID and MAC.
 ///
 /// This script is sent to devices that boot without providing their UUID. It instructs
@@ -81,26 +49,6 @@ pub fn build_response(script: String) -> Response<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_generate_boot_local_script() {
-        let script = generate_boot_local_script();
-        assert!(script.contains("#!ipxe"));
-        assert!(script.contains("exit"));
-    }
-
-    #[test]
-    fn test_generate_kernel_script() {
-        let script = generate_kernel_script(
-            "http://example.com/cnc/images/initramfs.img",
-            "http://example.com/cnc/images/vmlinuz",
-            "console=ttyS0",
-        );
-        assert!(script.contains("#!ipxe"));
-        assert!(script.contains("kernel http://example.com/cnc/images/vmlinuz console=ttyS0"));
-        assert!(script.contains("initrd http://example.com/cnc/images/initramfs.img"));
-        assert!(script.contains("boot"));
-    }
 
     #[test]
     fn test_generate_uuid_script() {

@@ -1,15 +1,16 @@
+mod boot_target;
 pub mod params;
+
+pub use boot_target::BootTarget;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
-use crate::director::BootTarget;
 use crate::director::Device;
 use crate::operating_systems::OperatingSystemsStore;
 use crate::roles::RolesStore;
-use crate::storage::ImageStore;
-use crate::templates;
+
+// TODO: Define common AgentAction enum.
 
 /// Strongly-typed Action enum representing all possible provisioning actions
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -24,11 +25,9 @@ pub enum Action {
 
 /// Context required for converting Actions to BootTargets
 pub struct ActionContext<'a> {
-    pub root_url: &'a str,
     pub device: &'a Device,
     pub os_store: &'a OperatingSystemsStore,
     pub roles_store: &'a RolesStore,
-    pub image_store: &'a Arc<dyn ImageStore>,
     pub director: Option<&'a crate::director::Director>,
 }
 
@@ -40,8 +39,8 @@ impl Action {
     /// BMC configuration, and OS installation, it returns NetBoot with appropriate kernel/initramfs.
     pub async fn to_boot_target(&self, ctx: &ActionContext<'_>) -> Result<BootTarget> {
         match self {
-            Action::DiscoverHardware => generate_agent_boot_target(ctx.root_url, "device-scan"),
-            Action::ConfigureBmc => generate_agent_boot_target(ctx.root_url, "configure-bmc"),
+            Action::DiscoverHardware => generate_agent_boot_target("device-scan"),
+            Action::ConfigureBmc => generate_agent_boot_target("configure-bmc"),
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
             // All other actions default to local disk boot
             _ => Ok(BootTarget::LocalDisk),
@@ -79,6 +78,7 @@ impl Action {
     /// Returns true if the action should automatically advance to the next
     /// step when director.on_boot() is called.
     pub fn advance_on_boot(&self) -> bool {
+        #[allow(clippy::match_like_matches_macro)]
         match self {
             Action::RebootDevice => true,
             _ => false,
@@ -87,17 +87,11 @@ impl Action {
 }
 
 /// Generate boot target for agent-based actions (discovery, BMC config, etc.)
-fn generate_agent_boot_target(root_url: &str, action_name: &str) -> Result<BootTarget> {
-    let kernel_url = format!("{}/cnc/agent-images/vmlinuz", root_url);
-    let initramfs_url = format!("{}/cnc/agent-images/initramfs.img", root_url);
-    let cmdline = format!(
-        "rackdirector.url={}/cnc rackdirector.action={} ro console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8",
-        root_url, action_name
-    );
+fn generate_agent_boot_target(action_name: &str) -> Result<BootTarget> {
+    let cmdline = "ro console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8".to_string();
 
-    Ok(BootTarget::NetBoot {
-        ramdisk: initramfs_url,
-        kernel: kernel_url,
+    Ok(BootTarget::AgentImage {
+        action: action_name.into(),
         cmdline,
     })
 }
@@ -120,20 +114,13 @@ async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<Boot
         .get_architecture(role.os_id, architecture)
         .await?;
 
-    // Generate URLs from image store
-    let kernel_url = ctx.image_store.get_url(&os_arch.kernel_path);
-    let initramfs_url = ctx.image_store.get_url(&os_arch.initramfs_path);
-
-    let cmdline = os_arch
-        .cmdline_args
-        .map(|template| templates::render_cmdline_args(&template, ctx.root_url))
-        .transpose()?
-        .unwrap_or_default();
+    let cmdline = os_arch.cmdline_args.unwrap_or_default();
 
     Ok(BootTarget::NetBoot {
-        ramdisk: initramfs_url,
-        kernel: kernel_url,
+        ramdisk: os_arch.initramfs_path.clone(),
+        kernel: os_arch.kernel_path.clone(),
         cmdline,
+        modules: Vec::new(),
     })
 }
 
@@ -143,7 +130,6 @@ mod tests {
     use crate::director::Device;
     use crate::operating_systems::Architecture;
     use crate::roles::DiskLayout;
-    use crate::storage::MemoryImageStore;
     use crate::{database, operating_systems::OperatingSystemsStore, roles::RolesStore};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -155,7 +141,6 @@ mod tests {
         Arc<Mutex<rusqlite::Connection>>,
         OperatingSystemsStore,
         RolesStore,
-        Arc<dyn ImageStore>,
         tempfile::TempDir,
     ) {
         let temp_dir = tempdir().unwrap();
@@ -163,8 +148,7 @@ mod tests {
         let db = Arc::new(Mutex::new(database::open(&db_path).unwrap()));
         let os_store = OperatingSystemsStore::new(db.clone());
         let roles_store = RolesStore::new(db.clone());
-        let image_store: Arc<dyn ImageStore> = Arc::new(MemoryImageStore::new());
-        (db, os_store, roles_store, image_store, temp_dir)
+        (db, os_store, roles_store, temp_dir)
     }
 
     #[test]
@@ -218,120 +202,23 @@ mod tests {
 
     #[test]
     fn test_generate_agent_boot_target() {
-        let boot_target =
-            generate_agent_boot_target("http://localhost:8080", "device-scan").unwrap();
+        let boot_target = generate_agent_boot_target("device-scan").unwrap();
 
         match boot_target {
-            BootTarget::NetBoot {
-                ramdisk,
-                kernel,
-                cmdline,
-            } => {
-                assert_eq!(kernel, "http://localhost:8080/cnc/agent-images/vmlinuz");
+            BootTarget::AgentImage { action, cmdline } => {
+                assert_eq!(action, "device-scan");
                 assert_eq!(
-                    ramdisk,
-                    "http://localhost:8080/cnc/agent-images/initramfs.img"
+                    cmdline,
+                    "ro console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8"
                 );
-                assert!(cmdline.contains("rackdirector.url=http://localhost:8080/cnc"));
-                assert!(cmdline.contains("rackdirector.action=device-scan"));
             }
-            BootTarget::LocalDisk => panic!("Expected NetBoot, got LocalDisk"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_discover_hardware_action_to_boot_target() {
-        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
-
-        let device = Device {
-            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
-            architecture: Architecture::X86_64,
-            lifecycle: None,
-            role_id: None,
-            attributes: common::device_attributes::DeviceAttributes::default(),
-            created_at: None,
-            first_seen_at: None,
-            last_seen_at: None,
-        };
-
-        let ctx = ActionContext {
-            root_url: "http://localhost:8080",
-            device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
-            image_store: &image_store,
-            director: None,
-        };
-
-        let action = Action::DiscoverHardware;
-        let boot_target = action.to_boot_target(&ctx).await.unwrap();
-
-        match boot_target {
-            BootTarget::NetBoot {
-                ramdisk,
-                kernel,
-                cmdline,
-            } => {
-                assert_eq!(kernel, "http://localhost:8080/cnc/agent-images/vmlinuz");
-                assert_eq!(
-                    ramdisk,
-                    "http://localhost:8080/cnc/agent-images/initramfs.img"
-                );
-                assert!(cmdline.contains("rackdirector.url=http://localhost:8080/cnc"));
-                assert!(cmdline.contains("rackdirector.action=device-scan"));
-            }
-            BootTarget::LocalDisk => panic!("Expected NetBoot for DiscoverHardware, got LocalDisk"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_configure_bmc_action_to_boot_target() {
-        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
-
-        let device = Device {
-            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap(),
-            architecture: Architecture::X86_64,
-            lifecycle: None,
-            role_id: None,
-            attributes: common::device_attributes::DeviceAttributes::default(),
-            created_at: None,
-            first_seen_at: None,
-            last_seen_at: None,
-        };
-
-        let ctx = ActionContext {
-            root_url: "http://localhost:9000",
-            device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
-            image_store: &image_store,
-            director: None,
-        };
-
-        let action = Action::ConfigureBmc;
-        let boot_target = action.to_boot_target(&ctx).await.unwrap();
-
-        match boot_target {
-            BootTarget::NetBoot {
-                ramdisk,
-                kernel,
-                cmdline,
-            } => {
-                assert_eq!(kernel, "http://localhost:9000/cnc/agent-images/vmlinuz");
-                assert_eq!(
-                    ramdisk,
-                    "http://localhost:9000/cnc/agent-images/initramfs.img"
-                );
-                assert!(cmdline.contains("rackdirector.url=http://localhost:9000/cnc"));
-                assert!(cmdline.contains("rackdirector.action=configure-bmc"));
-            }
-            BootTarget::LocalDisk => panic!("Expected NetBoot for ConfigureBmc, got LocalDisk"),
+            _ => panic!("Expected NetBoot, got LocalDisk"),
         }
     }
 
     #[tokio::test]
     async fn test_install_os_action_to_boot_target_success() {
-        let (db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
+        let (db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
 
         // Create an OS with architecture
         let os = os_store
@@ -391,11 +278,9 @@ mod tests {
         };
 
         let ctx = ActionContext {
-            root_url: "http://localhost:8080",
             device: &device,
             os_store: &os_store,
             roles_store: &roles_store,
-            image_store: &image_store,
             director: None,
         };
 
@@ -407,20 +292,21 @@ mod tests {
                 ramdisk,
                 kernel,
                 cmdline,
+                modules: _,
             } => {
                 assert!(kernel.contains("installer/ubuntu-24.04/vmlinuz"));
                 assert!(ramdisk.contains("installer/ubuntu-24.04/initrd.img"));
                 assert!(cmdline.contains("console=ttyS0"));
                 assert!(cmdline.contains("autoinstall"));
-                assert!(cmdline.contains("http://localhost:8080/cnc/install_script"));
+                assert!(cmdline.contains("ds=nocloud-net;s={{install_script_url}}"));
             }
-            BootTarget::LocalDisk => panic!("Expected NetBoot for InstallOs, got LocalDisk"),
+            _ => panic!("Expected NetBoot for InstallOs, got LocalDisk"),
         }
     }
 
     #[tokio::test]
     async fn test_install_os_action_missing_role_error() {
-        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
+        let (_db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
 
         // Create device without a role
         let device = Device {
@@ -435,11 +321,9 @@ mod tests {
         };
 
         let ctx = ActionContext {
-            root_url: "http://localhost:8080",
             device: &device,
             os_store: &os_store,
             roles_store: &roles_store,
-            image_store: &image_store,
             director: None,
         };
 
@@ -457,7 +341,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_os_action_with_no_cmdline_template() {
-        let (db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
+        let (db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
 
         // Create an OS with architecture but NO cmdline template
         let os = os_store
@@ -517,11 +401,9 @@ mod tests {
         };
 
         let ctx = ActionContext {
-            root_url: "http://localhost:8080",
             device: &device,
             os_store: &os_store,
             roles_store: &roles_store,
-            image_store: &image_store,
             director: None,
         };
 
@@ -533,6 +415,7 @@ mod tests {
                 ramdisk,
                 kernel,
                 cmdline,
+                modules: _,
             } => {
                 assert!(kernel.contains("installer/debian-12/vmlinuz"));
                 assert!(ramdisk.contains("installer/debian-12/initrd.img"));
@@ -542,42 +425,7 @@ mod tests {
                     "Expected empty cmdline when no template provided"
                 );
             }
-            BootTarget::LocalDisk => panic!("Expected NetBoot for InstallOs, got LocalDisk"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_partition_disks_action_returns_local_disk() {
-        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
-
-        let device = Device {
-            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440006").unwrap(),
-            architecture: Architecture::X86_64,
-            lifecycle: None,
-            role_id: None,
-            attributes: common::device_attributes::DeviceAttributes::default(),
-            created_at: None,
-            first_seen_at: None,
-            last_seen_at: None,
-        };
-
-        let ctx = ActionContext {
-            root_url: "http://localhost:8080",
-            device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
-            image_store: &image_store,
-            director: None,
-        };
-
-        let action = Action::PartitionDisks;
-        let boot_target = action.to_boot_target(&ctx).await.unwrap();
-
-        match boot_target {
-            BootTarget::LocalDisk => {} // Expected
-            BootTarget::NetBoot { .. } => {
-                panic!("Expected LocalDisk for PartitionDisks, got NetBoot")
-            }
+            _ => panic!("Expected NetBoot for InstallOs, got LocalDisk"),
         }
     }
 
@@ -612,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_device_start() {
-        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
+        let (_db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
 
         let device = Device {
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440007").unwrap(),
@@ -626,11 +474,9 @@ mod tests {
         };
 
         let ctx = ActionContext {
-            root_url: "http://localhost:8080",
             device: &device,
             os_store: &os_store,
             roles_store: &roles_store,
-            image_store: &image_store,
             director: None,
         };
 
@@ -642,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_device_boot_target() {
-        let (_db, os_store, roles_store, image_store, _temp_dir) = setup_test_stores().await;
+        let (_db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
 
         let device = Device {
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440008").unwrap(),
@@ -656,11 +502,9 @@ mod tests {
         };
 
         let ctx = ActionContext {
-            root_url: "http://localhost:8080",
             device: &device,
             os_store: &os_store,
             roles_store: &roles_store,
-            image_store: &image_store,
             director: None,
         };
 
@@ -670,7 +514,7 @@ mod tests {
         // RebootDevice should boot to local disk (the action is just to trigger the reboot)
         match boot_target {
             BootTarget::LocalDisk => {} // Expected
-            BootTarget::NetBoot { .. } => {
+            _ => {
                 panic!("Expected LocalDisk for RebootDevice, got NetBoot")
             }
         }

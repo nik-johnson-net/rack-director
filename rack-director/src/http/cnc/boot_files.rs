@@ -84,8 +84,10 @@ mod tests {
     use tower::util::ServiceExt;
 
     use crate::{
-        boot_files::FilesystemBootFileProvider, database, director::Director,
-        storage::MemoryImageStore,
+        boot_files::FilesystemBootFileProvider,
+        database,
+        director::Director,
+        storage::{ImageStore, ImageStoreConfig},
     };
 
     /// Create a test AppState with temporary directory and sample boot files
@@ -131,20 +133,16 @@ mod tests {
         // Create storage path for image store
         let storage_path = temp_dir.path().join("images");
 
+        let image_store = ImageStore::new(ImageStoreConfig::Local {
+            path: storage_path,
+            base_url: "http://localhost:8080".into(),
+        })
+        .unwrap();
+
         let state = Arc::new(AppState {
-            director: Director::new(
-                db_tokio.clone(),
-                Arc::new(MemoryImageStore::new()),
-                "http://localhost:8080",
-            ),
+            director: Director::new(db_tokio.clone()),
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
-            image_store: Arc::new(
-                crate::storage::LocalImageStore::new(
-                    storage_path,
-                    "http://localhost:8080/images".to_string(),
-                )
-                .unwrap(),
-            ),
+            image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
             roles_store: crate::roles::RolesStore::new(db_tokio),
             agent_images_path,

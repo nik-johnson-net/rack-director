@@ -660,7 +660,7 @@ mod tests {
         Uuid::parse_str(&format!("550e8400-e29b-41d4-a716-4466554400{:02x}", suffix))
             .expect("test UUID should be valid")
     }
-    use crate::{database, director::Director, storage::MemoryImageStore};
+    use crate::{database, director::Director, storage::ImageStore};
 
     use super::*;
     use axum::{
@@ -695,11 +695,10 @@ mod tests {
         }
 
         // Create image store for testing
-        let storage_path = temp_dir.path().join("images");
-        let image_store = crate::storage::LocalImageStore::new(
-            storage_path,
-            "http://localhost:8080/images".to_string(),
-        )
+        let _storage_path = temp_dir.path().join("images");
+        let store = ImageStore::new(crate::storage::ImageStoreConfig::Memory {
+            base_url: "http://localhost:8080/images".into(),
+        })
         .unwrap();
 
         // Create agent-image directory with mock files for testing
@@ -720,13 +719,9 @@ mod tests {
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
         let state = Arc::new(AppState {
-            director: Director::new(
-                db_tokio.clone(),
-                Arc::new(MemoryImageStore::new()),
-                "http://localhost:8080",
-            ),
+            director: Director::new(db_tokio.clone()),
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
-            image_store: Arc::new(image_store),
+            image_store: store.into(),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
             roles_store: crate::roles::RolesStore::new(db_tokio),
             agent_images_path,
@@ -750,7 +745,7 @@ mod tests {
         let app = routes(state);
 
         let request = Request::builder()
-            .uri(format!("/ui/devices/{}/lifecycle", test_uuid.to_string()))
+            .uri(format!("/ui/devices/{}/lifecycle", test_uuid))
             .body(Body::empty())
             .unwrap();
 
@@ -778,10 +773,7 @@ mod tests {
 
         let request = Request::builder()
             .method("POST")
-            .uri(format!(
-                "/ui/devices/{}/lifecycle/transition",
-                test_uuid.to_string()
-            ))
+            .uri(format!("/ui/devices/{}/lifecycle/transition", test_uuid))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
@@ -805,7 +797,7 @@ mod tests {
         let app = routes(state);
 
         let request = Request::builder()
-            .uri(format!("/ui/devices/{}/status", test_uuid.to_string()))
+            .uri(format!("/ui/devices/{}/status", test_uuid))
             .body(Body::empty())
             .unwrap();
 

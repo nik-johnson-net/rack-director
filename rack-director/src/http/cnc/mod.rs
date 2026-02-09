@@ -22,14 +22,12 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
-use crate::{director::BootTarget, director::NetworkInterface, http::AppState};
+use crate::{director::NetworkInterface, http::AppState};
 use common::device_attributes::BmcConfig;
 
 use crate::http::error::Error;
 
-use ipxe_scripts::{
-    build_response, generate_boot_local_script, generate_kernel_script, generate_uuid_redirect,
-};
+use ipxe_scripts::{build_response, generate_uuid_redirect};
 
 #[derive(Debug, Deserialize)]
 struct IpxeQuery {
@@ -122,14 +120,9 @@ async fn ipxe_handler(
         }
     };
 
-    let ipxe_script = match boot_target {
-        BootTarget::LocalDisk => generate_boot_local_script(),
-        BootTarget::NetBoot {
-            ramdisk,
-            kernel,
-            cmdline,
-        } => generate_kernel_script(&ramdisk, &kernel, &cmdline),
-    };
+    let ipxe_script = boot_target
+        .to_ipxe_script(&root_url, &state.image_store)
+        .await?;
 
     log::debug!("cnc/ipxe: returning script for {}:\n{}", uuid, ipxe_script);
 
@@ -426,7 +419,7 @@ async fn get_bmc_config(
 
 #[cfg(test)]
 mod tests {
-    use crate::{database, director::Director, storage::MemoryImageStore};
+    use crate::{database, director::Director, storage::ImageStore};
 
     use super::*;
     use axum::{
@@ -468,12 +461,8 @@ mod tests {
         }
 
         // Create image store for testing
-        let storage_path = temp_dir.path().join("images");
-        let image_store = crate::storage::LocalImageStore::new(
-            storage_path,
-            "http://localhost:8080/images".to_string(),
-        )
-        .unwrap();
+        let _storage_path = temp_dir.path().join("images");
+        let image_store = ImageStore::memory("http://localhost:8080");
 
         // Create agent-image directory with mock files for testing
         let agent_images_path = temp_dir.path().join("agent-image");
@@ -499,11 +488,7 @@ mod tests {
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
         let state = Arc::new(AppState {
-            director: Director::new(
-                db_tokio.clone(),
-                Arc::new(MemoryImageStore::new()),
-                "http://localhost:8080",
-            ),
+            director: Director::new(db_tokio.clone()),
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
@@ -537,8 +522,16 @@ mod tests {
         assert!(body_str.contains("#!ipxe"));
         // New devices now automatically start discovery, so they boot the agent image
         assert!(body_str.contains("kernel"));
-        assert!(body_str.contains("/cnc/agent-images/vmlinuz"));
-        assert!(body_str.contains("/cnc/agent-images/initramfs.img"));
+        assert!(
+            body_str.contains("/cnc/agent-images/vmlinuz"),
+            "iPXE script is missing vmlinuz:\n{}",
+            body_str
+        );
+        assert!(
+            body_str.contains("/cnc/agent-images/initramfs.img"),
+            "iPXE script is missing initramfs.img:\n{}",
+            body_str
+        );
     }
 
     #[tokio::test]
@@ -814,9 +807,21 @@ mod tests {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
         assert!(body_str.contains("kernel"));
-        assert!(body_str.contains("/cnc/agent-images/vmlinuz"));
-        assert!(body_str.contains("/cnc/agent-images/initramfs.img"));
-        assert!(body_str.contains("rackdirector.url="));
+        assert!(
+            body_str.contains("/cnc/agent-images/vmlinuz"),
+            "iPXE script is missing vmlinuz:\n{}",
+            body_str
+        );
+        assert!(
+            body_str.contains("/cnc/agent-images/initramfs.img"),
+            "iPXE script is missing initramfs.img:\n{}",
+            body_str
+        );
+        assert!(
+            body_str.contains("rackdirector.url="),
+            "iPXE script is missing rackdirector.url:\n{}",
+            body_str
+        );
     }
 
     #[tokio::test]

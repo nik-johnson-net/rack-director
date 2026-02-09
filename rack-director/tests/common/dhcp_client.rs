@@ -18,11 +18,11 @@ pub enum Architecture {
     /// ARM64 UEFI (EFI AArch64)
     Arm64Uefi = 11,
     /// x86 UEFI HTTP Boot (EFI IA32 HTTP)
-    X86UefiHttp = 14,
+    X86UefiHttp = 15,
     /// x64 UEFI HTTP Boot (EFI BC x86-64 HTTP)
-    X64UefiHttp = 15,
-    /// ARM64 UEFI HTTP Boot (EFI ARM64 HTTP)
-    Arm64UefiHttp = 16,
+    X64UefiHttp = 16,
+    /// EBC UEFI HTTP Boot (EFI EBC HTTP)
+    EbcUefiHttp = 17,
 }
 
 /// DHCP boot options extracted from DHCP response

@@ -21,7 +21,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use tokio::{sync::Mutex, task::JoinHandle};
 
-use crate::director::Director;
+use crate::{director::Director, storage::ImageStore};
 
 const DEFAULT_DATABASE_PATH: &str = env!("RACK_DIRECTOR_DATABASE_PATH");
 const DEFAULT_AGENT_IMAGES_PATH: &str = env!("RACK_DIRECTOR_AGENT_IMAGES_PATH");
@@ -147,7 +147,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
 
     // Initialize storage
     let storage_config = build_storage_config(&args)?;
-    let image_store = storage::create_image_store(storage_config).await?;
+    let image_store = ImageStore::new(storage_config)?;
 
     // Determine DHCP Server Identifier (Option 54)
     // Priority: CLI arg > auto-discovered IP > fallback to gateway
@@ -157,7 +157,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let public_url = args
         .http_public_url
         .unwrap_or_else(|| format!("http://{}:{}", server_identifier, args.http_address.port()));
-    let director: Director = Director::new(db.clone(), image_store.clone(), &public_url);
+    let director: Director = Director::new(db.clone());
 
     // Initialize DHCP server and store
     let dhcp_store = dhcp::DhcpStore::new(db.clone());
@@ -199,7 +199,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let http_start_result = http::start(
         director.clone(),
         dhcp_store,
-        image_store,
+        image_store.into(),
         os_store,
         roles_store,
         args.http_address,
@@ -368,51 +368,5 @@ mod tests {
         // but we can verify it returns a valid IPv4 address
         assert_ne!(result, std::net::Ipv4Addr::UNSPECIFIED);
         assert_ne!(result, std::net::Ipv4Addr::LOCALHOST);
-    }
-
-    #[test]
-    fn test_public_url_default_includes_http_prefix() {
-        // Test that when --http-public-url is not provided, the default URL
-        // includes the http:// prefix to prevent firmware clients from trying
-        // to fetch HTTP URLs via TFTP
-        let server_identifier = "192.168.30.18".parse::<std::net::Ipv4Addr>().unwrap();
-
-        // Simulate the logic from rack_director_start
-        let args_http_public_url: Option<String> = None;
-        let public_url =
-            args_http_public_url.unwrap_or_else(|| format!("http://{}", server_identifier));
-
-        assert!(
-            public_url.starts_with("http://"),
-            "Default public URL should start with 'http://', got: {}",
-            public_url
-        );
-        assert_eq!(public_url, "http://192.168.30.18");
-    }
-
-    #[test]
-    fn test_public_url_provided_unchanged() {
-        // Test that when --http-public-url is provided, it is used as-is
-        let server_identifier = "192.168.30.18".parse::<std::net::Ipv4Addr>().unwrap();
-
-        // Simulate the logic from rack_director_start
-        let args_http_public_url: Option<String> = Some("http://example.com:3000".to_string());
-        let public_url =
-            args_http_public_url.unwrap_or_else(|| format!("http://{}", server_identifier));
-
-        assert_eq!(public_url, "http://example.com:3000");
-    }
-
-    #[test]
-    fn test_public_url_provided_with_https() {
-        // Test that HTTPS URLs are preserved
-        let server_identifier = "192.168.30.18".parse::<std::net::Ipv4Addr>().unwrap();
-
-        // Simulate the logic from rack_director_start
-        let args_http_public_url: Option<String> = Some("https://example.com".to_string());
-        let public_url =
-            args_http_public_url.unwrap_or_else(|| format!("http://{}", server_identifier));
-
-        assert_eq!(public_url, "https://example.com");
     }
 }

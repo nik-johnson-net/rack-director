@@ -103,7 +103,6 @@ impl DeviceResolver for DirectorDeviceResolver {
 mod tests {
     use super::*;
     use crate::database;
-    use crate::storage::MemoryImageStore;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
@@ -113,11 +112,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let conn = database::open(db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
-        let director = Director::new(
-            db.clone(),
-            Arc::new(MemoryImageStore::new()),
-            "http://localhost:8080",
-        );
+        let director = Director::new(db.clone());
         DirectorDeviceResolver::new(director)
     }
 
