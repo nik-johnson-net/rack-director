@@ -87,10 +87,6 @@ pub struct NetworkInterface {
     #[serde(default)]
     pub ip_address: Option<String>,
 
-    /// Whether this is the primary network interface
-    #[serde(default)]
-    pub is_primary: bool,
-
     /// Network ID this interface is on (if it has an IP)
     #[serde(default)]
     pub network_id: Option<i64>,
@@ -243,7 +239,6 @@ mod tests {
                 interface_name: "eth0".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
-                is_primary: true,
                 network_id: Some(1),
                 disabled: false,
                 warning_label: None,
@@ -350,7 +345,6 @@ mod tests {
         assert_eq!(iface.interface_name, "eth0");
         assert_eq!(iface.mac_address, "aa:bb:cc:dd:ee:ff");
         assert!(iface.ip_address.is_none());
-        assert!(!iface.is_primary);
         assert!(iface.network_id.is_none());
         assert!(!iface.disabled);
         assert!(iface.warning_label.is_none());
@@ -583,14 +577,12 @@ mod tests {
                     "interface_name": "eth0",
                     "mac_address": "aa:bb:cc:dd:ee:01",
                     "ip_address": "10.0.0.100",
-                    "is_primary": true,
                     "network_id": 1
                 },
                 {
                     "interface_name": "eth1",
                     "mac_address": "aa:bb:cc:dd:ee:02",
-                    "ip_address": "10.0.0.101",
-                    "is_primary": false
+                    "ip_address": "10.0.0.101"
                 }
             ],
             "bmc": {
@@ -622,8 +614,6 @@ mod tests {
         assert_eq!(attrs.hostname, Some("server-01".to_string()));
         assert_eq!(attrs.manufacturer, Some("Dell Inc.".to_string()));
         assert_eq!(attrs.network_interfaces.len(), 2);
-        assert!(attrs.network_interfaces[0].is_primary);
-        assert!(!attrs.network_interfaces[1].is_primary);
         assert!(attrs.bmc.is_some());
         assert_eq!(attrs.disks.len(), 1);
         assert_eq!(attrs.cpus.len(), 1);

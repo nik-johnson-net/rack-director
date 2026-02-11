@@ -298,15 +298,10 @@ function DeviceDetail() {
                         return (
                           <tr
                             key={idx}
-                            className={`border-b ${
-                              nic.is_primary ? "bg-blue-50" : ""
-                            } ${nic.disabled ? "bg-red-50 opacity-60" : ""}`}
+                            className={`border-b ${nic.disabled ? "bg-red-50 opacity-60" : ""}`}
                           >
                             <td className="py-2 px-3 font-mono text-xs">
                               {nic.interface_name}
-                              {nic.is_primary && (
-                                <Badge className="ml-2 text-xs" variant="default">Primary</Badge>
-                              )}
                               {nic.disabled && (
                                 <Badge className="ml-2 text-xs" variant="destructive">Disabled</Badge>
                               )}

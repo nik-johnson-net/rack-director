@@ -125,8 +125,7 @@ fn build_attributes(
             json!({
                 "interface_name": format!("eth{}", idx),
                 "mac_address": mac_string,
-                "ip_address": ip_address,
-                "is_primary": idx == 0
+                "ip_address": ip_address
             })
         })
         .collect();
@@ -210,7 +209,6 @@ mod tests {
         assert_eq!(nic0["interface_name"], "eth0");
         assert_eq!(nic0["mac_address"], "52:54:00:12:34:56");
         assert_eq!(nic0["ip_address"], "192.168.1.100");
-        assert_eq!(nic0["is_primary"], true);
 
         // Check legacy mac_address field
         assert_eq!(attrs.get("mac_address").unwrap(), "52:54:00:12:34:56");
@@ -249,13 +247,11 @@ mod tests {
         assert_eq!(nic0["interface_name"], "eth0");
         assert_eq!(nic0["mac_address"], "52:54:00:12:34:56");
         assert_eq!(nic0["ip_address"], "192.168.1.100");
-        assert_eq!(nic0["is_primary"], true);
 
         let nic1 = &network_interfaces[1];
         assert_eq!(nic1["interface_name"], "eth1");
         assert_eq!(nic1["mac_address"], "52:54:00:12:34:57");
         assert_eq!(nic1["ip_address"], "192.168.1.101");
-        assert_eq!(nic1["is_primary"], false);
 
         // Check legacy mac_address field (should be first NIC)
         assert_eq!(attrs.get("mac_address").unwrap(), "52:54:00:12:34:56");

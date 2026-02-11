@@ -223,7 +223,7 @@ impl DirectorStore {
             params![mac, uuid],
         )?;
 
-        // Then, if network_interfaces array exists, update the primary NIC's MAC address
+        // Then, if network_interfaces array exists, update the first NIC's MAC address
         let has_interfaces: bool = conn
             .query_row(
                 "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
@@ -237,18 +237,17 @@ impl DirectorStore {
             .unwrap_or(false);
 
         if has_interfaces {
-            // Find the index of the primary interface
-            let primary_index: Option<i64> = conn
+            // Find the index of the first interface
+            let first_index: Option<i64> = conn
                 .query_row(
                     "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?), '$.network_interfaces')
-                     WHERE json_extract(value, '$.is_primary') = 1
                      LIMIT 1",
                     params![uuid],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;
 
-            if let Some(index) = primary_index {
+            if let Some(index) = first_index {
                 let path = format!("$.network_interfaces[{}].mac_address", index);
                 conn.execute(
                     "UPDATE devices SET attributes = json_set(attributes, ?, ?) WHERE uuid = ?",
@@ -299,7 +298,6 @@ impl DirectorStore {
                 interface_name: "unknown".to_string(), // Will be updated by agent
                 mac_address: mac.to_string(),
                 ip_address: Some(ip.to_string()),
-                is_primary: interfaces.is_empty(), // Primary only if it's the first interface
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -677,7 +675,6 @@ mod tests {
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].mac_address, mac);
         assert_eq!(interfaces[0].ip_address, Some("10.0.0.150".to_string()));
-        assert!(interfaces[0].is_primary); // Should be primary as it's the first interface
 
         // Verify legacy ip_address field is NOT set
         let device = store.get_device(&uuid).await.unwrap();
@@ -882,7 +879,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: None,
             disabled: false,
             warning_label: None,
@@ -898,7 +894,6 @@ mod tests {
         assert_eq!(retrieved[0].interface_name, "eth0");
         assert_eq!(retrieved[0].mac_address, "aa:bb:cc:dd:ee:01");
         assert_eq!(retrieved[0].ip_address, Some("10.0.0.100".to_string()));
-        assert!(retrieved[0].is_primary);
     }
 
     #[tokio::test]
@@ -918,7 +913,6 @@ mod tests {
                 interface_name: "eth0".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
-                is_primary: true,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -927,7 +921,6 @@ mod tests {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
-                is_primary: false,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -936,7 +929,6 @@ mod tests {
                 interface_name: "eth2".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:03".to_string(),
                 ip_address: None,
-                is_primary: false,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -953,9 +945,6 @@ mod tests {
         assert_eq!(retrieved[0].interface_name, "eth0");
         assert_eq!(retrieved[1].interface_name, "eth1");
         assert_eq!(retrieved[2].interface_name, "eth2");
-        assert!(retrieved[0].is_primary);
-        assert!(!retrieved[1].is_primary);
-        assert!(!retrieved[2].is_primary);
     }
 
     #[tokio::test]
@@ -974,7 +963,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: None,
             disabled: false,
             warning_label: None,
@@ -987,7 +975,6 @@ mod tests {
                 interface_name: "ens0".to_string(),
                 mac_address: "11:22:33:44:55:66".to_string(),
                 ip_address: Some("192.168.1.100".to_string()),
-                is_primary: true,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -996,7 +983,6 @@ mod tests {
                 interface_name: "ens1".to_string(),
                 mac_address: "11:22:33:44:55:67".to_string(),
                 ip_address: None,
-                is_primary: false,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1054,7 +1040,6 @@ mod tests {
                 interface_name: "eth0".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
-                is_primary: true,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1063,7 +1048,6 @@ mod tests {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
-                is_primary: false,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1109,7 +1093,6 @@ mod tests {
                 interface_name: "eth0".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
-                is_primary: true,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1118,7 +1101,6 @@ mod tests {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
-                is_primary: false,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1174,7 +1156,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_mac_address_updates_primary_interface() {
+    async fn test_set_mac_address_updates_first_interface() {
         let (store, _temp) = create_test_store().await;
         let uuid = test_uuid(0x38);
 
@@ -1190,7 +1172,6 @@ mod tests {
                 interface_name: "eth0".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
-                is_primary: true,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1199,7 +1180,6 @@ mod tests {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
-                is_primary: false,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1223,7 +1203,7 @@ mod tests {
             "11:22:33:44:55:66"
         );
 
-        // Verify primary interface MAC is updated
+        // Verify first interface MAC is updated
         let updated_interfaces = store.get_network_interfaces(&uuid).await.unwrap();
         assert_eq!(updated_interfaces[0].mac_address, "11:22:33:44:55:66");
         // Secondary interface should be unchanged
@@ -1253,7 +1233,6 @@ mod tests {
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].mac_address, mac);
         assert_eq!(interfaces[0].ip_address, Some("10.0.0.100".to_string()));
-        assert!(interfaces[0].is_primary);
 
         // Verify legacy field is NOT set
         let device = store.get_device(&uuid).await.unwrap();
@@ -1277,7 +1256,6 @@ mod tests {
                 interface_name: "eth0".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
-                is_primary: true,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1286,7 +1264,6 @@ mod tests {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
-                is_primary: false,
                 network_id: None,
                 disabled: false,
                 warning_label: None,
@@ -1442,7 +1419,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: Some(1),
             disabled: true,
             warning_label: Some("Duplicate MAC on network main".to_string()),
@@ -1479,7 +1455,7 @@ mod tests {
         let conn = store.conn.lock().await;
         conn.execute(
             r#"UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces',
-               json('[{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:01","ip_address":"10.0.0.100","is_primary":true}]')
+               json('[{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:01","ip_address":"10.0.0.100"}]')
             ) WHERE uuid = ?"#,
             params![uuid],
         )
@@ -1515,7 +1491,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: Some(1),
             disabled: false,
             warning_label: None,
@@ -1525,7 +1500,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:02".to_string(),
             ip_address: Some("10.0.0.101".to_string()),
-            is_primary: true,
             network_id: Some(1),
             disabled: false,
             warning_label: None,
@@ -1572,7 +1546,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: Some(network_id),
             disabled: false,
             warning_label: None,
@@ -1582,7 +1555,6 @@ mod tests {
             interface_name: "ens0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.101".to_string()),
-            is_primary: true,
             network_id: Some(network_id),
             disabled: false,
             warning_label: None,
@@ -1640,7 +1612,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: Some(network_id),
             disabled: false,
             warning_label: None,
@@ -1650,7 +1621,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("192.168.1.100".to_string()),
-            is_primary: true,
             network_id: Some(2),
             disabled: false,
             warning_label: None,
@@ -1709,7 +1679,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: Some(network_id),
             disabled: false,
             warning_label: None,
@@ -1719,7 +1688,6 @@ mod tests {
             interface_name: "ens0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.101".to_string()),
-            is_primary: true,
             network_id: Some(network_id),
             disabled: false,
             warning_label: None,
@@ -1729,7 +1697,6 @@ mod tests {
             interface_name: "enp0s3".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.102".to_string()),
-            is_primary: true,
             network_id: Some(network_id),
             disabled: false,
             warning_label: None,
@@ -1787,7 +1754,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: mac.to_string(),
             ip_address: None,
-            is_primary: true,
             network_id: None,
             disabled: false,
             warning_label: None,
@@ -1797,7 +1763,6 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            is_primary: true,
             network_id: Some(network_id),
             disabled: false,
             warning_label: None,

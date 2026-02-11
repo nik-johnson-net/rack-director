@@ -41,7 +41,6 @@ export type NetworkInterface = {
   interface_name: string;
   mac_address: string;
   ip_address?: string;
-  is_primary: boolean;
   network_id?: number;
   disabled?: boolean;
   warning_label?: string;

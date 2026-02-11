@@ -27,7 +27,6 @@ struct NetworkInterface {
     interface_name: String,
     mac_address: String,
     ip_address: Option<String>,
-    is_primary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +93,6 @@ struct MemoryInfo {
 ///
 /// Returns a vector of NetworkInterface structs with MAC addresses.
 /// IP addresses are set to None and will be backfilled by rack-director from DHCP leases.
-/// The first interface discovered is marked as primary.
 async fn scan_network_interfaces() -> Result<Vec<NetworkInterface>> {
     let mut interfaces = Vec::new();
     let net_dir = std::path::Path::new("/sys/class/net");
@@ -160,7 +158,6 @@ async fn scan_network_interfaces() -> Result<Vec<NetworkInterface>> {
             interface_name,
             mac_address,
             ip_address: None, // Will be backfilled by rack-director from DHCP leases
-            is_primary: interfaces.is_empty(), // First interface is primary
         });
     }
 
@@ -1016,7 +1013,6 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
@@ -1024,7 +1020,6 @@ mod tests {
         assert_eq!(interfaces[0].interface_name, "eth0");
         assert_eq!(interfaces[0].mac_address, "aa:bb:cc:dd:ee:f0");
         assert_eq!(interfaces[0].ip_address, None);
-        assert!(interfaces[0].is_primary);
     }
 
     /// Test scanning with multiple physical Ethernet interfaces
@@ -1069,18 +1064,10 @@ mod tests {
                 interface_name: interface_name.clone(),
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
         assert_eq!(interfaces.len(), 4);
-
-        // Find the primary interface (first one discovered)
-        let primary_count = interfaces.iter().filter(|i| i.is_primary).count();
-        assert_eq!(
-            primary_count, 1,
-            "Exactly one interface should be marked as primary"
-        );
 
         // Verify all have correct fields
         for iface in &interfaces {
@@ -1136,7 +1123,6 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
@@ -1185,7 +1171,6 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
@@ -1234,7 +1219,6 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
@@ -1287,7 +1271,6 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
@@ -1295,9 +1278,9 @@ mod tests {
         assert_eq!(interfaces.len(), 0);
     }
 
-    /// Test that first interface is marked as primary
+    /// Test that multiple interfaces are scanned correctly
     #[tokio::test]
-    async fn test_first_interface_is_primary() {
+    async fn test_multiple_interfaces_scanned() {
         let temp_dir = create_test_net_dir();
         create_physical_interface(temp_dir.path(), "enp0s3", "aa:bb:cc:dd:ee:f0");
         create_physical_interface(temp_dir.path(), "enp0s8", "aa:bb:cc:dd:ee:f1");
@@ -1335,19 +1318,10 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
         assert_eq!(interfaces.len(), 2);
-
-        // Exactly one should be primary
-        let primary_count = interfaces.iter().filter(|i| i.is_primary).count();
-        assert_eq!(primary_count, 1);
-
-        // The first one in the vector should be primary
-        assert!(interfaces[0].is_primary);
-        assert!(!interfaces[1].is_primary);
     }
 
     /// Test empty directory (no interfaces)
@@ -1388,7 +1362,6 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
-                is_primary: interfaces.is_empty(),
             });
         }
 
@@ -1402,20 +1375,17 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: Some("192.168.1.100".to_string()),
-            is_primary: true,
         };
 
         let json = serde_json::to_string(&interface).unwrap();
         assert!(json.contains("eth0"));
         assert!(json.contains("aa:bb:cc:dd:ee:ff"));
         assert!(json.contains("192.168.1.100"));
-        assert!(json.contains("true"));
 
         let deserialized: NetworkInterface = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.interface_name, "eth0");
         assert_eq!(deserialized.mac_address, "aa:bb:cc:dd:ee:ff");
         assert_eq!(deserialized.ip_address, Some("192.168.1.100".to_string()));
-        assert!(deserialized.is_primary);
     }
 
     /// Test NetworkInterface with None ip_address
@@ -1425,19 +1395,16 @@ mod tests {
             interface_name: "eth1".to_string(),
             mac_address: "11:22:33:44:55:66".to_string(),
             ip_address: None,
-            is_primary: false,
         };
 
         let json = serde_json::to_string(&interface).unwrap();
         assert!(json.contains("eth1"));
         assert!(json.contains("11:22:33:44:55:66"));
         assert!(json.contains("null"));
-        assert!(json.contains("false"));
 
         let deserialized: NetworkInterface = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.interface_name, "eth1");
         assert_eq!(deserialized.ip_address, None);
-        assert!(!deserialized.is_primary);
     }
 
     // Tests for BMC configuration
