@@ -679,6 +679,65 @@ impl DhcpStore {
         Ok(())
     }
 
+    /// Create or update a static reservation (upsert)
+    ///
+    /// Creates a new static reservation or updates an existing one if the MAC address
+    /// already has a reservation in the specified network. This makes the operation
+    /// idempotent and safe to call multiple times during device registration.
+    ///
+    /// # Arguments
+    /// * `network_id` - The network ID for the reservation
+    /// * `mac` - The MAC address to reserve
+    /// * `ip` - The IP address to assign
+    /// * `hostname` - Optional hostname for the reservation
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The IP address is already reserved for a different MAC on this network
+    /// - Database constraint violation occurs
+    pub async fn create_or_update_static_reservation(
+        &self,
+        network_id: i64,
+        mac: &str,
+        ip: &str,
+        hostname: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO dhcp_static_reservations (network_id, mac_address, ip_address, hostname, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(network_id, mac_address) DO UPDATE SET
+                ip_address = ?3,
+                hostname = ?4,
+                updated_at = ?6",
+            params![network_id, mac, ip, hostname, now, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Delete all static reservations for a MAC address across all networks
+    ///
+    /// This is a bulk deletion operation used when a device is deleted.
+    /// It removes all reservations for the given MAC address regardless of which
+    /// network they're on.
+    ///
+    /// # Arguments
+    /// * `mac` - The MAC address to delete reservations for
+    ///
+    /// # Returns
+    /// The number of reservations deleted (0 if the MAC has no reservations)
+    pub async fn delete_static_reservations_by_mac(&self, mac: &str) -> Result<u64> {
+        let db = self.db.lock().await;
+        let deleted = db.execute(
+            "DELETE FROM dhcp_static_reservations WHERE mac_address = ?",
+            params![mac],
+        )?;
+        Ok(deleted as u64)
+    }
+
     /// Get leases by network
     pub async fn get_leases_by_network(&self, network_id: i64) -> Result<Vec<Lease>> {
         let db = self.db.lock().await;
@@ -962,5 +1021,198 @@ mod tests {
         // Verify the lease is gone
         let leases = store.get_leases_by_network(network_id).await.unwrap();
         assert_eq!(leases.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_or_update_static_reservation_insert() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Create a new reservation
+        store
+            .create_or_update_static_reservation(
+                network_id,
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.50",
+                Some("test-host"),
+            )
+            .await
+            .unwrap();
+
+        // Verify it was created
+        let reservation = store
+            .get_static_reservation(network_id, "aa:bb:cc:dd:ee:01")
+            .await
+            .unwrap();
+        assert!(reservation.is_some());
+        let r = reservation.unwrap();
+        assert_eq!(r.mac_address, "aa:bb:cc:dd:ee:01");
+        assert_eq!(r.ip_address, "10.0.0.50");
+        assert_eq!(r.hostname, Some("test-host".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_create_or_update_static_reservation_update() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Create initial reservation
+        store
+            .create_or_update_static_reservation(
+                network_id,
+                "aa:bb:cc:dd:ee:02",
+                "10.0.0.51",
+                Some("initial-host"),
+            )
+            .await
+            .unwrap();
+
+        // Update with different IP and hostname
+        store
+            .create_or_update_static_reservation(
+                network_id,
+                "aa:bb:cc:dd:ee:02",
+                "10.0.0.52",
+                Some("updated-host"),
+            )
+            .await
+            .unwrap();
+
+        // Verify it was updated, not duplicated
+        let reservations = store.list_static_reservations(network_id).await.unwrap();
+        let matching: Vec<_> = reservations
+            .iter()
+            .filter(|r| r.mac_address == "aa:bb:cc:dd:ee:02")
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].ip_address, "10.0.0.52");
+        assert_eq!(matching[0].hostname, Some("updated-host".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_create_or_update_static_reservation_ip_conflict() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Create reservation for first MAC
+        store
+            .create_or_update_static_reservation(
+                network_id,
+                "aa:bb:cc:dd:ee:03",
+                "10.0.0.53",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Try to create reservation for different MAC with same IP
+        let result = store
+            .create_or_update_static_reservation(
+                network_id,
+                "aa:bb:cc:dd:ee:04",
+                "10.0.0.53",
+                None,
+            )
+            .await;
+
+        // Should fail due to UNIQUE constraint on (network_id, ip_address)
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_static_reservations_by_mac_single_network() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Create reservation
+        store
+            .create_or_update_static_reservation(
+                network_id,
+                "aa:bb:cc:dd:ee:05",
+                "10.0.0.54",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Delete by MAC
+        let deleted = store
+            .delete_static_reservations_by_mac("aa:bb:cc:dd:ee:05")
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify it's gone
+        let reservation = store
+            .get_static_reservation(network_id, "aa:bb:cc:dd:ee:05")
+            .await
+            .unwrap();
+        assert!(reservation.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_static_reservations_by_mac_multiple_networks() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Create second network
+        let network2 = store
+            .create_network(
+                "Second Network",
+                "192.168.1.0/24",
+                "192.168.1.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Create reservations on both networks for same MAC
+        store
+            .create_or_update_static_reservation(
+                network_id,
+                "aa:bb:cc:dd:ee:06",
+                "10.0.0.55",
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .create_or_update_static_reservation(
+                network2.id,
+                "aa:bb:cc:dd:ee:06",
+                "192.168.1.55",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Delete by MAC - should remove from both networks
+        let deleted = store
+            .delete_static_reservations_by_mac("aa:bb:cc:dd:ee:06")
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        // Verify both are gone
+        let r1 = store
+            .get_static_reservation(network_id, "aa:bb:cc:dd:ee:06")
+            .await
+            .unwrap();
+        assert!(r1.is_none());
+        let r2 = store
+            .get_static_reservation(network2.id, "aa:bb:cc:dd:ee:06")
+            .await
+            .unwrap();
+        assert!(r2.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_static_reservations_by_mac_nonexistent() {
+        let (store, _network_id, _temp_dir) = create_test_store().await;
+
+        // Delete nonexistent MAC - should return 0, not error
+        let deleted = store
+            .delete_static_reservations_by_mac("aa:bb:cc:dd:ee:99")
+            .await
+            .unwrap();
+        assert_eq!(deleted, 0);
     }
 }

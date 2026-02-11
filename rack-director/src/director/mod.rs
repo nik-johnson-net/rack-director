@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::dhcp::DhcpStore;
 use crate::director::store::DirectorStore;
 use crate::director::store::generate_hostname_from_uuid;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, LifecycleTransition};
@@ -25,6 +26,7 @@ pub struct Director {
     lifecycle_store: LifecycleStore,
     os_store: OperatingSystemsStore,
     roles_store: RolesStore,
+    dhcp_store: DhcpStore,
 }
 
 impl Director {
@@ -33,13 +35,15 @@ impl Director {
         let plans_store = PlansStore::new(conn.clone());
         let lifecycle_store = LifecycleStore::new(conn.clone());
         let os_store = OperatingSystemsStore::new(conn.clone());
-        let roles_store = RolesStore::new(conn);
+        let roles_store = RolesStore::new(conn.clone());
+        let dhcp_store = DhcpStore::new(conn);
         Director {
             store,
             plans_store,
             lifecycle_store,
             os_store,
             roles_store,
+            dhcp_store,
         }
     }
 
@@ -524,11 +528,52 @@ impl Director {
     }
 
     pub async fn delete_device(&self, uuid: &Uuid) -> anyhow::Result<()> {
+        // CRITICAL: Clean up reservations BEFORE deleting device
+        // (interfaces stored in device JSON, lost after deletion)
+
+        // 1. Delete for all discovered interfaces
+        let interfaces = self.store.get_network_interfaces(uuid).await.unwrap_or_default();
+        for nic in &interfaces {
+            match self.dhcp_store.delete_static_reservations_by_mac(&nic.mac_address).await {
+                Ok(count) if count > 0 => {
+                    log::info!(
+                        "Deleted {} reservation(s) for MAC {} (device {})",
+                        count,
+                        nic.mac_address,
+                        uuid
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to delete reservations for MAC {}: {}",
+                        nic.mac_address,
+                        e
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Check legacy mac_address field (backward compatibility)
+        if let Ok(device) = self.store.get_device(uuid).await {
+            if let Some(mac) = &device.attributes.mac_address {
+                if !interfaces.iter().any(|nic| &nic.mac_address == mac) {
+                    let _ = self.dhcp_store.delete_static_reservations_by_mac(mac).await;
+                }
+            }
+        }
+
+        // 3. Delete device (cascades to plans, transitions)
         self.store.delete_device(uuid).await
     }
 
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         self.store.find_device_by_bmc_mac(mac).await
+    }
+
+    #[cfg(test)]
+    pub fn dhcp_store(&self) -> &DhcpStore {
+        &self.dhcp_store
     }
 
     /// Issue an IPMI power reset command to the device's BMC
@@ -1212,5 +1257,168 @@ mod tests {
             device.attributes.manufacturer.as_ref().unwrap(),
             "Dell Inc."
         );
+    }
+
+    #[tokio::test]
+    async fn test_delete_device_removes_static_reservations() {
+        let (director, temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440033").unwrap();
+
+        // Create a DHCP network first
+        let db_path = temp_dir.path().join("test.db");
+        let db = crate::database::open(&db_path).unwrap();
+        let db_tokio = Arc::new(Mutex::new(db));
+        let dhcp_store = crate::dhcp::DhcpStore::new(db_tokio);
+
+        let network = dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create network interface with MAC
+        let mac = "aa:bb:cc:dd:ee:33";
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: mac.to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            network_id: Some(network.id),
+            disabled: false,
+            warning_label: None,
+        }];
+        director
+            .set_network_interfaces(&test_uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Create static reservation
+        dhcp_store
+            .create_or_update_static_reservation(network.id, mac, "10.0.0.100", None)
+            .await
+            .unwrap();
+
+        // Verify reservation exists
+        let reservation = dhcp_store
+            .get_static_reservation(network.id, mac)
+            .await
+            .unwrap();
+        assert!(reservation.is_some());
+
+        // Delete device
+        director.delete_device(&test_uuid).await.unwrap();
+
+        // Verify reservation was deleted
+        let reservation = dhcp_store
+            .get_static_reservation(network.id, mac)
+            .await
+            .unwrap();
+        assert!(reservation.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_device_removes_reservations_for_multiple_nics() {
+        let (director, temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440034").unwrap();
+
+        // Create DHCP network
+        let db_path = temp_dir.path().join("test.db");
+        let db = crate::database::open(&db_path).unwrap();
+        let db_tokio = Arc::new(Mutex::new(db));
+        let dhcp_store = crate::dhcp::DhcpStore::new(db_tokio);
+
+        let network = dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create multiple network interfaces
+        let mac1 = "aa:bb:cc:dd:ee:34";
+        let mac2 = "aa:bb:cc:dd:ee:35";
+        let interfaces = vec![
+            NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: mac1.to_string(),
+                ip_address: Some("10.0.0.101".to_string()),
+                network_id: Some(network.id),
+                disabled: false,
+                warning_label: None,
+            },
+            NetworkInterface {
+                interface_name: "eth1".to_string(),
+                mac_address: mac2.to_string(),
+                ip_address: Some("10.0.0.102".to_string()),
+                network_id: Some(network.id),
+                disabled: false,
+                warning_label: None,
+            },
+        ];
+        director
+            .set_network_interfaces(&test_uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Create static reservations for both MACs
+        dhcp_store
+            .create_or_update_static_reservation(network.id, mac1, "10.0.0.101", None)
+            .await
+            .unwrap();
+        dhcp_store
+            .create_or_update_static_reservation(network.id, mac2, "10.0.0.102", None)
+            .await
+            .unwrap();
+
+        // Verify both reservations exist
+        assert!(dhcp_store
+            .get_static_reservation(network.id, mac1)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(dhcp_store
+            .get_static_reservation(network.id, mac2)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Delete device
+        director.delete_device(&test_uuid).await.unwrap();
+
+        // Verify both reservations were deleted
+        assert!(dhcp_store
+            .get_static_reservation(network.id, mac1)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(dhcp_store
+            .get_static_reservation(network.id, mac2)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

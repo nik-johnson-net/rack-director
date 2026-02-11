@@ -33,8 +33,28 @@ pub async fn enrich_interfaces_with_dhcp_info(
                 nic.interface_name,
                 nic.mac_address
             );
-            nic.ip_address = Some(lease.ip_address);
+            nic.ip_address = Some(lease.ip_address.clone());
             nic.network_id = lease.network_id;
+
+            // Create static reservation for this interface
+            if let Some(network_id) = lease.network_id {
+                if let Err(e) = state
+                    .dhcp_store
+                    .create_or_update_static_reservation(
+                        network_id,
+                        &nic.mac_address,
+                        &lease.ip_address,
+                        None,
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "Couldn't create static reservation for MAC {}: {}",
+                        nic.mac_address,
+                        e
+                    );
+                }
+            }
         }
         enriched.push(nic);
     }
@@ -354,5 +374,87 @@ mod tests {
             .await
             .unwrap();
         assert!(pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_enrich_interfaces_creates_static_reservations() {
+        let (state, _temp_dir) = create_test_state().await;
+
+        // Create DHCP leases for multiple MACs
+        let mac1 = "aa:bb:cc:dd:ee:01";
+        let mac2 = "aa:bb:cc:dd:ee:02";
+        let ip1: Ipv4Addr = "10.0.0.101".parse().unwrap();
+        let ip2: Ipv4Addr = "10.0.0.102".parse().unwrap();
+
+        state
+            .dhcp_store
+            .create_or_update_lease_with_network(
+                mac1,
+                &ip1,
+                None,
+                crate::dhcp::LeaseState::Active,
+                3600,
+                1,
+            )
+            .await
+            .unwrap();
+
+        state
+            .dhcp_store
+            .create_or_update_lease_with_network(
+                mac2,
+                &ip2,
+                None,
+                crate::dhcp::LeaseState::Active,
+                3600,
+                1,
+            )
+            .await
+            .unwrap();
+
+        // Create interfaces without IP info
+        let interfaces = vec![
+            NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: mac1.to_string(),
+                ip_address: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
+            },
+            NetworkInterface {
+                interface_name: "eth1".to_string(),
+                mac_address: mac2.to_string(),
+                ip_address: None,
+                network_id: None,
+                disabled: false,
+                warning_label: None,
+            },
+        ];
+
+        // Enrich interfaces - should create static reservations
+        let enriched = enrich_interfaces_with_dhcp_info(&state, interfaces).await;
+
+        // Verify interfaces were enriched
+        assert_eq!(enriched.len(), 2);
+        assert_eq!(enriched[0].ip_address, Some("10.0.0.101".to_string()));
+        assert_eq!(enriched[1].ip_address, Some("10.0.0.102".to_string()));
+
+        // Verify static reservations were created
+        let res1 = state
+            .dhcp_store
+            .get_static_reservation(1, mac1)
+            .await
+            .unwrap();
+        assert!(res1.is_some());
+        assert_eq!(res1.unwrap().ip_address, "10.0.0.101");
+
+        let res2 = state
+            .dhcp_store
+            .get_static_reservation(1, mac2)
+            .await
+            .unwrap();
+        assert!(res2.is_some());
+        assert_eq!(res2.unwrap().ip_address, "10.0.0.102");
     }
 }

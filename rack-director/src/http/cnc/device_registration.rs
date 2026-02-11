@@ -89,6 +89,36 @@ pub async fn register_and_start_discovery(
         warn!("Couldn't complete pending device: {}", e);
     }
 
+    // Create static DHCP reservation from active lease
+    if let Some(mac) = mac_address {
+        if let Ok(Some(lease)) = state.dhcp_store.get_lease_by_mac(mac).await {
+            if let Some(network_id) = lease.network_id {
+                let hostname = state
+                    .director
+                    .get_device(device_uuid)
+                    .await
+                    .ok()
+                    .and_then(|d| d.attributes.hostname);
+
+                if let Err(e) = state
+                    .dhcp_store
+                    .create_or_update_static_reservation(
+                        network_id,
+                        mac,
+                        &lease.ip_address,
+                        hostname.as_deref(),
+                    )
+                    .await
+                {
+                    warn!(
+                        "Couldn't create static DHCP reservation for device {}: {}",
+                        device_uuid, e
+                    );
+                }
+            }
+        }
+    }
+
     // Automatically start discovery transition for newly registered devices
     if let Err(e) = state
         .director
@@ -271,5 +301,47 @@ mod tests {
             .await
             .unwrap();
         assert!(pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_and_start_discovery_creates_static_reservation() {
+        let (state, _temp_dir) = create_test_state().await;
+        let uuid = test_uuid();
+        let mac = "aa:bb:cc:dd:ee:11".to_string();
+
+        // Create a DHCP lease for this MAC (without device_uuid initially)
+        use std::net::Ipv4Addr;
+        let ip: Ipv4Addr = "10.0.0.150".parse().unwrap();
+        state
+            .dhcp_store
+            .create_or_update_lease_with_network(
+                &mac,
+                &ip,
+                None, // Device doesn't exist yet
+                crate::dhcp::LeaseState::Active,
+                3600,
+                1,
+            )
+            .await
+            .unwrap();
+
+        // Register device - this should create a static reservation
+        register_and_start_discovery(&state, &uuid, Some(&mac)).await;
+
+        // Verify static reservation was created
+        let reservation = state
+            .dhcp_store
+            .get_static_reservation(1, &mac)
+            .await
+            .unwrap();
+        assert!(reservation.is_some());
+        let r = reservation.unwrap();
+        assert_eq!(r.mac_address, mac);
+        assert_eq!(r.ip_address, "10.0.0.150");
+        assert_eq!(r.network_id, 1);
+
+        // Verify hostname is included
+        let device = state.director.get_device(&uuid).await.unwrap();
+        assert_eq!(r.hostname, device.attributes.hostname);
     }
 }
