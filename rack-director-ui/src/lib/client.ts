@@ -95,7 +95,9 @@ export type DhcpLease = {
   mac_address: string;
   ip_address: string;
   device_uuid?: string;
-  expires_at?: string;
+  lease_start?: string;
+  lease_end?: string;
+  state?: string;
   network_id?: number;
   hostname?: string;
 }

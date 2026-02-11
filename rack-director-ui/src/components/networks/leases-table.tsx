@@ -202,12 +202,12 @@ export default function LeasesTable({ network, networkId, leases, pendingDevices
       },
     },
     {
-      accessorKey: "expires_at",
+      accessorKey: "lease_end",
       header: "Expires At",
       cell: ({ row }) => {
-        const expiresAt = row.getValue("expires_at") as string | undefined;
-        if (expiresAt) {
-          return <span className="text-sm">{new Date(expiresAt).toLocaleString()}</span>;
+        const leaseEnd = row.getValue("lease_end") as string | undefined;
+        if (leaseEnd) {
+          return <span className="text-sm">{new Date(leaseEnd).toLocaleString()}</span>;
         }
         return <span className="text-muted-foreground text-sm">—</span>;
       },
