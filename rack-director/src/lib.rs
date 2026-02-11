@@ -126,6 +126,9 @@ pub struct RackDirectorHandle {
     // Information for the dhcp service
     dhcp_handle: JoinHandle<Result<(), anyhow::Error>>,
     pub dhcp_port: u16,
+
+    // Background task for cleaning up expired DHCP leases
+    lease_cleanup_handle: JoinHandle<()>,
 }
 
 impl RackDirectorHandle {
@@ -133,6 +136,7 @@ impl RackDirectorHandle {
     // TODO: Currently just waiting for any one to abort. Need a proper abort signal / shutdown architecture.
     pub async fn wait(self) {
         let _ = tokio::try_join!(self.http_handle, self.tftp_handle, self.dhcp_handle);
+        self.lease_cleanup_handle.abort();
     }
 }
 
@@ -161,6 +165,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
 
     // Initialize DHCP server and store
     let dhcp_store = dhcp::DhcpStore::new(db.clone());
+    let lease_cleanup_handle = dhcp::spawn_lease_cleanup_task(dhcp_store.clone());
 
     // Determine TFTP public address
     let tftp_public = args.tftp_public_address.unwrap_or_else(|| {
@@ -223,6 +228,8 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
 
         dhcp_handle: dhcp_start_result.join_handle,
         dhcp_port: dhcp_start_result.port,
+
+        lease_cleanup_handle,
     })
 }
 

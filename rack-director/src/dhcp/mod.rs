@@ -123,6 +123,21 @@ impl DhcpServer {
     }
 }
 
+/// Spawn a background task that periodically deletes expired DHCP leases.
+pub fn spawn_lease_cleanup_task(store: DhcpStore) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match store.delete_expired_leases().await {
+                Ok(count) if count > 0 => log::info!("Cleaned up {} expired DHCP lease(s)", count),
+                Ok(_) => {}
+                Err(e) => log::error!("Failed to clean up expired DHCP leases: {}", e),
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
 

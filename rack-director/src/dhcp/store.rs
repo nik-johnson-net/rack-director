@@ -705,6 +705,16 @@ impl DhcpStore {
 
         Ok(leases)
     }
+
+    /// Delete all expired DHCP leases from the database.
+    /// Deletes leases in any state where lease_end < now.
+    /// Returns the number of deleted leases.
+    pub async fn delete_expired_leases(&self) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        let db = self.db.lock().await;
+        let deleted = db.execute("DELETE FROM dhcp_leases WHERE lease_end < ?1", params![now])?;
+        Ok(deleted as u64)
+    }
 }
 
 pub fn format_mac(mac: &[u8]) -> String {
@@ -840,5 +850,117 @@ mod tests {
     async fn test_format_mac() {
         let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
         assert_eq!(format_mac(&mac), "aa:bb:cc:dd:ee:ff");
+    }
+
+    #[tokio::test]
+    async fn test_delete_expired_leases_removes_expired() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Insert a lease that expired 1 hour ago
+        let expired_time = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        let db = store.db.lock().await;
+        db.execute(
+            "INSERT INTO dhcp_leases (mac_address, ip_address, lease_start, lease_end, state, network_id) VALUES (?, ?, ?, ?, ?, ?)",
+            params!["aa:bb:cc:dd:ee:01", "10.0.0.101", expired_time, expired_time, "active", network_id],
+        ).unwrap();
+        drop(db);
+
+        // Delete expired leases
+        let deleted = store.delete_expired_leases().await.unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify the lease is gone
+        let leases = store.get_leases_by_network(network_id).await.unwrap();
+        assert_eq!(leases.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_expired_leases_preserves_active() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Insert a lease that expires in 1 hour
+        let future_time = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+        let db = store.db.lock().await;
+        db.execute(
+            "INSERT INTO dhcp_leases (mac_address, ip_address, lease_start, lease_end, state, network_id) VALUES (?, ?, ?, ?, ?, ?)",
+            params!["aa:bb:cc:dd:ee:02", "10.0.0.102", now, future_time, "active", network_id],
+        ).unwrap();
+        drop(db);
+
+        // Delete expired leases
+        let deleted = store.delete_expired_leases().await.unwrap();
+        assert_eq!(deleted, 0);
+
+        // Verify the lease still exists
+        let leases = store.get_leases_by_network(network_id).await.unwrap();
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].mac_address, "aa:bb:cc:dd:ee:02");
+    }
+
+    #[tokio::test]
+    async fn test_delete_expired_leases_mixed() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        let expired_time = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        let future_time = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+
+        let db = store.db.lock().await;
+        // Insert 2 expired leases
+        db.execute(
+            "INSERT INTO dhcp_leases (mac_address, ip_address, lease_start, lease_end, state, network_id) VALUES (?, ?, ?, ?, ?, ?)",
+            params!["aa:bb:cc:dd:ee:03", "10.0.0.103", expired_time, expired_time, "active", network_id],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO dhcp_leases (mac_address, ip_address, lease_start, lease_end, state, network_id) VALUES (?, ?, ?, ?, ?, ?)",
+            params!["aa:bb:cc:dd:ee:04", "10.0.0.104", expired_time, expired_time, "offered", network_id],
+        ).unwrap();
+        // Insert 1 active lease
+        db.execute(
+            "INSERT INTO dhcp_leases (mac_address, ip_address, lease_start, lease_end, state, network_id) VALUES (?, ?, ?, ?, ?, ?)",
+            params!["aa:bb:cc:dd:ee:05", "10.0.0.105", now, future_time, "active", network_id],
+        ).unwrap();
+        drop(db);
+
+        // Delete expired leases
+        let deleted = store.delete_expired_leases().await.unwrap();
+        assert_eq!(deleted, 2);
+
+        // Verify only the active lease remains
+        let leases = store.get_leases_by_network(network_id).await.unwrap();
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].mac_address, "aa:bb:cc:dd:ee:05");
+    }
+
+    #[tokio::test]
+    async fn test_delete_expired_leases_no_leases() {
+        let (store, _network_id, _temp_dir) = create_test_store().await;
+
+        // Delete expired leases when there are none
+        let deleted = store.delete_expired_leases().await.unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_expired_leases_released_and_expired() {
+        let (store, network_id, _temp_dir) = create_test_store().await;
+
+        // Insert a released lease that is also expired
+        let expired_time = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        let db = store.db.lock().await;
+        db.execute(
+            "INSERT INTO dhcp_leases (mac_address, ip_address, lease_start, lease_end, state, network_id) VALUES (?, ?, ?, ?, ?, ?)",
+            params!["aa:bb:cc:dd:ee:06", "10.0.0.106", expired_time, expired_time, "released", network_id],
+        ).unwrap();
+        drop(db);
+
+        // Delete expired leases
+        let deleted = store.delete_expired_leases().await.unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify the lease is gone
+        let leases = store.get_leases_by_network(network_id).await.unwrap();
+        assert_eq!(leases.len(), 0);
     }
 }
