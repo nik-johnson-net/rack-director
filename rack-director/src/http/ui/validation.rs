@@ -243,7 +243,7 @@ pub async fn validate_create_network_request(
             if relay_for_check.is_none() {
                 errors.add_error(
                     "relay_agent_address",
-                    "A Default L2 network (no relay agent) already exists".to_string(),
+                    "A network without a relay agent already exists. Only one local L2 network is allowed.".to_string(),
                 );
             } else {
                 errors.add_error(
@@ -357,7 +357,7 @@ pub async fn validate_update_network_request(
                     if relay_for_check.is_none() {
                         errors.add_error(
                             "relay_agent_address",
-                            "A Default L2 network (no relay agent) already exists".to_string(),
+                            "A network without a relay agent already exists. Only one local L2 network is allowed.".to_string(),
                         );
                     } else {
                         errors.add_error(
@@ -565,13 +565,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_create_network_request_duplicate_default_l2() {
+    async fn test_validate_create_network_request_duplicate_local_l2() {
         let (store, _temp_dir) = create_test_store().await;
 
-        // Create a default L2 network (no relay agent) first
+        // Create a local L2 network (no relay agent) first
         store
             .create_network(
-                "Default L2",
+                "Local Network",
                 "10.0.0.0/24",
                 "10.0.0.1",
                 &["8.8.8.8".to_string()],
@@ -582,9 +582,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Try to create another Default L2 network (no relay agent)
+        // Try to create another local L2 network (no relay agent)
         let req = CreateNetworkRequest {
-            name: "Another Default L2".to_string(),
+            name: "Another Local Network".to_string(),
             subnet: "192.168.2.0/24".to_string(),
             gateway: "192.168.2.1".to_string(),
             dns_servers: vec!["8.8.8.8".to_string()],
@@ -601,7 +601,7 @@ mod tests {
             errors
                 .get("relay_agent_address")
                 .unwrap()
-                .contains("Default L2")
+                .contains("Only one local L2 network is allowed")
         );
     }
 

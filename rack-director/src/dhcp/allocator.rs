@@ -168,7 +168,7 @@ mod tests {
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
 
-        // Create test network (migration 12 removed the default network)
+        // Create test network
         let network = store
             .create_network(
                 "Test Network",

@@ -530,7 +530,7 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
@@ -624,10 +624,10 @@ mod tests {
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
 
-        // Create test network (migration 12 removed the default network)
+        // Create test network
         let network = store
             .create_network(
-                "Default",
+                "Test Network",
                 "10.0.0.0/24",
                 "10.0.0.1",
                 &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
@@ -640,7 +640,7 @@ mod tests {
 
         // Create test pool
         store
-            .create_pool(network.id, "Default Pool", "10.0.0.100", "10.0.0.200")
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
             .await
             .unwrap();
 
@@ -742,10 +742,10 @@ mod tests {
         let db = Arc::new(Mutex::new(conn));
         let store = DhcpStore::new(db.clone());
 
-        // Create test network (migration 12 removed the default network)
+        // Create test network
         let network = store
             .create_network(
-                "Default",
+                "Test Network",
                 "10.0.0.0/24",
                 "10.0.0.1",
                 &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
@@ -758,7 +758,7 @@ mod tests {
 
         // Create test pool
         store
-            .create_pool(network.id, "Default Pool", "10.0.0.100", "10.0.0.200")
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
             .await
             .unwrap();
 
@@ -981,7 +981,7 @@ mod tests {
                 dhcproto::v4::Architecture::Unknown(14),
             ));
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
@@ -1042,7 +1042,7 @@ mod tests {
                 dhcproto::v4::Architecture::BC,
             ));
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
@@ -1103,7 +1103,7 @@ mod tests {
                 dhcproto::v4::Architecture::Unknown(15),
             ));
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Create contexts
@@ -1182,7 +1182,7 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::ServerIdentifier(handler.server_identifier));
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request
@@ -1250,7 +1250,7 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::ServerIdentifier(wrong_server_id));
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request
@@ -1295,7 +1295,7 @@ mod tests {
             .insert(v4::DhcpOption::RequestedIpAddress(ip));
         // Note: No ServerIdentifier option added
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request
@@ -1356,7 +1356,7 @@ mod tests {
             .insert(v4::DhcpOption::RequestedIpAddress(ip));
         // No ServerIdentifier - characteristic of INIT-REBOOT
 
-        // Get default network
+        // Get test network
         let network = store.get_network(network_id).await.unwrap();
 
         // Handle the request

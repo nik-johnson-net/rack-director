@@ -575,7 +575,7 @@ mod tests {
         let conn = crate::database::open(&db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
 
-        // Create test network (migration 12 removed the default network)
+        // Create test network
         {
             let conn = db.lock().await;
             conn.execute(

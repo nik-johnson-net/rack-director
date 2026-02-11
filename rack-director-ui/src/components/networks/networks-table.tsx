@@ -4,7 +4,6 @@ import { getPoolsForNetwork, deleteNetwork } from "@/lib/client";
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { Button } from "../ui/button";
-import { Badge } from "../ui/badge";
 import { Eye, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router";
 import {
@@ -62,7 +61,6 @@ export default function NetworksTable({ data }: { data: DhcpNetwork[] }) {
       accessorKey: "name",
       header: "Name",
       cell: ({ row }) => {
-        const isDefault = row.original.id === 1;
         return (
           <div className="flex items-center gap-2">
             <button
@@ -71,11 +69,6 @@ export default function NetworksTable({ data }: { data: DhcpNetwork[] }) {
             >
               {row.getValue("name")}
             </button>
-            {isDefault && (
-              <Badge variant="outline" className="text-xs">
-                Default
-              </Badge>
-            )}
           </div>
         );
       },
@@ -138,7 +131,6 @@ export default function NetworksTable({ data }: { data: DhcpNetwork[] }) {
                   variant="outline"
                   size="sm"
                   aria-label="Delete network"
-                  disabled={row.original.id === 1}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>

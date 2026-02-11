@@ -677,7 +677,7 @@ mod tests {
         let db = database::open(&db_path).unwrap();
         let db_tokio = Arc::new(tokio::sync::Mutex::new(db));
 
-        // Create test network (migration 12 removed the default network)
+        // Create test network
         {
             let conn = db_tokio.lock().await;
             conn.execute(

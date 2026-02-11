@@ -92,9 +92,7 @@ impl BootConfigProvider {
         let boot_opts = match req_ctx.client_arch {
             // HTTP Boot architectures (15/16/17) → HTTP URL for iPXE firmware
             Some(
-                Architecture::Unknown(15)
-                | Architecture::Unknown(16)
-                | Architecture::Unknown(17),
+                Architecture::Unknown(15) | Architecture::Unknown(16) | Architecture::Unknown(17),
             ) => {
                 let filename = "ipxe.efi";
                 let file_size_blocks = self.lookup_file_size_blocks(filename).await;

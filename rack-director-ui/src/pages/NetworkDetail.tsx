@@ -55,8 +55,6 @@ function NetworkDetail() {
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const isDefaultNetwork = networkId === 1;
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -108,11 +106,6 @@ function NetworkDetail() {
         breadcrumbs={[{ label: "Networks", href: "/networks" }, { label: network.name }]}
         title={network.name}
         description="Configure network settings, pools, and reservations"
-        status={
-          isDefaultNetwork ? (
-            <Badge variant="outline">Default</Badge>
-          ) : undefined
-        }
         actions={
           <Button variant="outline" onClick={() => navigate("/networks")}>
             Back to Networks

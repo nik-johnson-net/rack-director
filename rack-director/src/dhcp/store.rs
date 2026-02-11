@@ -364,7 +364,7 @@ impl DhcpStore {
         Ok(network)
     }
 
-    /// Get a network by relay agent address string (checking both NULL and empty string for Default L2)
+    /// Get a network by relay agent address string (checking both NULL and empty string for local L2)
     pub async fn get_network_by_relay_string(
         &self,
         relay_agent_address: Option<&str>,
@@ -372,7 +372,7 @@ impl DhcpStore {
         let db = self.db.lock().await;
 
         // Handle the three cases:
-        // 1. None or Some("") - Default L2 network (NULL or empty string)
+        // 1. None or Some("") - Local L2 network (NULL or empty string)
         // 2. Some(address) - Specific relay agent address
         let network = match relay_agent_address {
             None | Some("") => crate::database::query_optional::<DhcpNetwork>(
@@ -740,10 +740,10 @@ mod tests {
         let conn = crate::database::open(db_path).unwrap();
         let store = DhcpStore::new(Arc::new(Mutex::new(conn)));
 
-        // Create test network (migration 12 removed the default network)
+        // Create test network
         let network = store
             .create_network(
-                "Default",
+                "Test Network",
                 "10.0.0.0/24",
                 "10.0.0.1",
                 &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
@@ -756,7 +756,7 @@ mod tests {
 
         // Create test pool
         store
-            .create_pool(network.id, "Default Pool", "10.0.0.100", "10.0.0.200")
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
             .await
             .unwrap();
 
@@ -764,10 +764,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_default_network() {
+    async fn test_get_network() {
         let (store, network_id, _temp_dir) = create_test_store().await;
         let network = store.get_network(network_id).await.unwrap();
-        assert_eq!(network.name, "Default");
+        assert_eq!(network.name, "Test Network");
         assert_eq!(network.subnet, "10.0.0.0/24");
         assert_eq!(network.gateway, "10.0.0.1");
     }
@@ -777,10 +777,10 @@ mod tests {
         let (store, _network_id, _temp_dir) = create_test_store().await;
 
         // Test existing network
-        let network = store.get_network_by_name("Default").await.unwrap();
+        let network = store.get_network_by_name("Test Network").await.unwrap();
         assert!(network.is_some());
         let network = network.unwrap();
-        assert_eq!(network.name, "Default");
+        assert_eq!(network.name, "Test Network");
 
         // Test non-existent network
         let network = store.get_network_by_name("NonExistent").await.unwrap();
@@ -815,18 +815,18 @@ mod tests {
         assert_eq!(network.name, "Relay Network");
         assert_eq!(network.relay_agent_address, Some("10.0.0.2".to_string()));
 
-        // Test finding Default L2 network (None)
+        // Test finding local L2 network (None)
         let network = store.get_network_by_relay_string(None).await.unwrap();
         assert!(network.is_some());
         let network = network.unwrap();
-        assert_eq!(network.name, "Default");
+        assert_eq!(network.name, "Test Network");
         assert!(network.relay_agent_address.is_none());
 
-        // Test finding Default L2 network (empty string)
+        // Test finding local L2 network (empty string)
         let network = store.get_network_by_relay_string(Some("")).await.unwrap();
         assert!(network.is_some());
         let network = network.unwrap();
-        assert_eq!(network.name, "Default");
+        assert_eq!(network.name, "Test Network");
 
         // Test non-existent relay agent
         let network = store
