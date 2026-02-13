@@ -1093,23 +1093,13 @@ mod tests {
 
         // Create reservation for first MAC
         store
-            .create_or_update_static_reservation(
-                network_id,
-                "aa:bb:cc:dd:ee:03",
-                "10.0.0.53",
-                None,
-            )
+            .create_or_update_static_reservation(network_id, "aa:bb:cc:dd:ee:03", "10.0.0.53", None)
             .await
             .unwrap();
 
         // Try to create reservation for different MAC with same IP
         let result = store
-            .create_or_update_static_reservation(
-                network_id,
-                "aa:bb:cc:dd:ee:04",
-                "10.0.0.53",
-                None,
-            )
+            .create_or_update_static_reservation(network_id, "aa:bb:cc:dd:ee:04", "10.0.0.53", None)
             .await;
 
         // Should fail due to UNIQUE constraint on (network_id, ip_address)
@@ -1122,12 +1112,7 @@ mod tests {
 
         // Create reservation
         store
-            .create_or_update_static_reservation(
-                network_id,
-                "aa:bb:cc:dd:ee:05",
-                "10.0.0.54",
-                None,
-            )
+            .create_or_update_static_reservation(network_id, "aa:bb:cc:dd:ee:05", "10.0.0.54", None)
             .await
             .unwrap();
 
@@ -1166,12 +1151,7 @@ mod tests {
 
         // Create reservations on both networks for same MAC
         store
-            .create_or_update_static_reservation(
-                network_id,
-                "aa:bb:cc:dd:ee:06",
-                "10.0.0.55",
-                None,
-            )
+            .create_or_update_static_reservation(network_id, "aa:bb:cc:dd:ee:06", "10.0.0.55", None)
             .await
             .unwrap();
         store

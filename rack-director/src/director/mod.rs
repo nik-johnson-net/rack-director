@@ -10,10 +10,11 @@ use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, Lifecy
 use crate::operating_systems::{Architecture, OperatingSystemsStore};
 use crate::plans::actions::BootTarget;
 use crate::plans::{Plan, PlanStatus, PlansStore};
+use crate::platforms::PlatformsStore;
 use crate::roles::RolesStore;
 
 mod ipmi;
-mod store;
+pub(crate) mod store;
 
 pub use common::device_attributes::NetworkInterface;
 pub use store::Device;
@@ -26,6 +27,7 @@ pub struct Director {
     lifecycle_store: LifecycleStore,
     os_store: OperatingSystemsStore,
     roles_store: RolesStore,
+    platforms_store: PlatformsStore,
     dhcp_store: DhcpStore,
 }
 
@@ -36,6 +38,7 @@ impl Director {
         let lifecycle_store = LifecycleStore::new(conn.clone());
         let os_store = OperatingSystemsStore::new(conn.clone());
         let roles_store = RolesStore::new(conn.clone());
+        let platforms_store = PlatformsStore::new(conn.clone());
         let dhcp_store = DhcpStore::new(conn);
         Director {
             store,
@@ -43,6 +46,7 @@ impl Director {
             lifecycle_store,
             os_store,
             roles_store,
+            platforms_store,
             dhcp_store,
         }
     }
@@ -118,7 +122,27 @@ impl Director {
         uuid: &Uuid,
         attributes: serde_json::Map<String, serde_json::Value>,
     ) -> anyhow::Result<()> {
+        // Check if this update includes hardware discovery data
+        let contains_hardware_info = attributes.contains_key("disks")
+            || attributes.contains_key("cpus")
+            || attributes.contains_key("memory")
+            || attributes.contains_key("network_interfaces");
+
+        // Update the attributes
         self.store.update_attributes(uuid, attributes).await?;
+
+        // Auto-detect platform after hardware discovery data is received
+        if contains_hardware_info && let Err(e) = self.auto_detect_platform(uuid).await {
+            log::warn!("Failed to auto-detect platform for device {}: {}", uuid, e);
+            // Add warning for operator visibility
+            self.add_device_warning(
+                uuid,
+                "Platform auto-detection failed: no matching platform found",
+            )
+            .await?;
+            // Don't fail the update - platform detection is best-effort
+        }
+
         Ok(())
     }
 
@@ -288,6 +312,68 @@ impl Director {
             .await?;
 
         Ok(())
+    }
+
+    /// Auto-detect and assign platform to a device based on its hardware attributes
+    ///
+    /// This method is called after successful hardware discovery to automatically
+    /// identify or create a platform that matches the device's configuration.
+    pub async fn auto_detect_platform(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
+        log::info!("Auto-detecting platform for device {}", device_uuid);
+
+        // Get device attributes
+        let device = self.get_device(device_uuid).await?;
+        let attrs = &device.attributes;
+
+        // Perform platform detection
+        let platform_id = crate::platforms::detect_or_create_platform(
+            &self.platforms_store,
+            &attrs.disks,
+            &attrs.network_interfaces,
+            &attrs.cpus,
+            &attrs.memory,
+        )
+        .await?;
+
+        // Assign platform to device
+        self.store
+            .assign_platform_to_device(device_uuid, platform_id)
+            .await?;
+
+        log::info!(
+            "Assigned platform {} to device {}",
+            platform_id,
+            device_uuid
+        );
+
+        Ok(())
+    }
+
+    /// Add a warning message to device warnings
+    /// Used to track platform detection status and other device-related alerts
+    pub async fn add_device_warning(
+        &self,
+        device_uuid: &Uuid,
+        warning: &str,
+    ) -> anyhow::Result<()> {
+        // Get current device attributes
+        let device = self.store.get_device(device_uuid).await?;
+
+        // Append new warning to existing warnings
+        let mut warnings = device.attributes.warnings;
+        warnings.push(warning.to_string());
+
+        let mut attrs = serde_json::Map::new();
+        attrs.insert(
+            "warnings".to_string(),
+            serde_json::Value::Array(
+                warnings
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        self.store.update_attributes(device_uuid, attrs).await
     }
 
     pub async fn start_lifecycle_transition(
@@ -492,6 +578,44 @@ impl Director {
             .await
     }
 
+    // Platform assignment methods
+
+    pub async fn assign_platform_to_device(
+        &self,
+        device_uuid: &Uuid,
+        platform_id: i64,
+    ) -> anyhow::Result<()> {
+        self.store
+            .assign_platform_to_device(device_uuid, platform_id)
+            .await
+    }
+
+    pub async fn get_device_platform_id(&self, device_uuid: &Uuid) -> anyhow::Result<Option<i64>> {
+        self.store.get_device_platform_id(device_uuid).await
+    }
+
+    pub async fn list_devices_with_platform(&self, platform_id: i64) -> anyhow::Result<Vec<Uuid>> {
+        self.store.list_devices_with_platform(platform_id).await
+    }
+
+    // Role assignment methods
+
+    pub async fn assign_role_to_device(
+        &self,
+        device_uuid: &Uuid,
+        role_id: i64,
+    ) -> anyhow::Result<()> {
+        self.store.assign_role_to_device(device_uuid, role_id).await
+    }
+
+    pub async fn get_device_role_id(&self, device_uuid: &Uuid) -> anyhow::Result<Option<i64>> {
+        self.store.get_device_role_id(device_uuid).await
+    }
+
+    pub async fn list_devices_with_role(&self, role_id: i64) -> anyhow::Result<Vec<Uuid>> {
+        self.store.list_devices_with_role(role_id).await
+    }
+
     pub async fn create_pending_device(
         &self,
         mac_address: &str,
@@ -532,9 +656,17 @@ impl Director {
         // (interfaces stored in device JSON, lost after deletion)
 
         // 1. Delete for all discovered interfaces
-        let interfaces = self.store.get_network_interfaces(uuid).await.unwrap_or_default();
+        let interfaces = self
+            .store
+            .get_network_interfaces(uuid)
+            .await
+            .unwrap_or_default();
         for nic in &interfaces {
-            match self.dhcp_store.delete_static_reservations_by_mac(&nic.mac_address).await {
+            match self
+                .dhcp_store
+                .delete_static_reservations_by_mac(&nic.mac_address)
+                .await
+            {
                 Ok(count) if count > 0 => {
                     log::info!(
                         "Deleted {} reservation(s) for MAC {} (device {})",
@@ -555,12 +687,11 @@ impl Director {
         }
 
         // 2. Check legacy mac_address field (backward compatibility)
-        if let Ok(device) = self.store.get_device(uuid).await {
-            if let Some(mac) = &device.attributes.mac_address {
-                if !interfaces.iter().any(|nic| &nic.mac_address == mac) {
-                    let _ = self.dhcp_store.delete_static_reservations_by_mac(mac).await;
-                }
-            }
+        if let Ok(device) = self.store.get_device(uuid).await
+            && let Some(mac) = &device.attributes.mac_address
+            && !interfaces.iter().any(|nic| &nic.mac_address == mac)
+        {
+            let _ = self.dhcp_store.delete_static_reservations_by_mac(mac).await;
         }
 
         // 3. Delete device (cascades to plans, transitions)
@@ -569,11 +700,6 @@ impl Director {
 
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         self.store.find_device_by_bmc_mac(mac).await
-    }
-
-    #[cfg(test)]
-    pub fn dhcp_store(&self) -> &DhcpStore {
-        &self.dhcp_store
     }
 
     /// Issue an IPMI power reset command to the device's BMC
@@ -1296,6 +1422,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(network.id),
+            speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
         }];
@@ -1367,6 +1494,7 @@ mod tests {
                 mac_address: mac1.to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 network_id: Some(network.id),
+                speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
             },
@@ -1375,6 +1503,7 @@ mod tests {
                 mac_address: mac2.to_string(),
                 ip_address: Some("10.0.0.102".to_string()),
                 network_id: Some(network.id),
+                speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
             },
@@ -1395,30 +1524,432 @@ mod tests {
             .unwrap();
 
         // Verify both reservations exist
-        assert!(dhcp_store
-            .get_static_reservation(network.id, mac1)
-            .await
-            .unwrap()
-            .is_some());
-        assert!(dhcp_store
-            .get_static_reservation(network.id, mac2)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            dhcp_store
+                .get_static_reservation(network.id, mac1)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            dhcp_store
+                .get_static_reservation(network.id, mac2)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // Delete device
         director.delete_device(&test_uuid).await.unwrap();
 
         // Verify both reservations were deleted
-        assert!(dhcp_store
-            .get_static_reservation(network.id, mac1)
+        assert!(
+            dhcp_store
+                .get_static_reservation(network.id, mac1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            dhcp_store
+                .get_static_reservation(network.id, mac2)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // Platform detection status tests
+
+    #[tokio::test]
+    async fn test_platform_detection_status_success() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440050").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
             .await
-            .unwrap()
-            .is_none());
-        assert!(dhcp_store
-            .get_static_reservation(network.id, mac2)
+            .unwrap();
+
+        // Create a platform first
+        let platforms_store = &director.platforms_store;
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![crate::platforms::PlatformDisk {
+                path: "/dev/sda".to_string(),
+                size_gb: 480,
+                disk_type: crate::platforms::DiskType::Ssd,
+                label: Some("ROOT".to_string()),
+            }],
+            nics: vec![crate::platforms::PlatformNic {
+                logical: "eth0".to_string(),
+                speed_mbps: Some(10000),
+                label: Some("NIC1".to_string()),
+            }],
+            cpus: vec![crate::platforms::PlatformCpu {
+                brand: "intel".to_string(),
+                model: "E3-1240 v3".to_string(),
+                cores: 4,
+            }],
+            memory_gib: 32,
+        };
+        platforms_store
+            .create("Test Platform", None, &platform_attrs)
             .await
-            .unwrap()
-            .is_none());
+            .unwrap();
+
+        // Update device with matching hardware info
+        let mut hardware_attrs = serde_json::Map::new();
+        hardware_attrs.insert(
+            "disks".to_string(),
+            serde_json::json!([{
+                "name": "sda",
+                "size": 480,
+                "disk_type": "ssd",
+                "path": "/dev/sda"
+            }]),
+        );
+        hardware_attrs.insert(
+            "network_interfaces".to_string(),
+            serde_json::json!([{
+                "interface_name": "eth0",
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "speed_mbps": 10000
+            }]),
+        );
+        hardware_attrs.insert(
+            "cpus".to_string(),
+            serde_json::json!([{
+                "designation": "E3-1240 v3",
+                "manufacturer": "Intel Corporation",
+                "cores": 4
+            }]),
+        );
+        hardware_attrs.insert(
+            "memory".to_string(),
+            serde_json::json!([{
+                "size_mb": 32768
+            }]),
+        );
+
+        director
+            .update_attributes(&test_uuid, hardware_attrs)
+            .await
+            .unwrap();
+
+        // Verify platform was assigned (no warning on success)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert!(device.platform_id.is_some());
+        assert!(device.attributes.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_platform_detection_status_failed() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440051").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Update device with hardware info that won't match any platform
+        let mut hardware_attrs = serde_json::Map::new();
+        hardware_attrs.insert(
+            "disks".to_string(),
+            serde_json::json!([{
+                "name": "nvme0n1",
+                "size": 1000,
+                "disk_type": "nvme",
+                "path": "/dev/nvme0n1"
+            }]),
+        );
+        hardware_attrs.insert(
+            "network_interfaces".to_string(),
+            serde_json::json!([{
+                "interface_name": "ens0",
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "speed_mbps": 10000
+            }]),
+        );
+        hardware_attrs.insert(
+            "cpus".to_string(),
+            serde_json::json!([{
+                "designation": "Xeon E5-2680 v4",
+                "manufacturer": "Intel Corporation",
+                "cores": 14
+            }]),
+        );
+        hardware_attrs.insert(
+            "memory".to_string(),
+            serde_json::json!([{
+                "size_mb": 32768
+            }]),
+        );
+
+        director
+            .update_attributes(&test_uuid, hardware_attrs)
+            .await
+            .unwrap();
+
+        // Verify platform was auto-created (no warning on success)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert!(device.platform_id.is_some());
+        assert!(device.attributes.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_platform_detection_status_manual() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440052").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create a platform
+        let platforms_store = &director.platforms_store;
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 0,
+        };
+        let platform = platforms_store
+            .create("Manual Platform", None, &platform_attrs)
+            .await
+            .unwrap();
+
+        // Manually assign platform
+        director
+            .assign_platform_to_device(&test_uuid, platform.id.unwrap())
+            .await
+            .unwrap();
+
+        // Verify platform was manually assigned (no warning on manual assignment)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(device.platform_id, Some(platform.id.unwrap()));
+    }
+
+    #[tokio::test]
+    async fn test_platform_detection_status_no_hardware_info() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440053").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Update device with non-hardware attributes
+        let mut attrs = serde_json::Map::new();
+        attrs.insert(
+            "hostname".to_string(),
+            serde_json::Value::String("test-host".to_string()),
+        );
+
+        director.update_attributes(&test_uuid, attrs).await.unwrap();
+
+        // Verify no warnings (no hardware info = no detection attempt)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert!(device.attributes.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_platform_detection_creates_new_platform_on_no_match() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440056").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Verify no platforms exist initially
+        let platforms = director.platforms_store.list().await.unwrap();
+        assert_eq!(
+            platforms.len(),
+            0,
+            "Should start with empty platform database"
+        );
+
+        // Update device with hardware info that won't match any existing platform
+        // (since database is empty, this will auto-create a new platform)
+        let mut hardware_attrs = serde_json::Map::new();
+        hardware_attrs.insert(
+            "disks".to_string(),
+            serde_json::json!([{
+                "name": "nvme0n1",
+                "size": 960,
+                "disk_type": "nvme",
+                "path": "/dev/nvme0n1"
+            }]),
+        );
+        hardware_attrs.insert(
+            "network_interfaces".to_string(),
+            serde_json::json!([{
+                "interface_name": "ens0",
+                "mac_address": "aa:bb:cc:dd:ee:56",
+                "speed_mbps": 25000
+            }]),
+        );
+        hardware_attrs.insert(
+            "cpus".to_string(),
+            serde_json::json!([{
+                "designation": "Xeon Gold 6248R",
+                "manufacturer": "Intel Corporation",
+                "model": "Intel(R) Xeon(R) Gold 6248R @ 2.2 GHz",
+                "cores": 24
+            }]),
+        );
+        hardware_attrs.insert(
+            "memory".to_string(),
+            serde_json::json!([
+                {"size_mb": 32768},  // 32 GB per module
+                {"size_mb": 32768},
+                {"size_mb": 32768},
+                {"size_mb": 32768}
+            ]),
+        );
+
+        director
+            .update_attributes(&test_uuid, hardware_attrs)
+            .await
+            .unwrap();
+
+        // Verify a new platform was auto-created
+        let platforms = director.platforms_store.list().await.unwrap();
+        assert_eq!(
+            platforms.len(),
+            1,
+            "Platform should be auto-created when no match exists"
+        );
+
+        // Verify device was assigned the new platform (no warning on success)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert!(
+            device.platform_id.is_some(),
+            "Device should have platform assigned"
+        );
+        assert!(
+            device.attributes.warnings.is_empty(),
+            "No warning on successful detection"
+        );
+
+        // Verify the created platform has the correct hardware attributes
+        let platform = director
+            .platforms_store
+            .get(device.platform_id.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(platform.attributes.disks.len(), 1);
+        assert_eq!(platform.attributes.nics.len(), 1);
+        assert_eq!(platform.attributes.cpus.len(), 1);
+        assert_eq!(platform.attributes.memory_gib, 128); // 4 modules × 32 GB
+    }
+
+    #[tokio::test]
+    async fn test_platform_detection_status_partial_hardware_info() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440054").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Update with only disks (missing other fields for complete match)
+        let mut hardware_attrs = serde_json::Map::new();
+        hardware_attrs.insert(
+            "disks".to_string(),
+            serde_json::json!([{
+                "name": "sda",
+                "size": 480,
+                "disk_type": "ssd"
+            }]),
+        );
+
+        director
+            .update_attributes(&test_uuid, hardware_attrs)
+            .await
+            .unwrap();
+
+        // Verify platform was auto-created (no warning on success)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert!(
+            device.platform_id.is_some(),
+            "Platform should be auto-created"
+        );
+        assert!(
+            device.attributes.warnings.is_empty(),
+            "No warning on successful detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_platform_detection_status_manual_overrides_auto() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440055").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // First, auto-detect (will create a platform)
+        let mut hardware_attrs = serde_json::Map::new();
+        hardware_attrs.insert(
+            "disks".to_string(),
+            serde_json::json!([{
+                "name": "sda",
+                "size": 480,
+                "disk_type": "ssd",
+                "path": "/dev/sda"
+            }]),
+        );
+        hardware_attrs.insert("network_interfaces".to_string(), serde_json::json!([]));
+        hardware_attrs.insert("cpus".to_string(), serde_json::json!([]));
+        hardware_attrs.insert("memory".to_string(), serde_json::json!([]));
+
+        director
+            .update_attributes(&test_uuid, hardware_attrs)
+            .await
+            .unwrap();
+
+        // Verify auto-detection succeeded (no warning on success)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert!(device.attributes.warnings.is_empty());
+        let auto_platform_id = device.platform_id.unwrap();
+
+        // Create a different platform and manually assign it
+        let platforms_store = &director.platforms_store;
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 0,
+        };
+        let manual_platform = platforms_store
+            .create("Manual Override", None, &platform_attrs)
+            .await
+            .unwrap();
+
+        director
+            .assign_platform_to_device(&test_uuid, manual_platform.id.unwrap())
+            .await
+            .unwrap();
+
+        // Verify platform changed (no warning on manual assignment)
+        let device = director.get_device(&test_uuid).await.unwrap();
+        assert_eq!(device.platform_id, Some(manual_platform.id.unwrap()));
+        assert_ne!(device.platform_id, Some(auto_platform_id));
+        assert!(device.attributes.warnings.is_empty());
     }
 }

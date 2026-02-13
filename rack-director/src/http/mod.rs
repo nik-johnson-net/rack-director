@@ -15,6 +15,7 @@ use crate::boot_files::BootFileProvider;
 use crate::dhcp::DhcpStore;
 use crate::director::Director;
 use crate::operating_systems::OperatingSystemsStore;
+use crate::platforms::PlatformsStore;
 use crate::roles::RolesStore;
 use crate::storage::ImageStore;
 
@@ -24,6 +25,7 @@ pub struct AppState {
     pub image_store: Arc<ImageStore>,
     pub os_store: OperatingSystemsStore,
     pub roles_store: RolesStore,
+    pub platforms_store: PlatformsStore,
     pub agent_images_path: PathBuf,
     pub boot_file_provider: Arc<dyn BootFileProvider>,
 }
@@ -39,6 +41,7 @@ pub async fn start<T: Into<SocketAddr>, P: Into<PathBuf>>(
     image_store: Arc<ImageStore>,
     os_store: OperatingSystemsStore,
     roles_store: RolesStore,
+    platforms_store: PlatformsStore,
     bind: T,
     agent_images_path: P,
     boot_file_provider: Arc<dyn BootFileProvider>,
@@ -49,6 +52,7 @@ pub async fn start<T: Into<SocketAddr>, P: Into<PathBuf>>(
         image_store,
         os_store,
         roles_store,
+        platforms_store,
         agent_images_path: agent_images_path.into(),
         boot_file_provider,
     });

@@ -64,6 +64,7 @@ export type Device = {
   architecture: Architecture;
   lifecycle?: DeviceLifecycle;
   role_id?: number;
+  platform_id?: number;
   attributes: {
     hostname?: string;
     network_interfaces?: NetworkInterface[];
@@ -924,4 +925,178 @@ export async function getStaticReservationByMac(
 ): Promise<StaticReservation | null> {
   const reservations = await getStaticReservations(networkId);
   return reservations.find((r) => r.mac_address === mac) || null;
+}
+
+// Platforms Types
+
+export type DiskType = "nvme" | "ssd" | "hdd";
+
+export type PlatformDisk = {
+  path: string;
+  size_gb: number;
+  disk_type: DiskType;
+  label?: string;
+}
+
+export type PlatformNic = {
+  logical: string;
+  speed_gbps?: number;
+  label?: string;
+}
+
+export type PlatformCpu = {
+  brand: string;
+  model: string;
+  cores: number;
+}
+
+export type PlatformAttributes = {
+  disks: PlatformDisk[];
+  nics: PlatformNic[];
+  cpus: PlatformCpu[];
+  memory_gib: number;
+}
+
+export type Platform = {
+  id?: number;
+  name: string;
+  description?: string;
+  attributes: PlatformAttributes;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type CreatePlatformRequest = {
+  name: string;
+  description?: string;
+  attributes: PlatformAttributes;
+}
+
+export type UpdatePlatformRequest = {
+  name?: string;
+  description?: string;
+  attributes?: PlatformAttributes;
+}
+
+export type AssignPlatformRequest = {
+  platform_id: number;
+}
+
+// Platforms API
+
+export async function getPlatforms(): Promise<Platform[]> {
+  return fetch('/ui/platforms').then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting platforms:', response.statusText);
+      throw new Error('Failed to fetch platforms');
+    }
+  });
+}
+
+export async function getPlatform(id: number): Promise<Platform> {
+  return fetch(`/ui/platforms/${id}`).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting platform:', response.statusText);
+      throw new Error('Failed to fetch platform');
+    }
+  });
+}
+
+export async function createPlatform(data: CreatePlatformRequest): Promise<Platform> {
+  const response = await fetch('/ui/platforms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+
+  if (response.ok) {
+    return response.json();
+  }
+
+  return handleApiError(response, 'Failed to create platform');
+}
+
+export async function updatePlatform(id: number, data: UpdatePlatformRequest): Promise<Platform> {
+  const response = await fetch(`/ui/platforms/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+
+  if (response.ok) {
+    return response.json();
+  }
+
+  return handleApiError(response, 'Failed to update platform');
+}
+
+export async function deletePlatform(id: number): Promise<void> {
+  const response = await fetch(`/ui/platforms/${id}`, {
+    method: 'DELETE'
+  });
+
+  if (!response.ok) {
+    // Extract detailed error message from response body
+    const errorText = await response.text().catch(() => '');
+    const message = errorText || 'Failed to delete platform';
+    throw new Error(message);
+  }
+}
+
+export async function getPlatformDevices(id: number): Promise<string[]> {
+  return fetch(`/ui/platforms/${id}/devices`).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else {
+      console.error('Error getting platform devices:', response.statusText);
+      throw new Error('Failed to fetch platform devices');
+    }
+  });
+}
+
+export async function getDevicePlatform(uuid: string): Promise<Platform | null> {
+  return fetch(`/ui/devices/${uuid}/platform`).then((response) => {
+    if (response.ok) {
+      return response.json();
+    } else if (response.status === 404) {
+      return null;
+    } else {
+      console.error('Error getting device platform:', response.statusText);
+      throw new Error('Failed to fetch device platform');
+    }
+  });
+}
+
+export async function assignDevicePlatform(uuid: string, platformId: number): Promise<void> {
+  return fetch(`/ui/devices/${uuid}/platform`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ platform_id: platformId })
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error assigning platform to device:', response.statusText);
+      throw new Error('Failed to assign platform to device');
+    }
+  });
+}
+
+export type PlatformDeviceInfo = {
+  uuid: string;
+  hostname?: string;
+  lifecycle?: string;
+}
+
+export async function getPlatformDevicesWithDetails(
+  id: number
+): Promise<PlatformDeviceInfo[]> {
+  const response = await fetch(`/ui/platforms/${id}/devices/details`);
+  if (response.ok) {
+    return response.json();
+  } else {
+    throw new Error('Failed to fetch platform devices');
+  }
 }

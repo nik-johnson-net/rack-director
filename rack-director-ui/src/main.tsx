@@ -20,7 +20,11 @@ import RoleEdit from './pages/RoleEdit.tsx';
 import Networks from './pages/Networks.tsx';
 import NetworkNew from './pages/NetworkNew.tsx';
 import NetworkDetail from './pages/NetworkDetail.tsx';
-import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices } from './lib/client.ts';
+import Platforms from './pages/Platforms.tsx';
+import PlatformNew from './pages/PlatformNew.tsx';
+import PlatformDetail from './pages/PlatformDetail.tsx';
+import PlatformEdit from './pages/PlatformEdit.tsx';
+import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices, getPlatforms, getPlatform, getPlatformDevicesWithDetails } from './lib/client.ts';
 import Loading from './pages/Loading.tsx';
 
 const router = createBrowserRouter([
@@ -31,12 +35,13 @@ const router = createBrowserRouter([
       {
         path: "/devices",
         loader: async () => {
-          const [devices, dhcpLeases, pendingDevices] = await Promise.all([
+          const [devices, dhcpLeases, pendingDevices, platforms] = await Promise.all([
             getAllDevices(),
             getDhcpLeases(),
             getPendingDevices(),
+            getPlatforms(),
           ]);
-          return { devices, dhcpLeases, pendingDevices };
+          return { devices, dhcpLeases, pendingDevices, platforms };
         },
         Component: Devices,
         HydrateFallback: Loading
@@ -48,6 +53,27 @@ const router = createBrowserRouter([
       { path: "/roles", loader: getRoles, Component: Roles, HydrateFallback: Loading },
       { path: "/roles/new", Component: RoleNew },
       { path: "/roles/:id", loader: ({ params }) => getRole(parseInt(params.id!)), Component: RoleEdit, HydrateFallback: Loading },
+      { path: "/platforms", loader: getPlatforms, Component: Platforms, HydrateFallback: Loading },
+      { path: "/platforms/new", Component: PlatformNew },
+      {
+        path: "/platforms/:id",
+        loader: async ({ params }) => {
+          const id = parseInt(params.id!);
+          const [platform, devices] = await Promise.all([
+            getPlatform(id),
+            getPlatformDevicesWithDetails(id),
+          ]);
+          return { platform, devices };
+        },
+        Component: PlatformDetail,
+        HydrateFallback: Loading
+      },
+      {
+        path: "/platforms/:id/edit",
+        loader: ({ params }) => getPlatform(parseInt(params.id!)),
+        Component: PlatformEdit,
+        HydrateFallback: Loading
+      },
       { path: "/networks", loader: getNetworks, Component: Networks, HydrateFallback: Loading },
       { path: "/networks/new", Component: NetworkNew },
       {

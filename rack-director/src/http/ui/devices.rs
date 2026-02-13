@@ -15,6 +15,8 @@ use crate::{
     http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
     operating_systems::Architecture,
+    platforms::{AssignPlatformRequest, Platform},
+    roles::{AssignRoleRequest, Role},
 };
 use std::net::Ipv4Addr;
 
@@ -209,6 +211,7 @@ struct DeviceResponse {
     architecture: Architecture,
     lifecycle: Option<DeviceLifecycle>,
     role_id: Option<i64>,
+    platform_id: Option<i64>,
     attributes: serde_json::Map<String, serde_json::Value>,
     created_at: Option<String>,
     first_seen_at: Option<String>,
@@ -242,6 +245,14 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route(
             "/ui/devices/{uuid}/transitions",
             get(get_device_transitions),
+        )
+        .route(
+            "/ui/devices/{uuid}/platform",
+            post(assign_platform).get(get_device_platform),
+        )
+        .route(
+            "/ui/devices/{uuid}/role",
+            post(assign_role).get(get_device_role),
         )
         .route(
             "/ui/devices/{uuid}/transitions/active",
@@ -289,6 +300,7 @@ async fn get_all_devices(
                 architecture: device.architecture,
                 lifecycle: device.lifecycle,
                 role_id: device.role_id,
+                platform_id: device.platform_id,
                 attributes: attributes_json,
                 created_at: device.created_at,
                 first_seen_at: device.first_seen_at,
@@ -334,6 +346,7 @@ async fn get_device_by_uuid(
         architecture: device.architecture,
         lifecycle: device.lifecycle,
         role_id: device.role_id,
+        platform_id: device.platform_id,
         attributes: attributes_json,
         created_at: device.created_at,
         first_seen_at: device.first_seen_at,
@@ -660,6 +673,32 @@ mod tests {
         Uuid::parse_str(&format!("550e8400-e29b-41d4-a716-4466554400{:02x}", suffix))
             .expect("test UUID should be valid")
     }
+
+    /// Helper to create a test network for tests that need DHCP functionality
+    async fn create_test_network(state: &AppState) -> i64 {
+        let network = state
+            .dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        state
+            .dhcp_store
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        network.id
+    }
+
     use crate::{database, director::Director, storage::ImageStore};
 
     use super::*;
@@ -677,22 +716,7 @@ mod tests {
         let db = database::open(&db_path).unwrap();
         let db_tokio = Arc::new(tokio::sync::Mutex::new(db));
 
-        // Create test network
-        {
-            let conn = db_tokio.lock().await;
-            conn.execute(
-                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
-                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
-                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
-                [],
-            )
-            .unwrap();
-        }
+        // Note: No default network is created. Tests that need networks should create them explicitly.
 
         // Create image store for testing
         let _storage_path = temp_dir.path().join("images");
@@ -723,7 +747,8 @@ mod tests {
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: store.into(),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio),
+            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
             agent_images_path,
             boot_file_provider,
         });
@@ -808,10 +833,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete_pending_device() {
         let (state, _temp_dir) = setup_test_state().await;
+        let network_id = create_test_network(&state).await;
 
         // Create a pending device directly (bypassing network/lease setup for simplicity)
         let mac = "aa:bb:cc:dd:ee:ff";
-        let network_id = 1;
 
         let pending_id = state
             .director
@@ -1832,5 +1857,79 @@ mod tests {
             bmc_config.get("username").unwrap().as_str().unwrap(),
             "RACKDIRECTOR"
         );
+    }
+}
+
+// Platform assignment handlers
+
+async fn assign_platform(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<AssignPlatformRequest>,
+) -> Result<StatusCode, HttpError> {
+    // Verify platform exists
+    state.platforms_store.get(req.platform_id).await?;
+
+    // Verify device exists
+    state.director.get_device(&uuid).await?;
+
+    state
+        .director
+        .assign_platform_to_device(&uuid, req.platform_id)
+        .await?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn get_device_platform(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Option<Platform>>, HttpError> {
+    // Get platform ID from device
+    let platform_id = state.director.get_device_platform_id(&uuid).await?;
+
+    // If device has a platform, fetch full platform details
+    if let Some(id) = platform_id {
+        let platform = state.platforms_store.get(id).await?;
+        Ok(Json(Some(platform)))
+    } else {
+        Ok(Json(None))
+    }
+}
+
+// Role assignment handlers
+
+async fn assign_role(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<AssignRoleRequest>,
+) -> Result<StatusCode, HttpError> {
+    // Verify role exists
+    state.roles_store.get(req.role_id).await?;
+
+    // Verify device exists
+    state.director.get_device(&uuid).await?;
+
+    state
+        .director
+        .assign_role_to_device(&uuid, req.role_id)
+        .await?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn get_device_role(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Option<Role>>, HttpError> {
+    // Get role ID from device
+    let role_id = state.director.get_device_role_id(&uuid).await?;
+
+    // If device has a role, fetch full role details
+    if let Some(id) = role_id {
+        let role = state.roles_store.get(id).await?;
+        Ok(Json(Some(role)))
+    } else {
+        Ok(Json(None))
     }
 }

@@ -4,7 +4,6 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct RolesStore {
@@ -236,71 +235,6 @@ impl RolesStore {
         }
 
         Ok(())
-    }
-
-    /// Assign a role to a device
-    pub async fn assign_to_device(&self, device_uuid: &Uuid, role_id: i64) -> Result<()> {
-        let conn = self.db.lock().await;
-
-        conn.execute(
-            "UPDATE devices SET role_id = ?1 WHERE uuid = ?2",
-            params![role_id, device_uuid],
-        )
-        .context("Failed to assign role to device")?;
-
-        Ok(())
-    }
-
-    /// Get the role assigned to a device
-    pub async fn get_device_role(&self, device_uuid: &Uuid) -> Result<Option<Role>> {
-        let conn = self.db.lock().await;
-
-        let mut stmt = conn.prepare(
-            "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template, r.created_at, r.updated_at
-             FROM roles r
-             JOIN devices d ON d.role_id = r.id
-             WHERE d.uuid = ?1",
-        )?;
-
-        let result = stmt.query_row(params![device_uuid], |row| {
-            let disk_layout_json: String = row.get(4)?;
-            let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
-            let config_json: Option<String> = row.get(5)?;
-            let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
-
-            Ok(Role {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                os_id: row.get(3)?,
-                disk_layout,
-                config_template,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
-        });
-
-        match result {
-            Ok(role) => Ok(Some(role)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// List all devices with a specific role
-    pub async fn list_devices_with_role(&self, role_id: i64) -> Result<Vec<Uuid>> {
-        let conn = self.db.lock().await;
-
-        let mut stmt = conn.prepare("SELECT uuid FROM devices WHERE role_id = ?1 ORDER BY uuid")?;
-
-        let rows = stmt.query_map(params![role_id], |row| row.get(0))?;
-
-        let mut uuids = Vec::new();
-        for row in rows {
-            uuids.push(row?);
-        }
-
-        Ok(uuids)
     }
 }
 

@@ -144,7 +144,8 @@ mod tests {
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio),
+            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
             agent_images_path,
             boot_file_provider,
         });

@@ -11,9 +11,10 @@ interface DevicesTableEnhancedProps {
   data: Device[];
   dhcpLeases: DhcpLease[];
   rolesMap: Map<number, { name: string; os_name: string; os_version: string }>;
+  platformsMap: Map<number, { name: string }>;
 }
 
-export default function DevicesTableEnhanced({ data, dhcpLeases, rolesMap }: DevicesTableEnhancedProps) {
+export default function DevicesTableEnhanced({ data, dhcpLeases, rolesMap, platformsMap }: DevicesTableEnhancedProps) {
   const navigate = useNavigate();
 
   // Create MAC to IP mapping
@@ -92,6 +93,30 @@ export default function DevicesTableEnhanced({ data, dhcpLeases, rolesMap }: Dev
               {roleInfo.os_name} {roleInfo.os_version}
             </span>
           </div>
+        );
+      },
+    },
+    {
+      id: "platform",
+      header: "Platform",
+      cell: ({ row }) => {
+        const platformId = row.original.platform_id;
+        if (!platformId) {
+          return <span className="text-muted-foreground">Not assigned</span>;
+        }
+
+        const platformInfo = platformsMap.get(platformId);
+        if (!platformInfo) {
+          return <Badge variant="secondary">Platform #{platformId}</Badge>;
+        }
+
+        return (
+          <button
+            onClick={() => navigate(`/platforms/${platformId}`)}
+            className="text-blue-600 hover:underline text-sm"
+          >
+            {platformInfo.name}
+          </button>
         );
       },
     },

@@ -324,6 +324,26 @@ fn merge_hardware(base: &HardwareConfig, overrides: &HardwareConfig) -> Hardware
         memory_dimm_count: overrides.memory_dimm_count.or(base.memory_dimm_count),
         memory_dimm_size_mb: overrides.memory_dimm_size_mb.or(base.memory_dimm_size_mb),
         memory_speed_mhz: overrides.memory_speed_mhz.or(base.memory_speed_mhz),
+        cpu_manufacturer: overrides
+            .cpu_manufacturer
+            .clone()
+            .or_else(|| base.cpu_manufacturer.clone()),
+        cpu_model: overrides
+            .cpu_model
+            .clone()
+            .or_else(|| base.cpu_model.clone()),
+        // Use override disks if present, otherwise use base disks
+        disks: if !overrides.disks.is_empty() {
+            overrides.disks.clone()
+        } else {
+            base.disks.clone()
+        },
+        // Use override NICs if present, otherwise use base NICs
+        nics: if !overrides.nics.is_empty() {
+            overrides.nics.clone()
+        } else {
+            base.nics.clone()
+        },
     }
 }
 

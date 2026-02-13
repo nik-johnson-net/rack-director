@@ -19,6 +19,8 @@ import {
   makeLeaseStatic,
   getNetworks,
   deleteDevice,
+  getDevicePlatform,
+  getPlatforms,
   type Device,
   type Role,
   type DeviceStatus,
@@ -28,6 +30,7 @@ import {
   type DeviceLifecycle,
   type StaticReservation,
   type DhcpNetwork,
+  type Platform,
 } from "@/lib/client";
 import { ArrowLeft, AlertCircle, Pin, Trash2 } from "lucide-react";
 import { EditableHostname } from "@/components/devices/editable-hostname";
@@ -35,6 +38,7 @@ import { MakeStaticDialog } from "@/components/networks/make-static-dialog";
 import { TransitionDialog } from "@/components/devices/transition-dialog";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
+import { PlatformAssignment } from "@/components/devices/platform-assignment";
 import { Label } from "@/components/ui/label";
 
 const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
@@ -45,10 +49,12 @@ function DeviceDetail() {
 
   const [device, setDevice] = useState<Device | null>(null);
   const [assignedRole, setAssignedRole] = useState<Role | null>(null);
+  const [assignedPlatform, setAssignedPlatform] = useState<Platform | null>(null);
   const [status, setStatus] = useState<DeviceStatus | null>(null);
   const [transitions, setTransitions] = useState<LifecycleTransition[]>([]);
   const [dhcpLease, setDhcpLease] = useState<DhcpLease | null>(null);
   const [availableRoles, setAvailableRoles] = useState<RoleWithOs[]>([]);
+  const [availablePlatforms, setAvailablePlatforms] = useState<Platform[]>([]);
   const [selectedRoleId, setSelectedRoleId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -74,20 +80,24 @@ function DeviceDetail() {
 
     const fetchData = async () => {
       try {
-        const [deviceData, roleData, statusData, transitionsData, rolesData, networksData] = await Promise.all([
+        const [deviceData, roleData, platformData, statusData, transitionsData, rolesData, platformsData, networksData] = await Promise.all([
           getDevice(uuid),
           getDeviceRole(uuid),
+          getDevicePlatform(uuid),
           getDeviceStatus(uuid),
           getDeviceTransitions(uuid, true),
           getRoles(),
+          getPlatforms(),
           getNetworks()
         ]);
 
         setDevice(deviceData);
         setAssignedRole(roleData);
+        setAssignedPlatform(platformData);
         setStatus(statusData);
         setTransitions(transitionsData);
         setAvailableRoles(rolesData);
+        setAvailablePlatforms(platformsData);
         setSelectedRoleId(deviceData.role_id || null);
         setNetworks(networksData);
 
@@ -411,6 +421,18 @@ function DeviceDetail() {
             </Button>
           </CardContent>
         </Card>
+
+        <PlatformAssignment
+          uuid={uuid!}
+          device={device}
+          assignedPlatform={assignedPlatform}
+          availablePlatforms={availablePlatforms}
+          onPlatformUpdate={(updatedPlatform, updatedDevice) => {
+            setAssignedPlatform(updatedPlatform);
+            setDevice(updatedDevice);
+          }}
+          onError={(errorMsg) => setError(errorMsg)}
+        />
       </div>
 
       {/* BMC Configuration */}

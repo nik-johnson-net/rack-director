@@ -1,4 +1,4 @@
-import { Home, Server, Settings, HardDrive, Users, ClipboardList, GitBranch, Network } from "lucide-react"
+import { Home, Server, Settings, HardDrive, Users, ClipboardList, GitBranch, Network, Layers } from "lucide-react"
 
 import {
   Sidebar,
@@ -46,6 +46,11 @@ const menuGroups = [
         title: "Roles",
         url: "/roles",
         icon: Users,
+      },
+      {
+        title: "Platforms",
+        url: "/platforms",
+        icon: Layers,
       },
       {
         title: "Plans",

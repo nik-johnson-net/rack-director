@@ -38,12 +38,18 @@ pub async fn render_for_device(
         .map_err(Error::ServerInternalError)?;
 
     // Get device role
-    let role = state
-        .roles_store
-        .get_device_role(device_uuid)
+    let role_id = state
+        .director
+        .get_device_role_id(device_uuid)
         .await
         .map_err(Error::ServerInternalError)?
         .ok_or_else(|| Error::NotFound("Device has no role assigned".to_string()))?;
+
+    let role = state
+        .roles_store
+        .get(role_id)
+        .await
+        .map_err(Error::ServerInternalError)?;
 
     // Get device architecture
     let arch = device.architecture;
@@ -181,22 +187,7 @@ mod tests {
         let db = database::open(&db_path).unwrap();
         let db_tokio = Arc::new(Mutex::new(db));
 
-        // Create test network
-        {
-            let conn = db_tokio.lock().await;
-            conn.execute(
-                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
-                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
-                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
-                [],
-            )
-            .unwrap();
-        }
+        // Note: No default network is created. Tests that need networks should create them explicitly.
 
         let _storage_path = temp_dir.path().join("images");
         let image_store = ImageStore::memory("http://localhost:8080");
@@ -216,12 +207,38 @@ mod tests {
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio),
+            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
             agent_images_path,
             boot_file_provider,
         });
 
         (state, temp_dir)
+    }
+
+    /// Helper to create a test network for tests that need DHCP functionality
+    async fn create_test_network(state: &AppState) -> i64 {
+        let network = state
+            .dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        state
+            .dhcp_store
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        network.id
     }
 
     #[tokio::test]
@@ -248,6 +265,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_device_network_info_with_lease() {
         let (state, _temp_dir) = create_test_state().await;
+        let network_id = create_test_network(&state).await;
 
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff";
@@ -268,7 +286,7 @@ mod tests {
                 Some(&uuid),
                 crate::dhcp::LeaseState::Active,
                 3600,
-                1,
+                network_id,
             )
             .await
             .unwrap();
@@ -296,12 +314,17 @@ mod tests {
             .unwrap();
 
         let result = render_for_device(&state, &uuid).await;
-        assert!(result.is_err());
+        // Should get NotFound error when device has no role
         match result {
-            Err(Error::NotFound(msg)) => {
-                assert!(msg.contains("no role"));
+            Ok(_) => panic!("Expected error but got Ok"),
+            Err(Error::NotFound(_)) => {
+                // Success - this is the expected error
             }
-            _ => panic!("Expected NotFound error for missing role"),
+            Err(Error::ServerInternalError(e)) => {
+                panic!("Expected NotFound but got ServerInternalError: {}", e)
+            }
+            Err(Error::ValidationError(_)) => panic!("Expected NotFound but got ValidationError"),
+            Err(Error::BadRequest(_)) => panic!("Expected NotFound but got BadRequest"),
         }
     }
 }

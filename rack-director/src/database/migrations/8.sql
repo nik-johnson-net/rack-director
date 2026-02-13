@@ -50,28 +50,9 @@ CREATE INDEX idx_dhcp_static_mac ON dhcp_static_reservations(mac_address);
 ALTER TABLE dhcp_leases ADD COLUMN network_id INTEGER REFERENCES dhcp_networks(id) ON DELETE SET NULL;
 CREATE INDEX idx_dhcp_leases_network ON dhcp_leases(network_id);
 
--- Migrate existing dhcp_config to "Default" network
-INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address)
-SELECT 1, 'Default', subnet, gateway, dns_servers, lease_duration, NULL
-FROM dhcp_config WHERE id = 1;
-
--- Create "Default Pool" from existing range
-INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
-SELECT 1, 'Default Pool', range_start, range_end
-FROM dhcp_config WHERE id = 1;
-
--- Migrate static IPs from device attributes to static reservations
-INSERT INTO dhcp_static_reservations (network_id, mac_address, ip_address)
-SELECT
-    1,
-    json_extract(attributes, '$.mac_address'),
-    json_extract(attributes, '$.static_ip')
-FROM devices
-WHERE json_extract(attributes, '$.static_ip') IS NOT NULL
-  AND json_extract(attributes, '$.mac_address') IS NOT NULL;
-
--- Link existing leases to default network
-UPDATE dhcp_leases SET network_id = 1;
+-- Note: Tables are created empty. No default network is created.
+-- Users must create networks via the UI or API before DHCP functionality is available.
+-- Existing dhcp_config table data is discarded as part of the migration to the new multi-network model.
 
 -- Drop old dhcp_config table
 DROP TABLE dhcp_config;

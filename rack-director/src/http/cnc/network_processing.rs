@@ -37,8 +37,8 @@ pub async fn enrich_interfaces_with_dhcp_info(
             nic.network_id = lease.network_id;
 
             // Create static reservation for this interface
-            if let Some(network_id) = lease.network_id {
-                if let Err(e) = state
+            if let Some(network_id) = lease.network_id
+                && let Err(e) = state
                     .dhcp_store
                     .create_or_update_static_reservation(
                         network_id,
@@ -47,13 +47,12 @@ pub async fn enrich_interfaces_with_dhcp_info(
                         None,
                     )
                     .await
-                {
-                    log::warn!(
-                        "Couldn't create static reservation for MAC {}: {}",
-                        nic.mac_address,
-                        e
-                    );
-                }
+            {
+                log::warn!(
+                    "Couldn't create static reservation for MAC {}: {}",
+                    nic.mac_address,
+                    e
+                );
             }
         }
         enriched.push(nic);
@@ -186,22 +185,7 @@ mod tests {
         let db = database::open(&db_path).unwrap();
         let db_tokio = Arc::new(Mutex::new(db));
 
-        // Create test network
-        {
-            let conn = db_tokio.lock().await;
-            conn.execute(
-                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
-                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
-                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
-                [],
-            )
-            .unwrap();
-        }
+        // Note: No default network is created. Tests that need networks should create them explicitly.
 
         let _storage_path = temp_dir.path().join("images");
         let image_store = ImageStore::memory("http://localhost:8080");
@@ -221,12 +205,38 @@ mod tests {
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio),
+            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
             agent_images_path,
             boot_file_provider,
         });
 
         (state, temp_dir)
+    }
+
+    /// Helper to create a test network for tests that need DHCP functionality
+    async fn create_test_network(state: &AppState) -> i64 {
+        let network = state
+            .dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        state
+            .dhcp_store
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        network.id
     }
 
     #[tokio::test]
@@ -238,6 +248,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: None,
             network_id: None,
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         }];
@@ -253,6 +264,7 @@ mod tests {
     #[tokio::test]
     async fn test_enrich_interfaces_with_dhcp_info_with_lease() {
         let (state, _temp_dir) = create_test_state().await;
+        let network_id = create_test_network(&state).await;
 
         // Create a DHCP lease
         let mac = "aa:bb:cc:dd:ee:ff";
@@ -265,7 +277,7 @@ mod tests {
                 None,
                 crate::dhcp::LeaseState::Active,
                 3600,
-                1,
+                network_id,
             )
             .await
             .unwrap();
@@ -275,6 +287,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: None,
             network_id: None,
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         }];
@@ -284,7 +297,7 @@ mod tests {
         assert_eq!(enriched.len(), 1);
         assert_eq!(enriched[0].interface_name, "eth0");
         assert_eq!(enriched[0].ip_address, Some("10.0.0.100".to_string()));
-        assert_eq!(enriched[0].network_id, Some(1));
+        assert_eq!(enriched[0].network_id, Some(network_id));
     }
 
     #[tokio::test]
@@ -303,6 +316,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(1),
+            speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
         }];
@@ -323,6 +337,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(1),
+            speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
         }];
@@ -334,6 +349,7 @@ mod tests {
     #[tokio::test]
     async fn test_complete_pending_devices_for_interfaces_with_pending() {
         let (state, _temp_dir) = create_test_state().await;
+        let network_id = create_test_network(&state).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let uuid = test_uuid();
@@ -346,7 +362,11 @@ mod tests {
             .unwrap();
 
         // Create pending device
-        state.director.create_pending_device(mac, 1).await.unwrap();
+        state
+            .director
+            .create_pending_device(mac, network_id)
+            .await
+            .unwrap();
 
         // Verify it exists
         let pending = state
@@ -360,7 +380,8 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
-            network_id: Some(1),
+            network_id: Some(network_id),
+            speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
         }];
@@ -379,6 +400,7 @@ mod tests {
     #[tokio::test]
     async fn test_enrich_interfaces_creates_static_reservations() {
         let (state, _temp_dir) = create_test_state().await;
+        let network_id = create_test_network(&state).await;
 
         // Create DHCP leases for multiple MACs
         let mac1 = "aa:bb:cc:dd:ee:01";
@@ -394,7 +416,7 @@ mod tests {
                 None,
                 crate::dhcp::LeaseState::Active,
                 3600,
-                1,
+                network_id,
             )
             .await
             .unwrap();
@@ -407,7 +429,7 @@ mod tests {
                 None,
                 crate::dhcp::LeaseState::Active,
                 3600,
-                1,
+                network_id,
             )
             .await
             .unwrap();
@@ -419,6 +441,7 @@ mod tests {
                 mac_address: mac1.to_string(),
                 ip_address: None,
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -427,6 +450,7 @@ mod tests {
                 mac_address: mac2.to_string(),
                 ip_address: None,
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },

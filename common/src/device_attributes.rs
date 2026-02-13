@@ -1,5 +1,41 @@
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
+use std::str::FromStr;
+
+/// Disk type classification
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskType {
+    Nvme,
+    Ssd,
+    Hdd,
+}
+
+impl FromStr for DiskType {
+    type Err = String;
+
+    /// Parse disk type from string (case-insensitive)
+    /// Returns an error for unknown disk type strings
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "nvme" => Ok(DiskType::Nvme),
+            "ssd" => Ok(DiskType::Ssd),
+            "hdd" => Ok(DiskType::Hdd),
+            _ => Err(format!("Unknown disk type: {}", s)),
+        }
+    }
+}
+
+impl DiskType {
+    /// Get priority for disk selection (lower is better/faster)
+    pub fn priority(self) -> u8 {
+        match self {
+            DiskType::Nvme => 1,
+            DiskType::Ssd => 2,
+            DiskType::Hdd => 3,
+        }
+    }
+}
 
 /// Top-level device attributes structure
 ///
@@ -60,6 +96,14 @@ pub struct DeviceAttributes {
     #[serde(default)]
     pub cmdline_args: Option<String>,
 
+    /// Device-related warnings and status messages
+    /// Contains informational messages about device state, including:
+    /// - Platform detection status messages
+    /// - Hardware configuration warnings
+    /// - Other device-specific alerts
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+
     /// Legacy field - MAC address (prefer network_interfaces)
     #[serde(default)]
     pub mac_address: Option<String>,
@@ -90,6 +134,11 @@ pub struct NetworkInterface {
     /// Network ID this interface is on (if it has an IP)
     #[serde(default)]
     pub network_id: Option<i64>,
+
+    /// Interface speed in Mbps (megabits per second), if available
+    /// May be None if link is down or speed cannot be determined
+    #[serde(default)]
+    pub speed_mbps: Option<u32>,
 
     /// Whether this interface is disabled (e.g., due to duplicate MAC)
     #[serde(default)]
@@ -151,13 +200,14 @@ pub struct DiskInfo {
     /// Disk device name (e.g., "sda", "nvme0n1")
     pub name: String,
 
-    /// Disk size (human-readable, e.g., "480GB")
+    /// Disk size in gigabytes (GB)
+    /// Converted from hardware scan (512-byte blocks) to GB for consistency
     #[serde(default)]
-    pub size: Option<String>,
+    pub size: Option<u64>,
 
-    /// Disk type (e.g., "SSD", "HDD", "NVMe")
+    /// Disk type (nvme, ssd, or hdd)
     #[serde(default)]
-    pub disk_type: Option<String>,
+    pub disk_type: Option<DiskType>,
 
     /// Disk model name
     #[serde(default)]
@@ -167,7 +217,9 @@ pub struct DiskInfo {
     #[serde(default)]
     pub serial: Option<String>,
 
-    /// Full device path (e.g., "/dev/sda")
+    /// Stable bus-based device path (e.g., "/dev/disk/by-path/pci-0000:00:1f.2-ata-1")
+    /// This path persists across reboots and is used for platform matching.
+    /// Prefer this over simple device names like "/dev/sda" which can change.
     #[serde(default)]
     pub path: Option<String>,
 }
@@ -182,6 +234,9 @@ pub struct CpuInfo {
     /// CPU manufacturer (e.g., "Intel", "AMD")
     #[serde(default)]
     pub manufacturer: Option<String>,
+
+    #[serde(default)]
+    pub model: Option<String>,
 
     /// Number of physical cores
     #[serde(default)]
@@ -199,9 +254,9 @@ pub struct CpuInfo {
 /// Memory module information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryInfo {
-    /// Memory module size (human-readable, e.g., "16GB")
+    /// Memory module size in megabytes (MB)
     #[serde(default)]
-    pub size: Option<String>,
+    pub size_mb: Option<u16>,
 
     /// Memory speed in MHz
     #[serde(default)]
@@ -227,6 +282,7 @@ mod tests {
         assert!(attrs.hostname.is_none());
         assert!(attrs.network_interfaces.is_empty());
         assert!(attrs.extra.is_empty());
+        assert!(attrs.warnings.is_empty());
     }
 
     #[test]
@@ -240,6 +296,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 network_id: Some(1),
+                speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
             }],
@@ -259,6 +316,7 @@ mod tests {
             deserialized.network_interfaces[0].mac_address,
             "aa:bb:cc:dd:ee:ff"
         );
+        assert_eq!(deserialized.network_interfaces[0].speed_mbps, Some(10000));
     }
 
     #[test]
@@ -346,6 +404,7 @@ mod tests {
         assert_eq!(iface.mac_address, "aa:bb:cc:dd:ee:ff");
         assert!(iface.ip_address.is_none());
         assert!(iface.network_id.is_none());
+        assert!(iface.speed_mbps.is_none());
         assert!(!iface.disabled);
         assert!(iface.warning_label.is_none());
     }
@@ -370,8 +429,8 @@ mod tests {
     fn test_disk_info_serialization() {
         let disk = DiskInfo {
             name: "sda".to_string(),
-            size: Some("480GB".to_string()),
-            disk_type: Some("SSD".to_string()),
+            size: Some(480),
+            disk_type: Some(DiskType::Ssd),
             model: Some("Samsung 860 EVO".to_string()),
             serial: Some("S3Z9NX0M123456".to_string()),
             path: Some("/dev/sda".to_string()),
@@ -381,7 +440,8 @@ mod tests {
         let deserialized: DiskInfo = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(deserialized.name, "sda");
-        assert_eq!(deserialized.size, Some("480GB".to_string()));
+        assert_eq!(deserialized.size, Some(480));
+        assert_eq!(deserialized.disk_type, Some(DiskType::Ssd));
     }
 
     #[test]
@@ -401,7 +461,7 @@ mod tests {
         let json = json!({});
         let mem: MemoryInfo = serde_json::from_value(json).unwrap();
 
-        assert!(mem.size.is_none());
+        assert!(mem.size_mb.is_none());
         assert!(mem.speed_mhz.is_none());
         assert!(mem.manufacturer.is_none());
         assert!(mem.part_number.is_none());
@@ -593,8 +653,8 @@ mod tests {
             "disks": [
                 {
                     "name": "sda",
-                    "size": "480GB",
-                    "disk_type": "SSD"
+                    "size": 480,
+                    "disk_type": "ssd"
                 }
             ],
             "cpus": [
@@ -624,5 +684,208 @@ mod tests {
             attrs.extra.get("custom_field").unwrap().as_str().unwrap(),
             "custom_value"
         );
+    }
+
+    #[test]
+    fn test_disk_type_from_str() {
+        assert_eq!("nvme".parse::<DiskType>().unwrap(), DiskType::Nvme);
+        assert_eq!("NVME".parse::<DiskType>().unwrap(), DiskType::Nvme);
+        assert_eq!("ssd".parse::<DiskType>().unwrap(), DiskType::Ssd);
+        assert_eq!("SSD".parse::<DiskType>().unwrap(), DiskType::Ssd);
+        assert_eq!("hdd".parse::<DiskType>().unwrap(), DiskType::Hdd);
+        assert_eq!("HDD".parse::<DiskType>().unwrap(), DiskType::Hdd);
+        // Unknown types return an error, but can default to HDD
+        assert_eq!(
+            "unknown".parse::<DiskType>().unwrap_or(DiskType::Hdd),
+            DiskType::Hdd
+        );
+        assert_eq!(
+            "invalid".parse::<DiskType>().unwrap_or(DiskType::Hdd),
+            DiskType::Hdd
+        );
+        // Test that parse errors actually occur for invalid types
+        assert!("unknown".parse::<DiskType>().is_err());
+        assert!("invalid".parse::<DiskType>().is_err());
+    }
+
+    #[test]
+    fn test_disk_type_priority() {
+        assert!(DiskType::Nvme.priority() < DiskType::Ssd.priority());
+        assert!(DiskType::Ssd.priority() < DiskType::Hdd.priority());
+        assert_eq!(DiskType::Nvme.priority(), 1);
+        assert_eq!(DiskType::Ssd.priority(), 2);
+        assert_eq!(DiskType::Hdd.priority(), 3);
+    }
+
+    #[test]
+    fn test_disk_type_serialization() {
+        // Test serialization to lowercase JSON
+        assert_eq!(serde_json::to_string(&DiskType::Nvme).unwrap(), "\"nvme\"");
+        assert_eq!(serde_json::to_string(&DiskType::Ssd).unwrap(), "\"ssd\"");
+        assert_eq!(serde_json::to_string(&DiskType::Hdd).unwrap(), "\"hdd\"");
+
+        // Test deserialization from lowercase JSON
+        assert_eq!(
+            serde_json::from_str::<DiskType>("\"nvme\"").unwrap(),
+            DiskType::Nvme
+        );
+        assert_eq!(
+            serde_json::from_str::<DiskType>("\"ssd\"").unwrap(),
+            DiskType::Ssd
+        );
+        assert_eq!(
+            serde_json::from_str::<DiskType>("\"hdd\"").unwrap(),
+            DiskType::Hdd
+        );
+    }
+
+    #[test]
+    fn test_disk_info_with_disk_type_enum() {
+        let disk = DiskInfo {
+            name: "nvme0n1".to_string(),
+            size: Some(1000),
+            disk_type: Some(DiskType::Nvme),
+            model: Some("Samsung 970 EVO".to_string()),
+            serial: Some("S123456".to_string()),
+            path: Some("/dev/disk/by-path/pci-0000:01:00.0-nvme-1".to_string()),
+        };
+
+        // Serialize and verify JSON format
+        let json = serde_json::to_value(&disk).unwrap();
+        assert_eq!(json["name"], "nvme0n1");
+        assert_eq!(json["size"], 1000);
+        assert_eq!(json["disk_type"], "nvme");
+
+        // Deserialize back
+        let json_str = serde_json::to_string(&disk).unwrap();
+        let deserialized: DiskInfo = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(deserialized.disk_type, Some(DiskType::Nvme));
+        assert_eq!(deserialized.size, Some(1000));
+    }
+
+    #[test]
+    fn test_network_interface_with_speed() {
+        let iface = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            network_id: Some(1),
+            speed_mbps: Some(10000),
+            disabled: false,
+            warning_label: None,
+        };
+
+        // Serialize and verify JSON format
+        let json = serde_json::to_value(&iface).unwrap();
+        assert_eq!(json["interface_name"], "eth0");
+        assert_eq!(json["mac_address"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(json["speed_mbps"], 10000);
+
+        // Deserialize back
+        let json_str = serde_json::to_string(&iface).unwrap();
+        let deserialized: NetworkInterface = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(deserialized.speed_mbps, Some(10000));
+    }
+
+    #[test]
+    fn test_network_interface_without_speed() {
+        let iface = NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+        };
+
+        // Serialize and verify JSON format
+        let json = serde_json::to_value(&iface).unwrap();
+        assert_eq!(json["interface_name"], "eth0");
+        assert_eq!(json["mac_address"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(json["speed_mbps"], serde_json::Value::Null);
+
+        // Deserialize back
+        let json_str = serde_json::to_string(&iface).unwrap();
+        let deserialized: NetworkInterface = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(deserialized.speed_mbps, None);
+    }
+
+    #[test]
+    fn test_network_interface_backward_compatibility() {
+        // Old JSON without speed_mbps field should deserialize correctly
+        let json = json!({
+            "interface_name": "eth0",
+            "mac_address": "aa:bb:cc:dd:ee:ff",
+            "ip_address": "10.0.0.100"
+        });
+
+        let iface: NetworkInterface = serde_json::from_value(json).unwrap();
+        assert_eq!(iface.interface_name, "eth0");
+        assert_eq!(iface.speed_mbps, None);
+    }
+
+    #[test]
+    fn test_warnings_serialization() {
+        let mut attrs = DeviceAttributes::default();
+        attrs.warnings = vec![
+            "Platform auto-detection failed: no matching platform found".to_string(),
+            "High memory usage detected".to_string(),
+        ];
+
+        let json = serde_json::to_value(&attrs).unwrap();
+        let warnings = json.get("warnings").unwrap().as_array().unwrap();
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(
+            warnings[0].as_str().unwrap(),
+            "Platform auto-detection failed: no matching platform found"
+        );
+        assert_eq!(warnings[1].as_str().unwrap(), "High memory usage detected");
+
+        // Deserialize back
+        let deserialized: DeviceAttributes = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.warnings.len(), 2);
+        assert_eq!(
+            deserialized.warnings[0],
+            "Platform auto-detection failed: no matching platform found"
+        );
+    }
+
+    #[test]
+    fn test_warnings_empty_vec_skipped_in_json() {
+        let attrs = DeviceAttributes::default();
+        let json = serde_json::to_value(&attrs).unwrap();
+
+        // Empty warnings vec should not appear in JSON
+        assert!(json.get("warnings").is_none());
+    }
+
+    #[test]
+    fn test_warnings_backward_compatibility() {
+        // Old JSON without warnings should deserialize with empty vec
+        let json = json!({
+            "hostname": "test-server",
+            "manufacturer": "Dell Inc."
+        });
+
+        let attrs: DeviceAttributes = serde_json::from_value(json).unwrap();
+        assert_eq!(attrs.hostname, Some("test-server".to_string()));
+        assert!(attrs.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_warnings_platform_detection_failure_message() {
+        // Test that the failure warning message can be stored
+        let message = "Platform auto-detection failed: no matching platform found";
+
+        let mut attrs = DeviceAttributes::default();
+        attrs.warnings = vec![message.to_string()];
+
+        // Serialize and deserialize
+        let json_str = serde_json::to_string(&attrs).unwrap();
+        let deserialized: DeviceAttributes = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(deserialized.warnings.len(), 1);
+        assert_eq!(deserialized.warnings[0], message);
     }
 }

@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use clap::Parser;
+use common::device_attributes::DiskType;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -27,6 +28,7 @@ struct NetworkInterface {
     interface_name: String,
     mac_address: String,
     ip_address: Option<String>,
+    speed_mbps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +86,44 @@ struct MemoryInfo {
     part_number: Option<String>,
 }
 
+/// Read interface speed from /sys/class/net/{iface}/speed
+///
+/// Returns the link speed in Mbps if available.
+/// Returns None if:
+/// - The speed file doesn't exist
+/// - The link is down (speed = -1)
+/// - The speed cannot be parsed
+async fn read_interface_speed(iface_path: &std::path::Path, interface_name: &str) -> Option<u32> {
+    let speed_path = iface_path.join("speed");
+
+    match tokio::fs::read_to_string(&speed_path).await {
+        Ok(speed_str) => {
+            let speed_str = speed_str.trim();
+            match speed_str.parse::<i32>() {
+                Ok(speed) if speed > 0 => {
+                    debug!("Interface {} speed: {} Mbps", interface_name, speed);
+                    Some(speed as u32)
+                }
+                Ok(speed) => {
+                    debug!(
+                        "Interface {} link is down (speed = {})",
+                        interface_name, speed
+                    );
+                    None
+                }
+                Err(e) => {
+                    debug!("Failed to parse speed for {}: {}", interface_name, e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            debug!("Couldn't read speed for {}: {}", interface_name, e);
+            None
+        }
+    }
+}
+
 /// Scan physical Ethernet network interfaces from /sys/class/net
 ///
 /// This function scans for physical Ethernet interfaces, filtering out:
@@ -91,8 +131,9 @@ struct MemoryInfo {
 /// - Virtual interfaces (those without a /sys/class/net/{iface}/device directory)
 /// - Non-Ethernet interfaces (type != 1)
 ///
-/// Returns a vector of NetworkInterface structs with MAC addresses.
+/// Returns a vector of NetworkInterface structs with MAC addresses and speed.
 /// IP addresses are set to None and will be backfilled by rack-director from DHCP leases.
+/// Speed is read from /sys/class/net/{iface}/speed and may be None if link is down.
 async fn scan_network_interfaces() -> Result<Vec<NetworkInterface>> {
     let mut interfaces = Vec::new();
     let net_dir = std::path::Path::new("/sys/class/net");
@@ -149,15 +190,19 @@ async fn scan_network_interfaces() -> Result<Vec<NetworkInterface>> {
             }
         };
 
+        // Read link speed (may not be available if link is down)
+        let speed_mbps = read_interface_speed(&iface_path, &interface_name).await;
+
         debug!(
-            "Found physical Ethernet interface: {} (MAC: {})",
-            interface_name, mac_address
+            "Found physical Ethernet interface: {} (MAC: {}, Speed: {:?} Mbps)",
+            interface_name, mac_address, speed_mbps
         );
 
         interfaces.push(NetworkInterface {
             interface_name,
             mac_address,
             ip_address: None, // Will be backfilled by rack-director from DHCP leases
+            speed_mbps,
         });
     }
 
@@ -172,6 +217,190 @@ async fn scan_network_interfaces() -> Result<Vec<NetworkInterface>> {
 /// - IP Address (converted to None if "0.0.0.0")
 /// - IP Address Source (DHCP, Static, etc.)
 ///
+/// Disk information structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiskInfo {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disk_type: Option<DiskType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    serial: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+/// Scan disk drives from /dev/disk/by-path/
+///
+/// This function discovers physical disk drives by:
+/// 1. Reading /dev/disk/by-path/ to get stable bus-based paths
+/// 2. Resolving symlinks to actual device names (e.g., sda, nvme0n1)
+/// 3. Reading disk size from /sys/block/{name}/size
+/// 4. Detecting disk type (NVMe, SSD, HDD) using rotational flag
+/// 5. Reading model from /sys/block/{name}/device/model
+///
+/// Returns a vector of DiskInfo with path set to /dev/disk/by-path/... format.
+/// This ensures stable device paths that don't change across reboots.
+async fn scan_disks() -> Result<Vec<DiskInfo>> {
+    let mut disks = Vec::new();
+    let by_path_dir = std::path::Path::new("/dev/disk/by-path");
+
+    // Check if /dev/disk/by-path exists
+    if !by_path_dir.exists() {
+        warn!("/dev/disk/by-path not found, skipping disk scan");
+        return Ok(disks);
+    }
+
+    debug!("Scanning disks from /dev/disk/by-path/");
+
+    // Read all entries in /dev/disk/by-path/
+    let entries = match std::fs::read_dir(by_path_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!("Failed to read /dev/disk/by-path: {}", e);
+            return Ok(disks);
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                debug!("Failed to read directory entry: {}", e);
+                continue;
+            }
+        };
+
+        let path_link = entry.path();
+        let path_name = match path_link.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+
+        // Skip partition entries (contain -part)
+        if path_name.contains("-part") {
+            continue;
+        }
+
+        debug!("Processing disk path: {}", path_name);
+
+        // Resolve symlink to get actual device name
+        let target = match std::fs::read_link(&path_link) {
+            Ok(t) => t,
+            Err(e) => {
+                debug!("Failed to resolve symlink for {}: {}", path_name, e);
+                continue;
+            }
+        };
+
+        // Extract device name from target (e.g., ../../sda -> sda)
+        let device_name = match target.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+
+        debug!("Resolved {} -> {}", path_name, device_name);
+
+        // Read disk information from sysfs
+        let size = read_disk_size(&device_name);
+        let disk_type = detect_disk_type(&device_name);
+        let model = read_disk_model(&device_name);
+
+        let disk_info = DiskInfo {
+            name: device_name.clone(),
+            size,
+            disk_type: Some(disk_type),
+            model,
+            serial: None, // Could be added with udevadm later
+            path: Some(format!("/dev/disk/by-path/{}", path_name)),
+        };
+
+        debug!("Discovered disk: {} ({:?})", device_name, disk_type);
+
+        disks.push(disk_info);
+    }
+
+    info!("Found {} disk(s)", disks.len());
+    Ok(disks)
+}
+
+/// Detect disk type (NVMe, SSD, or HDD)
+///
+/// Returns:
+/// - DiskType::Nvme for NVMe devices (nvme*)
+/// - DiskType::Ssd for non-rotational devices (rotational flag = 0)
+/// - DiskType::Hdd for rotational devices (rotational flag = 1) or when type can't be determined
+fn detect_disk_type(device_name: &str) -> DiskType {
+    // Check if it's an NVMe device
+    if device_name.starts_with("nvme") {
+        return DiskType::Nvme;
+    }
+
+    // Check rotational flag to distinguish SSD from HDD
+    let rotational_path = format!("/sys/block/{}/queue/rotational", device_name);
+    match std::fs::read_to_string(&rotational_path) {
+        Ok(content) => {
+            let rotational = content.trim();
+            if rotational == "0" {
+                DiskType::Ssd
+            } else if rotational == "1" {
+                DiskType::Hdd
+            } else {
+                debug!(
+                    "Unexpected rotational value '{}' for {}, defaulting to HDD",
+                    rotational, device_name
+                );
+                DiskType::Hdd
+            }
+        }
+        Err(e) => {
+            debug!(
+                "Failed to read rotational flag for {}: {}, defaulting to HDD",
+                device_name, e
+            );
+            DiskType::Hdd
+        }
+    }
+}
+
+/// Read disk size from /sys/block/{name}/size
+///
+/// Size is reported in 512-byte blocks, converted to GB (gigabytes).
+/// Returns the size as u64 representing gigabytes.
+fn read_disk_size(device_name: &str) -> Option<u64> {
+    let size_path = format!("/sys/block/{}/size", device_name);
+    match std::fs::read_to_string(&size_path) {
+        Ok(content) => {
+            let blocks = content.trim().parse::<u64>().ok()?;
+            // Convert 512-byte blocks to GB (1 GB = 1,000,000,000 bytes)
+            let size_gb = (blocks * 512) / 1_000_000_000;
+            Some(size_gb)
+        }
+        Err(e) => {
+            debug!("Failed to read size for {}: {}", device_name, e);
+            None
+        }
+    }
+}
+
+/// Read disk model from /sys/block/{name}/device/model
+fn read_disk_model(device_name: &str) -> Option<String> {
+    let model_path = format!("/sys/block/{}/device/model", device_name);
+    match std::fs::read_to_string(&model_path) {
+        Ok(content) => {
+            let model = content.trim().to_string();
+            if model.is_empty() { None } else { Some(model) }
+        }
+        Err(e) => {
+            debug!("Failed to read model for {}: {}", device_name, e);
+            None
+        }
+    }
+}
+
 /// Returns None if:
 /// - ipmitool is not available
 /// - No BMC is present
@@ -757,6 +986,22 @@ async fn perform_scan_and_upload(
         }
     }
 
+    // Scan disks
+    match scan_disks().await {
+        Ok(disks) => {
+            if !disks.is_empty() {
+                info!("Discovered {} disk(s)", disks.len());
+                attributes.insert("disks".to_string(), json!(disks));
+            } else {
+                info!("No disks found");
+            }
+        }
+        Err(e) => {
+            warn!("Disk scan failed: {}, continuing with other attributes", e);
+            // Non-fatal - continue with other hardware attributes
+        }
+    }
+
     // Scan for BMC
     match scan_bmc().await {
         Ok(Some(bmc_info)) => {
@@ -861,8 +1106,8 @@ fn parse_dmi_sysfs(entry_point_data: &[u8], structures_data: &[u8]) -> Result<Ha
             dmidecode::Structure::Processor(processor) => {
                 let proc_info = ProcessorInfo {
                     designation: Some(processor.socket_designation.to_string()),
-                    manufacturer: None, // Not exposed by dmidecode library
-                    version: None,      // Not exposed by dmidecode library
+                    manufacturer: Some(processor.processor_manufacturer.to_string()),
+                    version: Some(processor.processor_version.to_string()),
                     max_speed: Some(processor.max_speed),
                     core_count: processor.core_count,
                     thread_count: processor.thread_count,
@@ -1013,6 +1258,7 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1064,6 +1310,7 @@ mod tests {
                 interface_name: interface_name.clone(),
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1123,6 +1370,7 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1171,6 +1419,7 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1219,6 +1468,7 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1271,6 +1521,7 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1318,6 +1569,7 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1362,6 +1614,7 @@ mod tests {
                 interface_name,
                 mac_address,
                 ip_address: None,
+                speed_mbps: None, // Not reading speed in tests
             });
         }
 
@@ -1375,17 +1628,20 @@ mod tests {
             interface_name: "eth0".to_string(),
             mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
             ip_address: Some("192.168.1.100".to_string()),
+            speed_mbps: Some(10000),
         };
 
         let json = serde_json::to_string(&interface).unwrap();
         assert!(json.contains("eth0"));
         assert!(json.contains("aa:bb:cc:dd:ee:ff"));
         assert!(json.contains("192.168.1.100"));
+        assert!(json.contains("10000"));
 
         let deserialized: NetworkInterface = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.interface_name, "eth0");
         assert_eq!(deserialized.mac_address, "aa:bb:cc:dd:ee:ff");
         assert_eq!(deserialized.ip_address, Some("192.168.1.100".to_string()));
+        assert_eq!(deserialized.speed_mbps, Some(10000));
     }
 
     /// Test NetworkInterface with None ip_address
@@ -1395,6 +1651,7 @@ mod tests {
             interface_name: "eth1".to_string(),
             mac_address: "11:22:33:44:55:66".to_string(),
             ip_address: None,
+            speed_mbps: Some(1000),
         };
 
         let json = serde_json::to_string(&interface).unwrap();
@@ -1405,6 +1662,7 @@ mod tests {
         let deserialized: NetworkInterface = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.interface_name, "eth1");
         assert_eq!(deserialized.ip_address, None);
+        assert_eq!(deserialized.speed_mbps, Some(1000));
     }
 
     // Tests for BMC configuration
@@ -1605,6 +1863,84 @@ MAC Address             : 0c:c4:7a:02:11:fe
 
         let deserialized: BmcInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.ip_address, None);
+    }
+
+    /// Test reading interface speed from sysfs
+    #[tokio::test]
+    async fn test_read_interface_speed_valid() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let iface_path = temp_dir.path().join("eth0");
+        std::fs::create_dir_all(&iface_path).expect("Failed to create interface dir");
+
+        // Write valid speed
+        std::fs::write(iface_path.join("speed"), "10000\n").expect("Failed to write speed");
+
+        let speed = read_interface_speed(&iface_path, "eth0").await;
+        assert_eq!(speed, Some(10000));
+    }
+
+    /// Test reading interface speed when link is down (-1)
+    #[tokio::test]
+    async fn test_read_interface_speed_link_down() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let iface_path = temp_dir.path().join("eth0");
+        std::fs::create_dir_all(&iface_path).expect("Failed to create interface dir");
+
+        // Write -1 (link down)
+        std::fs::write(iface_path.join("speed"), "-1\n").expect("Failed to write speed");
+
+        let speed = read_interface_speed(&iface_path, "eth0").await;
+        assert_eq!(speed, None);
+    }
+
+    /// Test reading interface speed when file doesn't exist
+    #[tokio::test]
+    async fn test_read_interface_speed_missing_file() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let iface_path = temp_dir.path().join("eth0");
+        std::fs::create_dir_all(&iface_path).expect("Failed to create interface dir");
+
+        // Don't create speed file
+
+        let speed = read_interface_speed(&iface_path, "eth0").await;
+        assert_eq!(speed, None);
+    }
+
+    /// Test reading interface speed with invalid data
+    #[tokio::test]
+    async fn test_read_interface_speed_invalid_data() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let iface_path = temp_dir.path().join("eth0");
+        std::fs::create_dir_all(&iface_path).expect("Failed to create interface dir");
+
+        // Write invalid data
+        std::fs::write(iface_path.join("speed"), "invalid\n").expect("Failed to write speed");
+
+        let speed = read_interface_speed(&iface_path, "eth0").await;
+        assert_eq!(speed, None);
+    }
+
+    /// Test common NIC speeds
+    #[tokio::test]
+    async fn test_read_interface_speed_common_speeds() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let iface_path = temp_dir.path().join("eth0");
+        std::fs::create_dir_all(&iface_path).expect("Failed to create interface dir");
+
+        // Test 1 Gbps
+        std::fs::write(iface_path.join("speed"), "1000\n").expect("Failed to write speed");
+        let speed = read_interface_speed(&iface_path, "eth0").await;
+        assert_eq!(speed, Some(1000));
+
+        // Test 10 Gbps
+        std::fs::write(iface_path.join("speed"), "10000\n").expect("Failed to write speed");
+        let speed = read_interface_speed(&iface_path, "eth0").await;
+        assert_eq!(speed, Some(10000));
+
+        // Test 100 Mbps
+        std::fs::write(iface_path.join("speed"), "100\n").expect("Failed to write speed");
+        let speed = read_interface_speed(&iface_path, "eth0").await;
+        assert_eq!(speed, Some(100));
     }
 
     // Tests for DMI parsing
@@ -1836,5 +2172,78 @@ not a number  username
         assert_eq!(slots[0].name, "");
         assert_eq!(slots[1].slot, 2);
         assert_eq!(slots[1].name, "admin");
+    }
+
+    /// Test disk type detection for NVMe devices
+    #[test]
+    fn test_detect_disk_type_nvme() {
+        let disk_type = detect_disk_type("nvme0n1");
+        assert_eq!(disk_type, DiskType::Nvme);
+
+        let disk_type = detect_disk_type("nvme1n1");
+        assert_eq!(disk_type, DiskType::Nvme);
+    }
+
+    /// Test disk type detection returns HDD for devices without rotational flag
+    #[test]
+    fn test_detect_disk_type_nonexistent_device() {
+        let disk_type = detect_disk_type("nonexistent");
+        // Should return HDD as default when rotational file doesn't exist
+        assert_eq!(disk_type, DiskType::Hdd);
+    }
+
+    /// Test disk size parsing
+    #[test]
+    fn test_read_disk_size_nonexistent() {
+        let size = read_disk_size("nonexistent");
+        // Should return None when size file doesn't exist
+        assert_eq!(size, None);
+    }
+
+    /// Test disk model parsing
+    #[test]
+    fn test_read_disk_model_nonexistent() {
+        let model = read_disk_model("nonexistent");
+        // Should return None when model file doesn't exist
+        assert_eq!(model, None);
+    }
+
+    /// Test scan_disks with missing /dev/disk/by-path directory
+    #[tokio::test]
+    async fn test_scan_disks_missing_directory() {
+        // This test verifies graceful handling when /dev/disk/by-path doesn't exist
+        // In real system it would exist, but in test environment it likely won't
+        let result = scan_disks().await;
+
+        // Should succeed even if directory doesn't exist
+        assert!(result.is_ok());
+        let _disks = result.unwrap();
+
+        // May be empty if directory doesn't exist, which is fine for testing
+        // The important thing is it doesn't crash and returns successfully
+    }
+
+    /// Test that DiskInfo serializes correctly
+    #[test]
+    fn test_disk_info_serialization() {
+        let disk = DiskInfo {
+            name: "sda".to_string(),
+            size: Some(480),
+            disk_type: Some(DiskType::Ssd),
+            model: Some("Samsung SSD".to_string()),
+            serial: None,
+            path: Some("/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string()),
+        };
+
+        let json = serde_json::to_value(&disk).unwrap();
+
+        assert_eq!(json["name"], "sda");
+        assert_eq!(json["size"], 480);
+        assert_eq!(json["disk_type"], "ssd");
+        assert_eq!(json["model"], "Samsung SSD");
+        assert_eq!(json["path"], "/dev/disk/by-path/pci-0000:00:1f.2-ata-1");
+
+        // Serial should not be in JSON when None
+        assert!(!json.as_object().unwrap().contains_key("serial"));
     }
 }

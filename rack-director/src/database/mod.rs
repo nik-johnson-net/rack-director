@@ -53,7 +53,7 @@ pub fn query_optional<T: FromRow>(
         .optional()
 }
 
-const LATEST_VERSION: i32 = 12;
+const LATEST_VERSION: i32 = 13;
 const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -67,6 +67,7 @@ const MIGRATIONS: [&str; LATEST_VERSION as usize] = [
     include_str!("migrations/10.sql"),
     include_str!("migrations/11.sql"),
     include_str!("migrations/12.sql"),
+    include_str!("migrations/13.sql"),
 ];
 
 /// Post-migration hooks that run Rust code after SQL migrations
@@ -85,6 +86,7 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION as usize]
     None,                                          // Migration 10
     Some(migrations::migration_11::convert_uuids), // Migration 11
     None,                                          // Migration 12
+    None,                                          // Migration 13
 ];
 
 pub fn open<T: AsRef<Path>>(path: T) -> Result<Connection> {

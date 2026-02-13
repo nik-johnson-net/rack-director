@@ -7,7 +7,6 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use std::sync::Arc;
-use uuid::Uuid;
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
@@ -17,8 +16,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/ui/roles/{id}", put(update_role))
         .route("/ui/roles/{id}", delete(delete_role))
         .route("/ui/roles/{id}/devices", get(list_role_devices))
-        .route("/ui/devices/{uuid}/role", post(assign_role))
-        .route("/ui/devices/{uuid}/role", get(get_device_role))
         .with_state(state)
 }
 
@@ -102,36 +99,7 @@ async fn list_role_devices(
     State(state): State<Arc<AppState>>,
     Path(role_id): Path<i64>,
 ) -> Result<Json<Vec<String>>, HttpError> {
-    let devices = state.roles_store.list_devices_with_role(role_id).await?;
+    let devices = state.director.list_devices_with_role(role_id).await?;
     let device_strs: Vec<String> = devices.iter().map(|u| u.to_string()).collect();
     Ok(Json(device_strs))
-}
-
-// Assign a role to a device
-async fn assign_role(
-    State(state): State<Arc<AppState>>,
-    Path(uuid): Path<Uuid>,
-    Json(req): Json<AssignRoleRequest>,
-) -> Result<StatusCode, HttpError> {
-    // Verify role exists
-    state.roles_store.get(req.role_id).await?;
-
-    // Verify device exists
-    state.director.get_device(&uuid).await?;
-
-    state
-        .roles_store
-        .assign_to_device(&uuid, req.role_id)
-        .await?;
-
-    Ok(StatusCode::OK)
-}
-
-// Get the role assigned to a device
-async fn get_device_role(
-    State(state): State<Arc<AppState>>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<Option<Role>>, HttpError> {
-    let role = state.roles_store.get_device_role(&uuid).await?;
-    Ok(Json(role))
 }

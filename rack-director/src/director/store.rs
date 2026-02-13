@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -17,6 +17,7 @@ pub struct Device {
     pub architecture: Architecture,
     pub lifecycle: Option<DeviceLifecycle>,
     pub role_id: Option<i64>,
+    pub platform_id: Option<i64>,
     pub attributes: DeviceAttributes,
     pub created_at: Option<String>,
     pub first_seen_at: Option<String>,
@@ -29,6 +30,7 @@ impl FromRow for Device {
         let architecture_str: String = row.get("architecture")?;
         let lifecycle_str: Option<String> = row.get("lifecycle")?;
         let role_id: Option<i64> = row.get("role_id")?;
+        let platform_id: Option<i64> = row.get("platform_id")?;
         let attributes_json: Option<String> = row.get("attributes")?;
 
         // Timestamps can be stored as either TEXT (ISO 8601) or INTEGER (Unix timestamp)
@@ -53,6 +55,7 @@ impl FromRow for Device {
             architecture,
             lifecycle,
             role_id,
+            platform_id,
             attributes,
             created_at,
             first_seen_at,
@@ -161,7 +164,7 @@ impl DirectorStore {
 
         let device = crate::database::query_one::<Device>(
             &conn,
-            "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
+            "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
             &[uuid],
         )?;
 
@@ -173,7 +176,7 @@ impl DirectorStore {
 
         let devices = crate::database::query_map_all::<Device>(
             &conn,
-            "SELECT uuid, architecture, lifecycle, role_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
+            "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
             &[],
         )?;
 
@@ -299,6 +302,7 @@ impl DirectorStore {
                 mac_address: mac.to_string(),
                 ip_address: Some(ip.to_string()),
                 network_id: None,
+                speed_mbps: None, // Will be updated by agent during hardware scan
                 disabled: false,
                 warning_label: None,
             });
@@ -482,6 +486,99 @@ impl DirectorStore {
         Ok(result)
     }
 
+    /// Assign a platform to a device
+    pub async fn assign_platform_to_device(
+        &self,
+        device_uuid: &Uuid,
+        platform_id: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "UPDATE devices SET platform_id = ?1 WHERE uuid = ?2",
+            params![platform_id, device_uuid],
+        )
+        .context("Failed to assign platform to device")?;
+
+        Ok(())
+    }
+
+    /// Get the platform ID assigned to a device
+    pub async fn get_device_platform_id(&self, device_uuid: &Uuid) -> Result<Option<i64>> {
+        let conn = self.conn.lock().await;
+
+        let result = conn
+            .query_row(
+                "SELECT platform_id FROM devices WHERE uuid = ?1",
+                params![device_uuid],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+
+        Ok(result.flatten())
+    }
+
+    /// List all devices with a specific platform
+    pub async fn list_devices_with_platform(&self, platform_id: i64) -> Result<Vec<Uuid>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt =
+            conn.prepare("SELECT uuid FROM devices WHERE platform_id = ?1 ORDER BY uuid")?;
+
+        let rows = stmt.query_map(params![platform_id], |row| row.get(0))?;
+
+        let mut uuids = Vec::new();
+        for row in rows {
+            uuids.push(row?);
+        }
+
+        Ok(uuids)
+    }
+
+    /// Assign a role to a device
+    pub async fn assign_role_to_device(&self, device_uuid: &Uuid, role_id: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+
+        conn.execute(
+            "UPDATE devices SET role_id = ?1 WHERE uuid = ?2",
+            params![role_id, device_uuid],
+        )
+        .context("Failed to assign role to device")?;
+
+        Ok(())
+    }
+
+    /// Get the role ID assigned to a device
+    pub async fn get_device_role_id(&self, device_uuid: &Uuid) -> Result<Option<i64>> {
+        let conn = self.conn.lock().await;
+
+        let result = conn
+            .query_row(
+                "SELECT role_id FROM devices WHERE uuid = ?1",
+                params![device_uuid],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+
+        Ok(result.flatten())
+    }
+
+    /// List all devices with a specific role
+    pub async fn list_devices_with_role(&self, role_id: i64) -> Result<Vec<Uuid>> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn.prepare("SELECT uuid FROM devices WHERE role_id = ?1 ORDER BY uuid")?;
+
+        let rows = stmt.query_map(params![role_id], |row| row.get(0))?;
+
+        let mut uuids = Vec::new();
+        for row in rows {
+            uuids.push(row?);
+        }
+
+        Ok(uuids)
+    }
+
     /// Find devices with the same MAC address on the same network
     /// Returns Vec<(device_uuid, interface_name)>
     ///
@@ -573,24 +670,33 @@ mod tests {
         let conn = crate::database::open(&db_path).unwrap();
         let db = Arc::new(Mutex::new(conn));
 
-        // Create test network
-        {
-            let conn = db.lock().await;
-            conn.execute(
-                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
-                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
-                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
-                [],
-            )
-            .unwrap();
-        }
+        // Note: No default network is created. Tests that need networks should create them explicitly.
 
         (DirectorStore::new(db), temp_dir)
+    }
+
+    /// Helper to create a test network and pool for tests that need DHCP functionality
+    async fn create_test_network(db: &Arc<Mutex<rusqlite::Connection>>) -> i64 {
+        let dhcp_store = crate::dhcp::DhcpStore::new(db.clone());
+        let network = dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        dhcp_store
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        network.id
     }
 
     #[test]
@@ -880,6 +986,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: None,
+            speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
         }];
@@ -914,6 +1021,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -922,6 +1030,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -930,6 +1039,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:03".to_string(),
                 ip_address: None,
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -964,6 +1074,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: None,
+            speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
         }];
@@ -976,6 +1087,7 @@ mod tests {
                 mac_address: "11:22:33:44:55:66".to_string(),
                 ip_address: Some("192.168.1.100".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -984,6 +1096,7 @@ mod tests {
                 mac_address: "11:22:33:44:55:67".to_string(),
                 ip_address: None,
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1041,6 +1154,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1049,6 +1163,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1094,6 +1209,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1102,6 +1218,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1173,6 +1290,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1181,6 +1299,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: None,
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1257,6 +1376,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:01".to_string(),
                 ip_address: Some("10.0.0.100".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1265,6 +1385,7 @@ mod tests {
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
                 ip_address: Some("10.0.0.101".to_string()),
                 network_id: None,
+                speed_mbps: None,
                 disabled: false,
                 warning_label: None,
             },
@@ -1420,6 +1541,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(1),
+            speed_mbps: None,
             disabled: true,
             warning_label: Some("Duplicate MAC on network main".to_string()),
         };
@@ -1492,6 +1614,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:01".to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(1),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1501,6 +1624,7 @@ mod tests {
             mac_address: "aa:bb:cc:dd:ee:02".to_string(),
             ip_address: Some("10.0.0.101".to_string()),
             network_id: Some(1),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1547,6 +1671,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(network_id),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1556,6 +1681,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.101".to_string()),
             network_id: Some(network_id),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1613,6 +1739,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(network_id),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1622,6 +1749,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("192.168.1.100".to_string()),
             network_id: Some(2),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1680,6 +1808,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(network_id),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1689,6 +1818,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.101".to_string()),
             network_id: Some(network_id),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1698,6 +1828,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.102".to_string()),
             network_id: Some(network_id),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1755,6 +1886,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: None,
             network_id: None,
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1764,6 +1896,7 @@ mod tests {
             mac_address: mac.to_string(),
             ip_address: Some("10.0.0.100".to_string()),
             network_id: Some(network_id),
+            speed_mbps: None,
             disabled: false,
             warning_label: None,
         };
@@ -1788,8 +1921,8 @@ mod tests {
     #[tokio::test]
     async fn test_delete_pending_device() {
         let (store, _temp) = create_test_store().await;
+        let network_id = create_test_network(&store.conn).await;
         let mac = "aa:bb:cc:dd:ee:99";
-        let network_id = 1;
 
         // Create a pending device
         let pending_id = store.create_pending_device(mac, network_id).await.unwrap();

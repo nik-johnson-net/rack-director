@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import DevicesTableEnhanced from "@/components/devices/devices-table-enhanced";
-import type { Device, DhcpLease, RoleWithOs, PendingDevice } from "@/lib/client";
+import type { Device, DhcpLease, RoleWithOs, PendingDevice, Platform } from "@/lib/client";
 import { useLoaderData, useRevalidator } from "react-router";
 import { getRoles, deletePendingDevice } from "@/lib/client";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,10 +10,11 @@ import { Clock, X } from "lucide-react";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 
 function DevicesEnhanced() {
-  const { devices: initialDevices, dhcpLeases: initialDhcpLeases, pendingDevices: initialPendingDevices } = useLoaderData() as {
+  const { devices: initialDevices, dhcpLeases: initialDhcpLeases, pendingDevices: initialPendingDevices, platforms: initialPlatforms } = useLoaderData() as {
     devices: Device[];
     dhcpLeases: DhcpLease[];
     pendingDevices: PendingDevice[];
+    platforms: Platform[];
   };
 
   const revalidator = useRevalidator();
@@ -51,6 +52,11 @@ function DevicesEnhanced() {
       role.id!,
       { name: role.name, os_name: role.os_name, os_version: role.os_version }
     ])
+  );
+
+  // Create platforms map for quick lookup
+  const platformsMap = new Map(
+    initialPlatforms.map(p => [p.id!, { name: p.name }])
   );
 
   if (loading) {
@@ -107,6 +113,7 @@ function DevicesEnhanced() {
         data={initialDevices}
         dhcpLeases={dhcpLeases}
         rolesMap={rolesMap}
+        platformsMap={platformsMap}
       />
 
       <DeleteConfirmationDialog

@@ -90,32 +90,31 @@ pub async fn register_and_start_discovery(
     }
 
     // Create static DHCP reservation from active lease
-    if let Some(mac) = mac_address {
-        if let Ok(Some(lease)) = state.dhcp_store.get_lease_by_mac(mac).await {
-            if let Some(network_id) = lease.network_id {
-                let hostname = state
-                    .director
-                    .get_device(device_uuid)
-                    .await
-                    .ok()
-                    .and_then(|d| d.attributes.hostname);
+    if let Some(mac) = mac_address
+        && let Ok(Some(lease)) = state.dhcp_store.get_lease_by_mac(mac).await
+        && let Some(network_id) = lease.network_id
+    {
+        let hostname = state
+            .director
+            .get_device(device_uuid)
+            .await
+            .ok()
+            .and_then(|d| d.attributes.hostname);
 
-                if let Err(e) = state
-                    .dhcp_store
-                    .create_or_update_static_reservation(
-                        network_id,
-                        mac,
-                        &lease.ip_address,
-                        hostname.as_deref(),
-                    )
-                    .await
-                {
-                    warn!(
-                        "Couldn't create static DHCP reservation for device {}: {}",
-                        device_uuid, e
-                    );
-                }
-            }
+        if let Err(e) = state
+            .dhcp_store
+            .create_or_update_static_reservation(
+                network_id,
+                mac,
+                &lease.ip_address,
+                hostname.as_deref(),
+            )
+            .await
+        {
+            warn!(
+                "Couldn't create static DHCP reservation for device {}: {}",
+                device_uuid, e
+            );
         }
     }
 
@@ -157,22 +156,7 @@ mod tests {
         let db = database::open(&db_path).unwrap();
         let db_tokio = Arc::new(Mutex::new(db));
 
-        // Create test network
-        {
-            let conn = db_tokio.lock().await;
-            conn.execute(
-                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
-                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
-                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
-                [],
-            )
-            .unwrap();
-        }
+        // Note: No default network is created. Tests that need networks should create them explicitly.
 
         let _storage_path = temp_dir.path().join("images");
         let image_store = ImageStore::memory("http://localhost:8080");
@@ -192,12 +176,38 @@ mod tests {
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio),
+            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
             agent_images_path,
             boot_file_provider,
         });
 
         (state, temp_dir)
+    }
+
+    /// Helper to create a test network for tests that need DHCP functionality
+    async fn create_test_network(state: &AppState) -> i64 {
+        let network = state
+            .dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        state
+            .dhcp_store
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        network.id
     }
 
     #[tokio::test]
@@ -224,6 +234,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_mac_address_from_dhcp() {
         let (state, _temp_dir) = create_test_state().await;
+        let network_id = create_test_network(&state).await;
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
 
@@ -236,7 +247,7 @@ mod tests {
                 None,
                 crate::dhcp::LeaseState::Active,
                 3600,
-                1,
+                network_id,
             )
             .await
             .unwrap();
@@ -275,11 +286,16 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_start_discovery_with_pending_device() {
         let (state, _temp_dir) = create_test_state().await;
+        let network_id = create_test_network(&state).await;
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff".to_string();
 
         // Create pending device
-        state.director.create_pending_device(&mac, 1).await.unwrap();
+        state
+            .director
+            .create_pending_device(&mac, network_id)
+            .await
+            .unwrap();
 
         // Verify pending device exists
         let pending = state
@@ -306,6 +322,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_start_discovery_creates_static_reservation() {
         let (state, _temp_dir) = create_test_state().await;
+        let network_id = create_test_network(&state).await;
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:11".to_string();
 
@@ -320,7 +337,7 @@ mod tests {
                 None, // Device doesn't exist yet
                 crate::dhcp::LeaseState::Active,
                 3600,
-                1,
+                network_id,
             )
             .await
             .unwrap();
@@ -331,14 +348,14 @@ mod tests {
         // Verify static reservation was created
         let reservation = state
             .dhcp_store
-            .get_static_reservation(1, &mac)
+            .get_static_reservation(network_id, &mac)
             .await
             .unwrap();
         assert!(reservation.is_some());
         let r = reservation.unwrap();
         assert_eq!(r.mac_address, mac);
         assert_eq!(r.ip_address, "10.0.0.150");
-        assert_eq!(r.network_id, 1);
+        assert_eq!(r.network_id, network_id);
 
         // Verify hostname is included
         let device = state.director.get_device(&uuid).await.unwrap();

@@ -443,22 +443,7 @@ mod tests {
         let db = database::open(&db_path).unwrap();
         let db_tokio = Arc::new(tokio::sync::Mutex::new(db));
 
-        // Create test network
-        {
-            let conn = db_tokio.lock().await;
-            conn.execute(
-                "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers, lease_duration)
-                 VALUES (1, 'Test Network', '10.0.0.0/24', '10.0.0.1', '[\"8.8.8.8\"]', 86400)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
-                 VALUES (1, 'Test Pool', '10.0.0.100', '10.0.0.200')",
-                [],
-            )
-            .unwrap();
-        }
+        // Note: No default network is created. Tests that need networks should create them explicitly.
 
         // Create image store for testing
         let _storage_path = temp_dir.path().join("images");
@@ -492,11 +477,37 @@ mod tests {
             dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
             image_store: Arc::new(image_store),
             os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio),
+            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
             agent_images_path,
             boot_file_provider,
         });
         (state, temp_dir)
+    }
+
+    /// Helper to create a test network for tests that need DHCP functionality
+    async fn create_test_network(state: &AppState) -> i64 {
+        let network = state
+            .dhcp_store
+            .create_network(
+                "Test Network",
+                "10.0.0.0/24",
+                "10.0.0.1",
+                &["8.8.8.8".to_string()],
+                86400,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        state
+            .dhcp_store
+            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        network.id
     }
 
     #[tokio::test]
@@ -611,13 +622,14 @@ mod tests {
     #[tokio::test]
     async fn test_ipxe_handler_with_mac_parameter() {
         let (state, _temp_dir) = setup_test_state().await;
+        let network_id = create_test_network(&state).await;
         let test_uuid = test_uuid(0x10);
         let test_mac = "aa:bb:cc:dd:ee:ff";
 
         // Create a pending device for this MAC
         state
             .director
-            .create_pending_device(test_mac, 1)
+            .create_pending_device(test_mac, network_id)
             .await
             .unwrap();
 

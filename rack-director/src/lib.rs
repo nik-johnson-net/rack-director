@@ -6,6 +6,7 @@ mod http;
 mod lifecycle;
 mod operating_systems;
 mod plans;
+mod platforms;
 mod roles;
 mod storage;
 mod templates;
@@ -148,6 +149,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Initialize individual stores
     let os_store = operating_systems::OperatingSystemsStore::new(db.clone());
     let roles_store = roles::RolesStore::new(db.clone());
+    let platforms_store = platforms::PlatformsStore::new(db.clone());
 
     // Initialize storage
     let storage_config = build_storage_config(&args)?;
@@ -207,6 +209,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         image_store.into(),
         os_store,
         roles_store,
+        platforms_store,
         args.http_address,
         args.agent_images_path,
         boot_file_provider,

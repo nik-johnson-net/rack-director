@@ -102,11 +102,12 @@ async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<Boot
     let architecture = ctx.device.architecture;
 
     // Get device role
-    let role = ctx
-        .roles_store
-        .get_device_role(&ctx.device.uuid)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("role not found for {}", ctx.device.uuid))?;
+    let role_id = ctx
+        .device
+        .role_id
+        .ok_or_else(|| anyhow::anyhow!("role not assigned to device {}", ctx.device.uuid))?;
+
+    let role = ctx.roles_store.get(role_id).await?;
 
     // Get OS architecture configuration
     let os_arch = ctx
@@ -271,6 +272,7 @@ mod tests {
             architecture: Architecture::X86_64,
             lifecycle: None,
             role_id: Some(role_id),
+            platform_id: None,
             attributes: common::device_attributes::DeviceAttributes::default(),
             created_at: None,
             first_seen_at: None,
@@ -314,6 +316,7 @@ mod tests {
             architecture: Architecture::X86_64,
             lifecycle: None,
             role_id: None,
+            platform_id: None,
             attributes: common::device_attributes::DeviceAttributes::default(),
             created_at: None,
             first_seen_at: None,
@@ -333,7 +336,7 @@ mod tests {
         assert!(result.is_err(), "Expected error when device has no role");
         let error_msg = result.unwrap_err().to_string();
         assert!(
-            error_msg.contains("role not found"),
+            error_msg.contains("role not assigned"),
             "Error message should mention missing role, got: {}",
             error_msg
         );
@@ -394,6 +397,7 @@ mod tests {
             architecture: Architecture::X86_64,
             lifecycle: None,
             role_id: Some(role_id),
+            platform_id: None,
             attributes: common::device_attributes::DeviceAttributes::default(),
             created_at: None,
             first_seen_at: None,
@@ -467,6 +471,7 @@ mod tests {
             architecture: Architecture::X86_64,
             lifecycle: None,
             role_id: None,
+            platform_id: None,
             attributes: common::device_attributes::DeviceAttributes::default(),
             created_at: None,
             first_seen_at: None,
@@ -495,6 +500,7 @@ mod tests {
             architecture: Architecture::X86_64,
             lifecycle: None,
             role_id: None,
+            platform_id: None,
             attributes: common::device_attributes::DeviceAttributes::default(),
             created_at: None,
             first_seen_at: None,
