@@ -465,6 +465,10 @@ impl DirectorStore {
     /// Cascades to plans and transitions, sets leases device_uuid to NULL
     pub async fn delete_device(&self, uuid: &Uuid) -> Result<()> {
         let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM pending_devices WHERE device_uuid = ?1",
+            params![uuid],
+        )?;
         conn.execute("DELETE FROM devices WHERE uuid = ?1", params![uuid])?;
         Ok(())
     }
@@ -1949,5 +1953,38 @@ mod tests {
         // (SQL DELETE on non-existent row succeeds with 0 rows affected)
         let result = store.delete_pending_device(999).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_device_with_pending() {
+        let (store, _temp) = create_test_store().await;
+        let network_id = create_test_network(&store.conn).await;
+        let uuid = test_uuid(0x54);
+        let mac = "aa:bb:cc:dd:ee:99";
+
+        // Create a pending device
+        store.create_pending_device(mac, network_id).await.unwrap();
+
+        // Register a device for the pending
+        store
+            .register_device(&uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        store.complete_pending_device(mac, &uuid).await.unwrap();
+
+        // Delete the device
+        store.delete_device(&uuid).await.unwrap();
+
+        // Ensure pending entry is removed
+        let exists: Result<bool, rusqlite::Error> = store.conn.lock().await.query_one(
+            "SELECT 1 FROM pending_devices WHERE mac_address = ?1",
+            [mac],
+            |r| r.get(0),
+        );
+        assert!(
+            matches!(exists, Err(rusqlite::Error::QueryReturnedNoRows)),
+            "Deleting a Device must delete pending records. {:?}",
+            exists
+        );
     }
 }

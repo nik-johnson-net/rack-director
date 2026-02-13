@@ -1,4 +1,5 @@
 use anyhow::Result;
+use common::device_attributes::DeviceAttributes;
 use serde::{Deserialize, Serialize};
 
 pub struct RackDirector {
@@ -9,7 +10,7 @@ pub struct RackDirector {
 #[derive(Serialize)]
 struct UpdateAttributesPayload {
     uuid: String,
-    attributes: serde_json::Map<String, serde_json::Value>,
+    attributes: DeviceAttributes,
 }
 
 #[derive(Serialize)]
@@ -49,11 +50,7 @@ impl RackDirector {
         }
     }
 
-    pub async fn update_attributes(
-        &self,
-        uuid: &str,
-        attributes: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<()> {
+    pub async fn update_attributes(&self, uuid: &str, attributes: DeviceAttributes) -> Result<()> {
         let payload = UpdateAttributesPayload {
             uuid: uuid.to_string(),
             attributes,
@@ -61,7 +58,7 @@ impl RackDirector {
 
         let response = self
             .client
-            .post(format!("{}/update_attributes", self.url))
+            .post(format!("{}/cnc/update_attributes", self.url))
             .json(&payload)
             .send()
             .await?;
@@ -80,7 +77,7 @@ impl RackDirector {
 
         let response = self
             .client
-            .post(format!("{}/action_success", self.url))
+            .post(format!("{}/cnc/action_success", self.url))
             .json(&payload)
             .send()
             .await?;
@@ -100,7 +97,7 @@ impl RackDirector {
 
         let response = self
             .client
-            .post(format!("{}/action_failed", self.url))
+            .post(format!("{}/cnc/action_failed", self.url))
             .json(&payload)
             .send()
             .await?;
@@ -121,7 +118,7 @@ impl RackDirector {
     pub async fn get_bmc_config(&self, uuid: &str) -> Result<Option<BmcConfig>> {
         let response = self
             .client
-            .get(format!("{}/devices/{}/bmc_config", self.url, uuid))
+            .get(format!("{}/cnc/devices/{}/bmc_config", self.url, uuid))
             .send()
             .await?;
 
@@ -150,7 +147,7 @@ mod tests {
     async fn test_get_bmc_config_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/devices/test-uuid/bmc_config")
+            .mock("GET", "/cnc/devices/test-uuid/bmc_config")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -188,7 +185,7 @@ mod tests {
     async fn test_get_bmc_config_not_found() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/devices/test-uuid/bmc_config")
+            .mock("GET", "/cnc/devices/test-uuid/bmc_config")
             .with_status(404)
             .create_async()
             .await;
@@ -206,7 +203,7 @@ mod tests {
     async fn test_get_bmc_config_server_error() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/devices/test-uuid/bmc_config")
+            .mock("GET", "/cnc/devices/test-uuid/bmc_config")
             .with_status(500)
             .create_async()
             .await;
@@ -225,7 +222,7 @@ mod tests {
     async fn test_get_bmc_config_unauthorized() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/devices/test-uuid/bmc_config")
+            .mock("GET", "/cnc/devices/test-uuid/bmc_config")
             .with_status(401)
             .create_async()
             .await;
@@ -244,7 +241,7 @@ mod tests {
     async fn test_get_bmc_config_dhcp() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/devices/test-uuid/bmc_config")
+            .mock("GET", "/cnc/devices/test-uuid/bmc_config")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -279,7 +276,7 @@ mod tests {
     async fn test_get_bmc_config_default_ip_source() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/devices/test-uuid/bmc_config")
+            .mock("GET", "/cnc/devices/test-uuid/bmc_config")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -311,7 +308,7 @@ mod tests {
     async fn test_get_bmc_config_malformed_json() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/devices/test-uuid/bmc_config")
+            .mock("GET", "/cnc/devices/test-uuid/bmc_config")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"invalid": json}"#)

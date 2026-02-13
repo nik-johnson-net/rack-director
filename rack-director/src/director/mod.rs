@@ -88,29 +88,32 @@ impl Director {
         Ok(exists)
     }
 
+    /// Get the boot target for this device.
     pub async fn next_boot_target(&self, uuid: &Uuid) -> anyhow::Result<BootTarget> {
-        self.store
-            .update_device_last_seen(uuid)
-            .await
-            .expect("update device last seen should not fail");
+        if self.device_exists(uuid).await? {
+            self.store
+                .update_device_last_seen(uuid)
+                .await
+                .expect("update device last seen should not fail");
 
-        // Check if there's an active plan for this device
-        if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await?
-            && let Some(current_action) = plan.get_current_action()
-        {
-            // Get device for ActionContext
-            let device = self.get_device(uuid).await?;
+            // Check if there's an active plan for this device
+            if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await?
+                && let Some(current_action) = plan.get_current_action()
+            {
+                // Get device for ActionContext
+                let device = self.get_device(uuid).await?;
 
-            // Create ActionContext for the action
-            let ctx = crate::plans::actions::ActionContext {
-                device: &device,
-                os_store: &self.os_store,
-                roles_store: &self.roles_store,
-                director: None, // Director not needed for boot target resolution
-            };
+                // Create ActionContext for the action
+                let ctx = crate::plans::actions::ActionContext {
+                    device: &device,
+                    os_store: &self.os_store,
+                    roles_store: &self.roles_store,
+                    director: None, // Director not needed for boot target resolution
+                };
 
-            // Return appropriate boot target based on the current action
-            return current_action.to_boot_target(&ctx).await;
+                // Return appropriate boot target based on the current action
+                return current_action.to_boot_target(&ctx).await;
+            }
         }
 
         // Default to local disk if no active plan

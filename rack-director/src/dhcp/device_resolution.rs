@@ -9,7 +9,6 @@ pub struct DeviceContext {
     pub device_uuid: Option<Uuid>,
     pub is_disabled: bool,
     pub disable_reason: Option<String>,
-    pub is_pending: bool,
 }
 
 /// Trait for resolving device information from a MAC address and optional GUID.
@@ -79,18 +78,10 @@ impl DeviceResolver for DirectorDeviceResolver {
             (false, None)
         };
 
-        // Check if pending device
-        let is_pending = self
-            .director
-            .find_pending_device_by_mac(mac)
-            .await?
-            .is_some();
-
         Ok(DeviceContext {
             device_uuid,
             is_disabled,
             disable_reason,
-            is_pending,
         })
     }
 
@@ -123,7 +114,6 @@ mod tests {
         assert!(ctx.device_uuid.is_none());
         assert!(!ctx.is_disabled);
         assert!(ctx.disable_reason.is_none());
-        assert!(!ctx.is_pending);
     }
 
     #[tokio::test]
@@ -137,7 +127,6 @@ mod tests {
     async fn test_resolve_returns_not_pending_for_unknown() {
         let resolver = create_test_resolver().await;
         let ctx = resolver.resolve("11:22:33:44:55:66", None).await.unwrap();
-        assert!(!ctx.is_pending);
     }
 
     #[tokio::test]

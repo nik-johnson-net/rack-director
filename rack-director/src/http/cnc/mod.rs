@@ -17,13 +17,13 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::Host;
-use log::warn;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::{director::NetworkInterface, http::AppState};
-use common::device_attributes::BmcConfig;
+use common::device_attributes::{BmcConfig, DeviceAttributes};
 
 use crate::http::error::Error;
 
@@ -66,10 +66,45 @@ async fn ipxe_handler(
     let mac_address =
         device_registration::resolve_mac_address(&state, params.mac.as_ref(), addr).await;
 
-    // Register device if it doesn't exist and automatically start discovery
-    if !state.director.device_exists(&uuid).await? {
-        device_registration::register_and_start_discovery(&state, &uuid, mac_address.as_ref())
-            .await;
+    // Discovery Support
+    // For devices that don't exist, determine if the device should be created.
+    // TODO: Please make this better.
+    if !state.director.device_exists(&uuid).await?
+        && let Some(mac) = &mac_address
+    {
+        if state
+            .director
+            .find_pending_device_by_mac(mac)
+            .await?
+            .is_some()
+        {
+            info!("Found pending device {}. Starting discovery.", uuid);
+            device_registration::register_and_start_discovery(&state, &uuid, Some(mac)).await;
+        } else {
+            // Device is not pending. Check to see if the network has autodiscovery enabled.
+            let dhcp_lease = state.dhcp_store.get_lease_by_mac(mac).await?;
+            if let Some(lease) = dhcp_lease {
+                if let Some(netid) = lease.network_id {
+                    let dhcp_network = state.dhcp_store.get_network(netid).await?;
+
+                    // Register device if it doesn't exist and automatically start discovery
+                    if dhcp_network.enable_autodiscovery {
+                        info!(
+                            "Found new device {} on network with autodiscovery enabled. Adopting and starting discovery.",
+                            uuid
+                        );
+                        device_registration::register_and_start_discovery(&state, &uuid, Some(mac))
+                            .await;
+                    }
+                } else {
+                    warn!("DHCP Lease does not have a network ID")
+                }
+            } else {
+                warn!("MAC {:?} does not have a DHCP lease", mac)
+            }
+        }
+    } else {
+        warn!("Missing MAC address")
     }
 
     // Handle boot event - advance plan if current action supports it
@@ -190,7 +225,7 @@ async fn agent_images_handler(
 #[derive(Deserialize, Serialize)]
 struct UpdateAttributesQuery {
     uuid: Uuid,
-    attributes: serde_json::Map<String, serde_json::Value>,
+    attributes: DeviceAttributes,
 }
 
 #[axum::debug_handler]
@@ -199,34 +234,43 @@ async fn update_attributes(
     extract::Json(payload): extract::Json<UpdateAttributesQuery>,
 ) -> Result<NoContent, StatusCode> {
     let uuid = payload.uuid;
-    let attributes = payload.attributes;
+    let incoming_attributes = payload.attributes;
 
-    // First, store the attributes as provided by the agent
+    // Serialize incoming DeviceAttributes to JSON map for storage
+    // This ensures type safety at the API boundary
+    let attributes_json = match serde_json::to_value(&incoming_attributes) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => {
+            warn!("Failed to serialize device attributes for {}", uuid);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Store the attributes as provided by the agent
     if let Err(e) = state
         .director
-        .update_attributes(&uuid, attributes.clone())
+        .update_attributes(&uuid, attributes_json)
         .await
     {
         warn!("Couldn't update attributes for {uuid}: {e}");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    // Then, if network_interfaces were provided, backfill IP addresses from DHCP leases
-    if let Some(network_interfaces_value) = attributes.get("network_interfaces")
-        && let Some(interfaces_array) = network_interfaces_value.as_array()
-    {
-        // Parse interfaces from JSON
-        let interfaces: Vec<NetworkInterface> = interfaces_array
+    // If network_interfaces were provided, backfill IP addresses from DHCP leases
+    if !incoming_attributes.network_interfaces.is_empty() {
+        // Parse interfaces from the typed struct
+        let interfaces: Vec<NetworkInterface> = incoming_attributes
+            .network_interfaces
             .iter()
-            .filter_map(
-                |value| match serde_json::from_value::<NetworkInterface>(value.clone()) {
-                    Ok(nic) => Some(nic),
+            .filter_map(|nic| {
+                match serde_json::from_value::<NetworkInterface>(serde_json::to_value(nic).ok()?) {
+                    Ok(parsed) => Some(parsed),
                     Err(e) => {
-                        warn!("Failed to parse network interface from JSON: {}", e);
+                        warn!("Failed to convert network interface: {}", e);
                         None
                     }
-                },
-            )
+                }
+            })
             .collect();
 
         // Enrich interfaces with DHCP lease information
@@ -426,7 +470,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use std::net::SocketAddr;
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use tempfile::tempdir;
     use tower::util::ServiceExt;
@@ -437,7 +481,20 @@ mod tests {
             .expect("test UUID should be valid")
     }
 
+    fn test_mac(suffix: u16) -> String {
+        format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            0x01, 0x02, 0x03, 0x04, 0x05, suffix
+        )
+    }
+
     async fn setup_test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        // Enable test logs
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Debug)
+            .try_init();
+
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = database::open(&db_path).unwrap();
@@ -486,7 +543,7 @@ mod tests {
     }
 
     /// Helper to create a test network for tests that need DHCP functionality
-    async fn create_test_network(state: &AppState) -> i64 {
+    async fn create_test_network(state: &AppState, autodiscovery: bool) -> i64 {
         let network = state
             .dhcp_store
             .create_network(
@@ -496,7 +553,7 @@ mod tests {
                 &["8.8.8.8".to_string()],
                 86400,
                 None,
-                false,
+                autodiscovery,
             )
             .await
             .unwrap();
@@ -511,7 +568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ipxe_new_device() {
+    async fn test_ipxe_new_device_unknown_network() {
         let (state, _temp_dir) = setup_test_state().await;
         let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
@@ -530,18 +587,10 @@ mod tests {
             .await
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body_str.contains("#!ipxe"));
-        // New devices now automatically start discovery, so they boot the agent image
-        assert!(body_str.contains("kernel"));
+        assert!(body_str.contains("#!ipxe"), "Did not return an ipxe script");
         assert!(
-            body_str.contains("/cnc/agent-images/vmlinuz"),
-            "iPXE script is missing vmlinuz:\n{}",
-            body_str
-        );
-        assert!(
-            body_str.contains("/cnc/agent-images/initramfs.img"),
-            "iPXE script is missing initramfs.img:\n{}",
-            body_str
+            body_str.contains("exit"),
+            "Devices on an unknown network must exit for next boot target"
         );
     }
 
@@ -620,11 +669,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ipxe_handler_with_mac_parameter() {
+    async fn test_ipxe_handler_pending() {
         let (state, _temp_dir) = setup_test_state().await;
-        let network_id = create_test_network(&state).await;
+        let network_id = create_test_network(&state, false).await;
         let test_uuid = test_uuid(0x10);
-        let test_mac = "aa:bb:cc:dd:ee:ff";
+        let test_mac = &test_mac(0x00);
 
         // Create a pending device for this MAC
         state
@@ -770,7 +819,21 @@ mod tests {
     #[tokio::test]
     async fn test_automatic_discovery_on_new_device() {
         let (state, _temp_dir) = setup_test_state().await;
+        let network_id = create_test_network(&state, true).await;
         let test_uuid = test_uuid(0x99);
+        let test_mac = test_mac(0x00);
+        state
+            .dhcp_store
+            .create_or_update_lease_with_network(
+                &test_mac,
+                &Ipv4Addr::UNSPECIFIED,
+                None,
+                crate::dhcp::LeaseState::Active,
+                300,
+                network_id,
+            )
+            .await
+            .unwrap();
 
         // Verify device doesn't exist yet
         assert!(!state.director.device_exists(&test_uuid).await.unwrap());
@@ -782,7 +845,7 @@ mod tests {
         // First boot - device registers and discovery starts
         let request = Request::builder()
             .header("Host", "localhost")
-            .uri(format!("/cnc/ipxe?uuid={}", test_uuid))
+            .uri(format!("/cnc/ipxe?uuid={}&mac={}", test_uuid, test_mac))
             .body(Body::empty())
             .unwrap();
 
@@ -860,17 +923,10 @@ mod tests {
         // Simulate agent updating attributes
         let update_payload = UpdateAttributesQuery {
             uuid: test_uuid,
-            attributes: {
-                let mut attrs = serde_json::Map::new();
-                attrs.insert(
-                    "manufacturer".to_string(),
-                    serde_json::Value::String("Dell Inc.".to_string()),
-                );
-                attrs.insert(
-                    "product_name".to_string(),
-                    serde_json::Value::String("PowerEdge R640".to_string()),
-                );
-                attrs
+            attributes: DeviceAttributes {
+                manufacturer: Some("Dell Inc.".to_string()),
+                product_name: Some("PowerEdge R640".to_string()),
+                ..Default::default()
             },
         };
 

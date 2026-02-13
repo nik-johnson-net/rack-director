@@ -9,7 +9,6 @@ use log::{debug, info, trace, warn};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use uuid::Uuid;
 
 use super::allocator::IpAllocator;
 use super::boot_config::BootConfigProvider;
@@ -51,28 +50,6 @@ fn determine_vendor_class_identifier(client_arch: Option<Architecture>) -> &'sta
         // All other architectures (traditional PXE boot)
         _ => b"PXEServer",
     }
-}
-
-/// Determines whether boot options should be provided for a device.
-///
-/// # Decision Logic
-/// - If network autodiscover is enabled: Always provide boot options (permissive mode)
-/// - If network autodiscover is disabled: Only provide boot options for known devices (strict mode)
-/// - Pending devices (in pending_devices table) are also allowed to boot
-///
-/// # Arguments
-/// * `network_autodiscover` - Whether autodiscovery is enabled for this network
-/// * `device_uuid` - The device UUID if the device is known (exists in devices table)
-/// * `is_pending_device` - Whether the device exists in the pending_devices table
-///
-/// # Returns
-/// `true` if boot options should be provided, `false` otherwise
-fn should_provide_boot_options(
-    network_autodiscover: bool,
-    device_uuid: Option<&Uuid>,
-    is_pending_device: bool,
-) -> bool {
-    network_autodiscover || device_uuid.is_some() || is_pending_device
 }
 
 #[derive(Clone)]
@@ -444,7 +421,7 @@ impl DhcpHandler {
         ip: Ipv4Addr,
         network: &DhcpNetwork,
         req_ctx: &RequestContext,
-        dev_ctx: &DeviceContext,
+        _dev_ctx: &DeviceContext,
     ) -> Result<Message> {
         let mut msg = message_builder::create_base_reply(req, &self.server_identifier);
         msg.set_yiaddr(ip);
@@ -463,7 +440,8 @@ impl DhcpHandler {
 
         message_builder::add_network_options(&mut msg, network)?;
 
-        self.detect_and_add_pxeboot_options(&mut msg, req_ctx, dev_ctx, network)
+        self.boot_config
+            .populate_boot_options(&mut msg, req_ctx)
             .await?;
 
         Ok(msg)
@@ -482,27 +460,6 @@ impl DhcpHandler {
             .insert(v4::DhcpOption::MessageType(MessageType::Ack));
 
         Ok(msg)
-    }
-
-    async fn detect_and_add_pxeboot_options(
-        &self,
-        msg: &mut Message,
-        req_ctx: &RequestContext,
-        dev_ctx: &DeviceContext,
-        network: &DhcpNetwork,
-    ) -> Result<()> {
-        if !should_provide_boot_options(
-            network.enable_autodiscovery,
-            dev_ctx.device_uuid.as_ref(),
-            dev_ctx.is_pending,
-        ) {
-            info!("Skipping boot options for unknown device (autodiscover disabled)");
-            return Ok(());
-        }
-
-        self.boot_config.populate_boot_options(msg, req_ctx).await?;
-
-        Ok(())
     }
 
     fn build_nak(&self, req: &Message) -> Result<Message> {
@@ -539,7 +496,6 @@ mod tests {
             device_uuid: None,
             is_disabled: false,
             disable_reason: None,
-            is_pending: false,
         };
 
         // Build an OFFER response
@@ -695,7 +651,6 @@ mod tests {
             device_uuid: None,
             is_disabled: false,
             disable_reason: None,
-            is_pending: false,
         };
 
         let offer = handler
@@ -795,40 +750,6 @@ mod tests {
         handler
     }
 
-    // Authorization tests
-    #[test]
-    fn test_should_provide_boot_options_autodiscover_enabled() {
-        assert!(
-            should_provide_boot_options(true, None, false),
-            "Should provide boot options when autodiscover is enabled"
-        );
-    }
-
-    #[test]
-    fn test_should_provide_boot_options_autodiscover_disabled_unknown_device() {
-        assert!(
-            !should_provide_boot_options(false, None, false),
-            "Should NOT provide boot options for unknown device when autodiscover is disabled"
-        );
-    }
-
-    #[test]
-    fn test_should_provide_boot_options_known_device() {
-        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
-        assert!(
-            should_provide_boot_options(false, Some(&uuid), false),
-            "Should provide boot options for known device even when autodiscover is disabled"
-        );
-    }
-
-    #[test]
-    fn test_should_provide_boot_options_pending_device() {
-        assert!(
-            should_provide_boot_options(false, None, true),
-            "Should provide boot options for pending device even when autodiscover is disabled"
-        );
-    }
-
     #[tokio::test]
     async fn test_option_60_default_pxe() {
         let handler = create_test_handler().await;
@@ -860,7 +781,6 @@ mod tests {
             device_uuid: None,
             is_disabled: false,
             disable_reason: None,
-            is_pending: false,
         };
         let offer = handler
             .build_offer(
@@ -990,7 +910,6 @@ mod tests {
             device_uuid: None,
             is_disabled: false,
             disable_reason: None,
-            is_pending: false,
         };
 
         // Build an OFFER response
@@ -1051,7 +970,6 @@ mod tests {
             device_uuid: None,
             is_disabled: false,
             disable_reason: None,
-            is_pending: false,
         };
 
         // Build an OFFER response
@@ -1112,7 +1030,6 @@ mod tests {
             device_uuid: None,
             is_disabled: false,
             disable_reason: None,
-            is_pending: false,
         };
 
         // Build an ACK response

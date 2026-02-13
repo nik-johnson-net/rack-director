@@ -1,9 +1,8 @@
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use common::device_attributes::DiskType;
+use common::device_attributes::{CpuInfo, DeviceAttributes, DiskType, MemoryInfo};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::client::RackDirector;
 
@@ -64,26 +63,8 @@ struct HardwareInfo {
     serial_number: Option<String>,
     bios_version: Option<String>,
     bios_vendor: Option<String>,
-    processors: Vec<ProcessorInfo>,
-    memory_devices: Vec<MemoryInfo>,
-}
-
-#[derive(Debug)]
-struct ProcessorInfo {
-    designation: Option<String>,
-    manufacturer: Option<String>,
-    version: Option<String>,
-    max_speed: Option<u16>,
-    core_count: Option<u16>,
-    thread_count: Option<u16>,
-}
-
-#[derive(Debug)]
-struct MemoryInfo {
-    size: Option<u16>,
-    speed: Option<u16>,
-    manufacturer: Option<String>,
-    part_number: Option<String>,
+    cpus: Vec<CpuInfo>,
+    memory: Vec<MemoryInfo>,
 }
 
 /// Read interface speed from /sys/class/net/{iface}/speed
@@ -897,67 +878,17 @@ async fn perform_scan_and_upload(
     hardware_info: &HardwareInfo,
     scan_args: &DeviceScanArgs,
 ) -> Result<()> {
-    // Build attributes JSON
-    let mut attributes = serde_json::Map::new();
-
-    if let Some(manufacturer) = &hardware_info.manufacturer {
-        attributes.insert("manufacturer".to_string(), json!(manufacturer));
-    }
-    if let Some(product_name) = &hardware_info.product_name {
-        attributes.insert("product_name".to_string(), json!(product_name));
-    }
-    if let Some(serial) = &hardware_info.serial_number {
-        attributes.insert("serial_number".to_string(), json!(serial));
-    }
-    if let Some(bios_version) = &hardware_info.bios_version {
-        attributes.insert("bios_version".to_string(), json!(bios_version));
-    }
-    if let Some(bios_vendor) = &hardware_info.bios_vendor {
-        attributes.insert("bios_vendor".to_string(), json!(bios_vendor));
-    }
-
-    // Add processor information
-    if !hardware_info.processors.is_empty() {
-        let processors: Vec<_> = hardware_info
-            .processors
-            .iter()
-            .map(|p| {
-                json!({
-                    "designation": p.designation,
-                    "manufacturer": p.manufacturer,
-                    "version": p.version,
-                    "max_speed_mhz": p.max_speed,
-                    "core_count": p.core_count,
-                    "thread_count": p.thread_count,
-                })
-            })
-            .collect();
-        attributes.insert("processors".to_string(), json!(processors));
-    }
-
-    // Add memory information
-    if !hardware_info.memory_devices.is_empty() {
-        let memory_devices: Vec<_> = hardware_info
-            .memory_devices
-            .iter()
-            .map(|m| {
-                json!({
-                    "size_mb": m.size,
-                    "speed_mhz": m.speed,
-                    "manufacturer": m.manufacturer,
-                    "part_number": m.part_number,
-                })
-            })
-            .collect();
-        attributes.insert("memory_devices".to_string(), json!(memory_devices));
-
-        let total_memory_mb: u64 = hardware_info
-            .memory_devices
-            .iter()
-            .filter_map(|m| m.size.map(|s| s as u64))
-            .sum();
-        attributes.insert("total_memory_mb".to_string(), json!(total_memory_mb));
-    }
+    // Build DeviceAttributes struct for type-safe attribute updates
+    let mut attributes = DeviceAttributes {
+        manufacturer: hardware_info.manufacturer.clone(),
+        product_name: hardware_info.product_name.clone(),
+        serial_number: hardware_info.serial_number.clone(),
+        bios_version: hardware_info.bios_version.clone(),
+        bios_vendor: hardware_info.bios_vendor.clone(),
+        cpus: hardware_info.cpus.clone(),
+        memory: hardware_info.memory.clone(),
+        ..Default::default()
+    };
 
     // Scan network interfaces
     match scan_network_interfaces().await {
@@ -967,11 +898,24 @@ async fn perform_scan_and_upload(
                     "Discovered {} network interface(s)",
                     network_interfaces.len()
                 );
-                attributes.insert("network_interfaces".to_string(), json!(network_interfaces));
+
+                // Convert local NetworkInterface to common::device_attributes::NetworkInterface
+                attributes.network_interfaces = network_interfaces
+                    .iter()
+                    .map(|nic| common::device_attributes::NetworkInterface {
+                        interface_name: nic.interface_name.clone(),
+                        mac_address: nic.mac_address.clone(),
+                        ip_address: nic.ip_address.clone(),
+                        network_id: None,
+                        speed_mbps: nic.speed_mbps,
+                        disabled: false,
+                        warning_label: None,
+                    })
+                    .collect();
 
                 // Also set legacy mac_address field for backward compatibility
                 if let Some(primary) = network_interfaces.first() {
-                    attributes.insert("mac_address".to_string(), json!(primary.mac_address));
+                    attributes.mac_address = Some(primary.mac_address.clone());
                 }
             } else {
                 info!("No physical Ethernet interfaces found");
@@ -991,7 +935,19 @@ async fn perform_scan_and_upload(
         Ok(disks) => {
             if !disks.is_empty() {
                 info!("Discovered {} disk(s)", disks.len());
-                attributes.insert("disks".to_string(), json!(disks));
+
+                // Convert local DiskInfo to common::device_attributes::DiskInfo
+                attributes.disks = disks
+                    .iter()
+                    .map(|disk| common::device_attributes::DiskInfo {
+                        name: disk.name.clone(),
+                        size: disk.size,
+                        disk_type: disk.disk_type,
+                        model: disk.model.clone(),
+                        serial: disk.serial.clone(),
+                        path: disk.path.clone(),
+                    })
+                    .collect();
             } else {
                 info!("No disks found");
             }
@@ -1006,7 +962,13 @@ async fn perform_scan_and_upload(
     match scan_bmc().await {
         Ok(Some(bmc_info)) => {
             info!("Discovered BMC: MAC={}", bmc_info.mac_address);
-            attributes.insert("bmc".to_string(), json!(bmc_info));
+
+            // Convert local BmcInfo to common::device_attributes::BmcInfo
+            attributes.bmc = Some(common::device_attributes::BmcInfo {
+                mac_address: bmc_info.mac_address.clone(),
+                ip_address: bmc_info.ip_address.clone(),
+                ip_address_source: Some(bmc_info.ip_address_source.clone()),
+            });
         }
         Ok(None) => {
             info!("No BMC detected");
@@ -1017,10 +979,7 @@ async fn perform_scan_and_upload(
         }
     }
 
-    info!(
-        "Collected hardware information: {} attributes",
-        attributes.len()
-    );
+    info!("Collected hardware information");
 
     if !scan_args.no_upload {
         info!("Uploading hardware information to Rack Director...");
@@ -1104,26 +1063,26 @@ fn parse_dmi_sysfs(entry_point_data: &[u8], structures_data: &[u8]) -> Result<Ha
                 );
             }
             dmidecode::Structure::Processor(processor) => {
-                let proc_info = ProcessorInfo {
+                let cpu_info = CpuInfo {
                     designation: Some(processor.socket_designation.to_string()),
                     manufacturer: Some(processor.processor_manufacturer.to_string()),
-                    version: Some(processor.processor_version.to_string()),
-                    max_speed: Some(processor.max_speed),
-                    core_count: processor.core_count,
-                    thread_count: processor.thread_count,
+                    model: Some(processor.processor_version.to_string()),
+                    speed_mhz: Some(processor.max_speed as u32),
+                    cores: processor.core_count.map(|c| c as u32),
+                    threads: processor.thread_count.map(|t| t as u32),
                 };
-                debug!("Processor: {:?}", proc_info);
-                hardware_info.processors.push(proc_info);
+                debug!("CPU: {:?}", cpu_info);
+                hardware_info.cpus.push(cpu_info);
             }
             dmidecode::Structure::MemoryDevice(memory) => {
                 let mem_info = MemoryInfo {
-                    size: memory.size,
-                    speed: memory.speed,
+                    size_mb: memory.size,
+                    speed_mhz: memory.speed.map(|s| s as u32),
                     manufacturer: Some(memory.manufacturer.to_string()),
                     part_number: Some(memory.part_number.to_string()),
                 };
                 debug!("Memory: {:?}", mem_info);
-                hardware_info.memory_devices.push(mem_info);
+                hardware_info.memory.push(mem_info);
             }
             // Ignore other structures for now
             dmidecode::Structure::BaseBoard(_) => {}
@@ -2093,8 +2052,8 @@ MAC Address             : 0c:c4:7a:02:11:fe
         assert!(result.is_ok(), "Should handle empty structures gracefully");
 
         let hardware_info = result.unwrap();
-        assert_eq!(hardware_info.processors.len(), 0);
-        assert_eq!(hardware_info.memory_devices.len(), 0);
+        assert_eq!(hardware_info.cpus.len(), 0);
+        assert_eq!(hardware_info.memory.len(), 0);
     }
 
     /// Test that parse_dmi_sysfs rejects invalid entry point data
@@ -2245,5 +2204,50 @@ not a number  username
 
         // Serial should not be in JSON when None
         assert!(!json.as_object().unwrap().contains_key("serial"));
+    }
+
+    /// Test type safety: DeviceAttributes serialization produces correct field names
+    #[test]
+    fn test_device_attributes_type_safety() {
+        let attributes = DeviceAttributes {
+            manufacturer: Some("Dell Inc.".to_string()),
+            product_name: Some("PowerEdge R640".to_string()),
+            cpus: vec![CpuInfo {
+                designation: Some("CPU 1".to_string()),
+                manufacturer: Some("Intel".to_string()),
+                model: Some("Xeon E5-2680".to_string()),
+                speed_mhz: Some(2400),
+                cores: Some(8),
+                threads: Some(16),
+            }],
+            memory: vec![MemoryInfo {
+                size_mb: Some(16384),
+                speed_mhz: Some(2400),
+                manufacturer: Some("Samsung".to_string()),
+                part_number: Some("M393A2K40BB1-CRC".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_value(&attributes).unwrap();
+
+        // Verify field names match the common::device_attributes specification
+        assert_eq!(json["manufacturer"], "Dell Inc.");
+        assert_eq!(json["product_name"], "PowerEdge R640");
+
+        // Verify CPU fields use correct names (cpus, not processors)
+        assert!(json.get("cpus").is_some());
+        assert!(json.get("processors").is_none());
+        assert_eq!(json["cpus"][0]["model"], "Xeon E5-2680");
+        assert_eq!(json["cpus"][0]["speed_mhz"], 2400);
+        assert_eq!(json["cpus"][0]["cores"], 8);
+        assert_eq!(json["cpus"][0]["threads"], 16);
+
+        // Verify memory fields use correct names (memory, not memory_devices)
+        assert!(json.get("memory").is_some());
+        assert!(json.get("memory_devices").is_none());
+        assert_eq!(json["memory"][0]["size_mb"], 16384);
+        assert_eq!(json["memory"][0]["speed_mhz"], 2400);
     }
 }

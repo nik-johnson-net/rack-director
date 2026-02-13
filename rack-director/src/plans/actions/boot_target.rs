@@ -88,14 +88,58 @@ pub fn generate_netboot_script(
     cmdline: &str,
     modules: &[String],
 ) -> String {
-    let joined_modules = modules.join(" ");
+    let module_line = if modules.is_empty() {
+        String::new()
+    } else {
+        format!("module {}", modules.join(" "))
+    };
     format!(
         r#"#!ipxe
 # Boot custom linux image for new device intake
 kernel {kernel} {cmdline}
 initrd {initrd}
-module {joined_modules}
+{module_line}
 boot
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::plans::actions::boot_target::generate_netboot_script;
+
+    #[test]
+    fn netboot_script_no_modules() {
+        let expected = r#"#!ipxe
+# Boot custom linux image for new device intake
+kernel vmlinuz opt1 opt2
+initrd initramfs.img
+
+boot
+"#;
+        assert_eq!(
+            generate_netboot_script("vmlinuz", "initramfs.img", "opt1 opt2", &[]),
+            expected
+        );
+    }
+
+    #[test]
+    fn netboot_script_with_modules() {
+        let expected = r#"#!ipxe
+# Boot custom linux image for new device intake
+kernel vmlinuz opt1 opt2
+initrd initramfs.img
+module mod1.ko mod2.ko
+boot
+"#;
+        assert_eq!(
+            generate_netboot_script(
+                "vmlinuz",
+                "initramfs.img",
+                "opt1 opt2",
+                &["mod1.ko".to_owned(), "mod2.ko".to_owned()]
+            ),
+            expected
+        );
+    }
 }
