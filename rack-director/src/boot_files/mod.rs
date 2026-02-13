@@ -22,7 +22,7 @@ pub trait BootFileProvider: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `filename` - The name of the boot file to retrieve (e.g., "ipxe.efi")
+    /// * `filename` - The name of the boot file to retrieve (e.g., "snponly.efi")
     ///
     /// # Returns
     ///

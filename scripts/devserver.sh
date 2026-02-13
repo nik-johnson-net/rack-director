@@ -28,7 +28,7 @@ trap on_exit EXIT
 cd $(git rev-parse --show-toplevel)
 
 # Create fake files for testing
-echo "ipxe fake file" > ".local-storage/tftp/ipxe.efi"
+echo "ipxe fake file" > ".local-storage/tftp/snponly.efi"
 echo "undionly.kpxe fake file" > ".local-storage/tftp/undionly.kpxe"
 echo "vmlinuz" > ".local-storage/agent-image/vmlinuz"
 echo "initramfs" > ".local-storage/agent-image/initramfs.img"

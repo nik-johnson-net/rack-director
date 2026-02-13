@@ -44,7 +44,7 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
     // Note: next_server (siaddr) may be set to DHCP server's IP, but that's OK.
     // What matters is that bootfile_name contains a full HTTP URL.
     // The URL uses the configured public URL (http://10.0.0.1) without port
-    let expected_url = "http://10.0.0.1/cnc/boot/ipxe.efi";
+    let expected_url = "http://10.0.0.1/cnc/boot/snponly.efi";
     assert_eq!(
         boot_options.bootfile_name, expected_url,
         "Bootfile should be HTTP URL for architecture 15"
@@ -59,7 +59,7 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
     // VALIDATION: HTTP GET - Verify the bootfile can be downloaded
     // Use the actual HTTP port for downloading (127.0.0.1), not the public URL
     let http_client = reqwest::Client::new();
-    let download_url = format!("http://127.0.0.1:{}/cnc/boot/ipxe.efi", http_port);
+    let download_url = format!("http://127.0.0.1:{}/cnc/boot/snponly.efi", http_port);
     let response = http_client.get(&download_url).send().await?;
 
     assert_eq!(
@@ -81,7 +81,7 @@ async fn test_http_boot_x86_uefi_http() -> Result<()> {
 
     // VALIDATION: Compare with actual fixture file
     let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/firmware/ipxe.efi");
+        .join("tests/fixtures/firmware/snponly.efi");
     let expected_content = tokio::fs::read(fixture_path).await?;
 
     assert_eq!(
@@ -136,7 +136,7 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
     // Note: next_server (siaddr) may be set to DHCP server's IP, but that's OK.
     // What matters is that bootfile_name contains a full HTTP URL.
     // The URL uses the configured public URL (http://10.0.0.1) without port
-    let expected_url = "http://10.0.0.1/cnc/boot/ipxe.efi";
+    let expected_url = "http://10.0.0.1/cnc/boot/snponly.efi";
     assert_eq!(
         boot_options.bootfile_name, expected_url,
         "Bootfile should be HTTP URL for architecture 16"
@@ -150,7 +150,7 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
 
     // VALIDATION: HTTP GET - Verify the bootfile can be downloaded
     let http_client = reqwest::Client::new();
-    let download_url = format!("http://127.0.0.1:{}/cnc/boot/ipxe.efi", http_port);
+    let download_url = format!("http://127.0.0.1:{}/cnc/boot/snponly.efi", http_port);
     let response = http_client.get(&download_url).send().await?;
 
     assert_eq!(
@@ -172,7 +172,7 @@ async fn test_http_boot_x64_uefi_http() -> Result<()> {
 
     // VALIDATION: Compare with actual fixture file
     let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/firmware/ipxe.efi");
+        .join("tests/fixtures/firmware/snponly.efi");
     let expected_content = tokio::fs::read(fixture_path).await?;
 
     assert_eq!(
@@ -227,7 +227,7 @@ async fn test_http_boot_ebc_uefi_http() -> Result<()> {
     // Note: next_server (siaddr) may be set to DHCP server's IP, but that's OK.
     // What matters is that bootfile_name contains a full HTTP URL.
     // The URL uses the configured public URL (http://10.0.0.1) without port
-    let expected_url = "http://10.0.0.1/cnc/boot/ipxe.efi";
+    let expected_url = "http://10.0.0.1/cnc/boot/snponly.efi";
     assert_eq!(
         boot_options.bootfile_name, expected_url,
         "Bootfile should be HTTP URL for architecture 17"
@@ -241,7 +241,7 @@ async fn test_http_boot_ebc_uefi_http() -> Result<()> {
 
     // VALIDATION: HTTP GET - Verify the bootfile can be downloaded
     let http_client = reqwest::Client::new();
-    let download_url = format!("http://127.0.0.1:{}/cnc/boot/ipxe.efi", http_port);
+    let download_url = format!("http://127.0.0.1:{}/cnc/boot/snponly.efi", http_port);
     let response = http_client.get(&download_url).send().await?;
 
     assert_eq!(
@@ -263,7 +263,7 @@ async fn test_http_boot_ebc_uefi_http() -> Result<()> {
 
     // VALIDATION: Compare with actual fixture file
     let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/firmware/ipxe.efi");
+        .join("tests/fixtures/firmware/snponly.efi");
     let expected_content = tokio::fs::read(fixture_path).await?;
 
     assert_eq!(
@@ -398,7 +398,7 @@ async fn test_tftp_boot_still_works_x64_uefi() -> Result<()> {
     );
 
     assert_eq!(
-        boot_options.bootfile_name, "ipxe.efi",
+        boot_options.bootfile_name, "snponly.efi",
         "Bootfile should be TFTP filename for UEFI"
     );
 
@@ -409,14 +409,14 @@ async fn test_tftp_boot_still_works_x64_uefi() -> Result<()> {
 
         let server = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), tftp_port);
         let client = TftpClient::new(server)?;
-        let data = client.download("ipxe.efi")?;
+        let data = client.download("snponly.efi")?;
         Ok(data)
     })
     .await??;
 
     // VALIDATION: Compare with actual fixture file
     let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/firmware/ipxe.efi");
+        .join("tests/fixtures/firmware/snponly.efi");
     let expected_content = tokio::fs::read(fixture_path).await?;
 
     assert_eq!(

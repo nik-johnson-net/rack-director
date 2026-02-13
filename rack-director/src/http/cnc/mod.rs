@@ -523,7 +523,7 @@ mod tests {
         std::fs::create_dir_all(&boot_files_path).unwrap();
 
         // Create mock boot files
-        std::fs::write(boot_files_path.join("ipxe.efi"), b"mock ipxe.efi").unwrap();
+        std::fs::write(boot_files_path.join("snponly.efi"), b"mock snponly.efi").unwrap();
         std::fs::write(boot_files_path.join("undionly.kpxe"), b"mock undionly.kpxe").unwrap();
 
         let boot_file_provider =

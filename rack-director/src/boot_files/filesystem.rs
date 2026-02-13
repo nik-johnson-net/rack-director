@@ -30,7 +30,7 @@ use crate::tftp::{Handler, TftpReader};
 /// )?;
 ///
 /// // This will succeed if the file exists
-/// let reader = provider.get_file("ipxe.efi").await?;
+/// let reader = provider.get_file("snponly.efi").await?;
 ///
 /// // This will fail due to path traversal attempt
 /// assert!(provider.get_file("../etc/passwd").await.is_err());
@@ -188,7 +188,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Create test files
-        let ipxe_path = temp_dir.path().join("ipxe.efi");
+        let ipxe_path = temp_dir.path().join("snponly.efi");
         let kpxe_path = temp_dir.path().join("undionly.kpxe");
         let unauthorized_path = temp_dir.path().join("unauthorized.bin");
 
@@ -245,7 +245,7 @@ mod tests {
     async fn test_get_file_success() {
         let (provider, _temp_dir) = create_test_provider();
 
-        let result = provider.get_file("ipxe.efi").await;
+        let result = provider.get_file("snponly.efi").await;
 
         assert!(result.is_ok());
         let mut reader = result.unwrap();
@@ -293,7 +293,7 @@ mod tests {
     async fn test_filesize_success() {
         let (provider, _temp_dir) = create_test_provider();
 
-        let result = BootFileProvider::filesize(&provider, "ipxe.efi").await;
+        let result = BootFileProvider::filesize(&provider, "snponly.efi").await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), b"IPXE_EFI_BINARY_DATA".len() as u64);

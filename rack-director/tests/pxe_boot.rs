@@ -131,7 +131,7 @@ async fn test_pxe_boot_x86_bios() -> Result<()> {
 }
 
 /// Test PXE boot flow for x64 UEFI architecture
-/// Expected flow: DHCP (firmware) → TFTP (ipxe.efi) → DHCP (iPXE) → HTTP (/cnc/ipxe)
+/// Expected flow: DHCP (firmware) → TFTP (snponly.efi) → DHCP (iPXE) → HTTP (/cnc/ipxe)
 #[tokio::test]
 async fn test_pxe_boot_x64_uefi() -> Result<()> {
     // Start rack-director with all services
@@ -171,8 +171,8 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
         "Next-server should be 10.0.0.1 (configured TFTP server)"
     );
     assert_eq!(
-        boot_options.bootfile_name, "ipxe.efi",
-        "Bootfile should be ipxe.efi for UEFI (iPXE EFI bootloader)"
+        boot_options.bootfile_name, "snponly.efi",
+        "Bootfile should be snponly.efi for UEFI (iPXE EFI bootloader)"
     );
 
     // Step 2: TFTP - Fetch the iPXE bootloader
@@ -183,14 +183,14 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
 
         let server = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), tftp_port);
         let client = TftpClient::new(server)?;
-        let data = client.download("ipxe.efi")?;
+        let data = client.download("snponly.efi")?;
         Ok(data)
     })
     .await??;
 
     // VALIDATION: TFTP download - Verify we got the UEFI bootloader content
     let real_contents_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/firmware/ipxe.efi");
+        .join("tests/fixtures/firmware/snponly.efi");
     let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
         bootfile_content, real_contents,
@@ -255,7 +255,7 @@ async fn test_pxe_boot_x64_uefi() -> Result<()> {
 }
 
 /// Test PXE boot flow for ARM64 UEFI architecture
-/// Expected flow: DHCP (firmware) → TFTP (ipxe.efi) → DHCP (iPXE) → HTTP (/cnc/ipxe)
+/// Expected flow: DHCP (firmware) → TFTP (snponly.efi) → DHCP (iPXE) → HTTP (/cnc/ipxe)
 #[tokio::test]
 async fn test_pxe_boot_arm64_uefi() -> Result<()> {
     // Start rack-director with all services
@@ -295,8 +295,8 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
         "Next-server should be 10.0.0.1 (configured TFTP server)"
     );
     assert_eq!(
-        boot_options.bootfile_name, "ipxe.efi",
-        "Bootfile should be ipxe.efi for ARM64 UEFI (iPXE EFI bootloader)"
+        boot_options.bootfile_name, "snponly.efi",
+        "Bootfile should be snponly.efi for ARM64 UEFI (iPXE EFI bootloader)"
     );
 
     // Step 2: TFTP - Fetch the iPXE bootloader
@@ -307,14 +307,14 @@ async fn test_pxe_boot_arm64_uefi() -> Result<()> {
 
         let server = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), tftp_port);
         let client = TftpClient::new(server)?;
-        let data = client.download("ipxe.efi")?;
+        let data = client.download("snponly.efi")?;
         Ok(data)
     })
     .await??;
 
     // VALIDATION: TFTP download - Verify we got the ARM64 UEFI bootloader content
     let real_contents_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/firmware/ipxe.efi");
+        .join("tests/fixtures/firmware/snponly.efi");
     let real_contents = tokio::fs::read(real_contents_path).await?;
     assert_eq!(
         bootfile_content, real_contents,

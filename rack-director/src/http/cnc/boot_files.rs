@@ -12,7 +12,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::http::{AppState, error::Error};
 
-/// HTTP endpoint to serve boot files (ipxe.efi, undionly.kpxe) for UEFI HTTP Boot
+/// HTTP endpoint to serve boot files (snponly.efi, undionly.kpxe) for UEFI HTTP Boot
 ///
 /// This endpoint serves firmware boot files over HTTP for modern UEFI clients that support
 /// HTTP Boot (architectures 14/15/16). Files are served from the BootFileProvider which
@@ -103,7 +103,7 @@ mod tests {
         let boot_files_dir = temp_dir.path().join("boot");
         std::fs::create_dir_all(&boot_files_dir).unwrap();
 
-        let ipxe_path = boot_files_dir.join("ipxe.efi");
+        let ipxe_path = boot_files_dir.join("snponly.efi");
         let kpxe_path = boot_files_dir.join("undionly.kpxe");
         let unauthorized_path = boot_files_dir.join("unauthorized.bin");
 
@@ -165,7 +165,7 @@ mod tests {
             .with_state(state);
 
         let request = Request::builder()
-            .uri("/cnc/boot/ipxe.efi")
+            .uri("/cnc/boot/snponly.efi")
             .body(Body::empty())
             .unwrap();
 
@@ -246,7 +246,7 @@ mod tests {
             .with_state(state);
 
         let request = Request::builder()
-            .uri("/cnc/boot/ipxe.efi")
+            .uri("/cnc/boot/snponly.efi")
             .body(Body::empty())
             .unwrap();
 

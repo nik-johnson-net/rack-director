@@ -58,7 +58,7 @@ impl BootConfigProvider {
     /// 1. Check if client requested any boot options — skip if not requested
     /// 2. iPXE client → filename = HTTP boot script URL (no file size)
     /// 3. HTTP boot arch (15/16/17) → filename = HTTP URL for iPXE firmware
-    /// 4. UEFI arch (7, 11) → next_server = TFTP server, filename = ipxe.efi
+    /// 4. UEFI arch (7, 11) → next_server = TFTP server, filename = snponly.efi
     /// 5. BIOS arch (0, 9, default) → next_server = TFTP server, filename = undionly.kpxe
     ///
     /// For actual boot files (not scripts), looks up file size and includes Option 13 if requested.
@@ -94,18 +94,18 @@ impl BootConfigProvider {
             Some(
                 Architecture::Unknown(15) | Architecture::Unknown(16) | Architecture::Unknown(17),
             ) => {
-                let filename = "ipxe.efi";
+                let filename = "snponly.efi";
                 let file_size_blocks = self.lookup_file_size_blocks(filename).await;
                 BootOptions {
                     next_server: None,
-                    filename: format!("{}/cnc/boot/ipxe.efi", self.http_server),
+                    filename: format!("{}/cnc/boot/snponly.efi", self.http_server),
                     file_size_blocks,
                 }
             }
-            // UEFI architectures (7, 11) → TFTP ipxe.efi
+            // UEFI architectures (7, 11) → TFTP snponly.efi
             // NOTE: Bug in library mis-maps BC to 7, and x86_64 to 9. The spec has been amended for x86_64 to be 7.
             Some(Architecture::BC | Architecture::Unknown(11)) => {
-                let filename = "ipxe.efi";
+                let filename = "snponly.efi";
                 let file_size_blocks = self.lookup_file_size_blocks(filename).await;
                 BootOptions {
                     next_server: Some(self.tftp_server.clone()),
@@ -135,7 +135,7 @@ impl BootConfigProvider {
     /// Logs a warning on error but does not fail the DHCP response.
     ///
     /// # Arguments
-    /// * `filename` - The boot file name (e.g., "ipxe.efi", "undionly.kpxe")
+    /// * `filename` - The boot file name (e.g., "snponly.efi", "undionly.kpxe")
     ///
     /// # Returns
     /// * `Some(blocks)` - File size in 512-byte blocks (rounded up)
@@ -299,7 +299,7 @@ mod tests {
 
     fn make_provider() -> BootConfigProvider {
         let mock = MockBootFileProvider::new()
-            .with_file("ipxe.efi", 1024000) // ~1MB
+            .with_file("snponly.efi", 1024000) // ~1MB
             .with_file("undionly.kpxe", 102400); // ~100KB
         BootConfigProvider::new(
             "10.0.0.1".to_string(),
@@ -444,7 +444,7 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            Some("http://10.0.0.1/cnc/boot/snponly.efi".to_string()),
             "Arch 14 should get HTTP URL for iPXE firmware"
         );
         assert_eq!(
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(
             get_bootfile_size(&msg),
             Some(2000),
-            "HTTP boot should have file size for ipxe.efi"
+            "HTTP boot should have file size for snponly.efi"
         );
     }
 
@@ -479,7 +479,7 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            Some("http://10.0.0.1/cnc/boot/snponly.efi".to_string()),
             "Arch 15 should get HTTP URL for iPXE firmware"
         );
         assert_eq!(
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(
             get_bootfile_size(&msg),
             Some(2000),
-            "HTTP boot should have file size for ipxe.efi"
+            "HTTP boot should have file size for snponly.efi"
         );
     }
 
@@ -508,7 +508,7 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            Some("http://10.0.0.1/cnc/boot/snponly.efi".to_string()),
             "Arch 16 should get HTTP URL for iPXE firmware"
         );
         assert_eq!(
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(
             get_bootfile_size(&msg),
             Some(2000),
-            "HTTP boot should have file size for ipxe.efi"
+            "HTTP boot should have file size for snponly.efi"
         );
     }
 
@@ -538,8 +538,8 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("ipxe.efi".to_string()),
-            "UEFI arch 7 should get ipxe.efi"
+            Some("snponly.efi".to_string()),
+            "UEFI arch 7 should get snponly.efi"
         );
         assert_eq!(
             get_tftp_server_name(&msg),
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(
             get_bootfile_size(&msg),
             Some(2000),
-            "UEFI arch 7 should have file size for ipxe.efi"
+            "UEFI arch 7 should have file size for snponly.efi"
         );
     }
 
@@ -573,8 +573,8 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("ipxe.efi".to_string()),
-            "UEFI arch 11 should get ipxe.efi"
+            Some("snponly.efi".to_string()),
+            "UEFI arch 11 should get snponly.efi"
         );
         assert_eq!(
             get_tftp_server_name(&msg),
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(
             get_bootfile_size(&msg),
             Some(2000),
-            "UEFI arch 11 should have file size for ipxe.efi"
+            "UEFI arch 11 should have file size for snponly.efi"
         );
     }
 
@@ -731,7 +731,7 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("ipxe.efi".to_string()),
+            Some("snponly.efi".to_string()),
             "Should have bootfile name when only option 67 requested"
         );
         assert_eq!(
@@ -765,7 +765,7 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("http://10.0.0.1/cnc/boot/ipxe.efi".to_string()),
+            Some("http://10.0.0.1/cnc/boot/snponly.efi".to_string()),
             "HTTP boot should return bootfile name when requested"
         );
         assert_eq!(
@@ -781,7 +781,7 @@ mod tests {
         assert_eq!(
             get_bootfile_size(&msg),
             Some(2000),
-            "HTTP boot should have file size for ipxe.efi"
+            "HTTP boot should have file size for snponly.efi"
         );
     }
 
@@ -822,7 +822,7 @@ mod tests {
     // Option 13 (Boot File Size) specific tests
     #[tokio::test]
     async fn test_option_13_size_calculation_exact_blocks() {
-        let mock = MockBootFileProvider::new().with_file("ipxe.efi", 512);
+        let mock = MockBootFileProvider::new().with_file("snponly.efi", 512);
         let provider = BootConfigProvider::new(
             "10.0.0.1".to_string(),
             "http://10.0.0.1".to_string(),
@@ -847,7 +847,7 @@ mod tests {
     #[tokio::test]
     async fn test_option_13_size_calculation_round_up() {
         let mock = MockBootFileProvider::new()
-            .with_file("ipxe.efi", 600)
+            .with_file("snponly.efi", 600)
             .with_file("undionly.kpxe", 1025);
         let provider = BootConfigProvider::new(
             "10.0.0.1".to_string(),
@@ -899,7 +899,7 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("ipxe.efi".to_string()),
+            Some("snponly.efi".to_string()),
             "Should have bootfile name"
         );
         assert_eq!(
@@ -911,7 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_option_13_omitted_on_file_lookup_error() {
-        let mock = MockBootFileProvider::new().with_error("ipxe.efi", "File not found");
+        let mock = MockBootFileProvider::new().with_error("snponly.efi", "File not found");
         let provider = BootConfigProvider::new(
             "10.0.0.1".to_string(),
             "http://10.0.0.1".to_string(),
@@ -928,7 +928,7 @@ mod tests {
 
         assert_eq!(
             get_bootfile_name(&msg),
-            Some("ipxe.efi".to_string()),
+            Some("snponly.efi".to_string()),
             "Should have bootfile name even if size lookup fails"
         );
         assert_eq!(
@@ -966,7 +966,7 @@ mod tests {
     #[tokio::test]
     async fn test_option_13_multiple_architectures() {
         let mock = MockBootFileProvider::new()
-            .with_file("ipxe.efi", 1024000) // 2000 blocks
+            .with_file("snponly.efi", 1024000) // 2000 blocks
             .with_file("undionly.kpxe", 102400); // 200 blocks
         let provider = BootConfigProvider::new(
             "10.0.0.1".to_string(),
@@ -974,7 +974,7 @@ mod tests {
             Arc::new(mock),
         );
 
-        // UEFI gets ipxe.efi
+        // UEFI gets snponly.efi
         let req_ctx = make_req_ctx(Some(Architecture::BC), false, true, true, true);
         let mut msg = Message::default();
         msg.set_opcode(Opcode::BootReply);
@@ -982,7 +982,7 @@ mod tests {
             .populate_boot_options(&mut msg, &req_ctx)
             .await
             .unwrap();
-        assert_eq!(get_bootfile_name(&msg), Some("ipxe.efi".to_string()));
+        assert_eq!(get_bootfile_name(&msg), Some("snponly.efi".to_string()));
         assert_eq!(get_bootfile_size(&msg), Some(2000));
 
         // BIOS gets undionly.kpxe
