@@ -4,6 +4,7 @@ use clap::Parser;
 use clap::Subcommand;
 use log::{error, info, warn};
 
+mod bmc;
 mod client;
 mod scan;
 
@@ -50,7 +51,7 @@ async fn main() {
         // CLI subcommand takes precedence
         match command {
             Command::DeviceScan(device_args) => scan::device_scan(&client, &device_args).await,
-            Command::ConfigureBmc => scan::bmc_configure(&client).await,
+            Command::ConfigureBmc => bmc::bmc_configure(&client).await,
         }
     } else {
         // Read action from --action flag or /proc/cmdline
@@ -65,7 +66,7 @@ async fn main() {
                 let device_args = scan::DeviceScanArgs::new(false);
                 scan::device_scan(&client, &device_args).await
             }
-            "configure-bmc" => scan::bmc_configure(&client).await,
+            "configure-bmc" => bmc::bmc_configure(&client).await,
             _ => {
                 error!("Unknown action: {}", action);
                 std::process::exit(1);
