@@ -200,8 +200,8 @@ pub async fn delete(conn: &Connection, id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::roles::{DiskLayout, Partition};
     use crate::test_database_path;
+    use common::disk_layout::{DiskConfig, DiskLayout, PartitionConfig};
 
     async fn setup_db(path: String) -> Connection {
         let factory =
@@ -220,13 +220,20 @@ mod tests {
 
         // Create role
         let disk_layout = DiskLayout {
-            partitions: vec![Partition {
-                device: "/dev/sda1".to_string(),
-                size: "100G".to_string(),
-                filesystem: "ext4".to_string(),
-                mount_point: Some("/".to_string()),
-                flags: vec![],
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "100G".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
             }],
+            volume_groups: None,
+            zfs_pools: None,
         };
 
         let role = create(
@@ -245,7 +252,8 @@ mod tests {
 
         let retrieved = get(&db, role.id.unwrap()).await.unwrap();
         assert_eq!(retrieved.name, role.name);
-        assert_eq!(retrieved.disk_layout.partitions.len(), 1);
+        assert_eq!(retrieved.disk_layout.disks.len(), 1);
+        assert_eq!(retrieved.disk_layout.disks[0].partitions.len(), 1);
     }
 
     #[tokio::test]
@@ -255,7 +263,11 @@ mod tests {
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
             .unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         create(&db, "role1", None, os.id.unwrap(), &disk_layout, None)
             .await
@@ -275,7 +287,11 @@ mod tests {
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
             .unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         let role = create(&db, "web-server", None, os.id.unwrap(), &disk_layout, None)
             .await
@@ -293,7 +309,11 @@ mod tests {
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
             .unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         let role = create(&db, "web-server", None, os.id.unwrap(), &disk_layout, None)
             .await
@@ -322,7 +342,11 @@ mod tests {
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
             .unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         let role = create(&db, "web-server", None, os.id.unwrap(), &disk_layout, None)
             .await

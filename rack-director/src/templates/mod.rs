@@ -103,7 +103,11 @@ mod tests {
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: None,
             created_at: None,
             updated_at: None,
@@ -146,7 +150,11 @@ network:
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: None,
             created_at: None,
             updated_at: None,
@@ -185,7 +193,11 @@ network:
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: Some(json!({
                 "packages": ["nginx", "postgresql", "redis"]
             })),
@@ -230,7 +242,11 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: None,
             created_at: None,
             updated_at: None,

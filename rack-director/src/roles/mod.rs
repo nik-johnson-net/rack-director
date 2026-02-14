@@ -1,5 +1,7 @@
 pub mod store;
 
+pub use common::disk_layout::DiskLayout;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -38,22 +40,6 @@ impl FromRow for Role {
             updated_at: row.get("updated_at")?,
         })
     }
-}
-
-/// Disk layout configuration defining partition scheme
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiskLayout {
-    pub partitions: Vec<Partition>,
-}
-
-/// A disk partition configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Partition {
-    pub device: String,
-    pub size: String,
-    pub filesystem: String,
-    pub mount_point: Option<String>,
-    pub flags: Vec<String>,
 }
 
 /// Request to create a new role

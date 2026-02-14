@@ -1,7 +1,8 @@
-pub mod boot_files;
+mod boot_files;
 mod database;
 mod dhcp;
 mod director;
+mod disk_layout;
 mod http;
 mod lifecycle;
 mod operating_systems;

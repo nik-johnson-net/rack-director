@@ -48,6 +48,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
         .route("/cnc/devices/{uuid}/bmc_config", get(get_bmc_config))
+        .route("/cnc/devices/{uuid}/disk_layout", get(get_disk_layout))
         .with_state(state)
 }
 
@@ -479,6 +480,63 @@ async fn get_bmc_config(
     }
 
     Ok(extract::Json(bmc_config))
+}
+
+/// Get resolved disk layout for a device
+///
+/// Returns the disk layout from the device's assigned role, with platform labels
+/// resolved to actual device paths if the device has a platform assigned.
+#[axum::debug_handler]
+async fn get_disk_layout(
+    State(state): State<Arc<AppState>>,
+    extract::Path(uuid): extract::Path<Uuid>,
+) -> Result<extract::Json<common::disk_layout::DiskLayout>, Error> {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(Error::ServerInternalError)?;
+    let director = Director::new(&conn);
+
+    // Get device
+    let device = director
+        .get_device(&uuid)
+        .await
+        .map_err(|_| Error::NotFound(format!("Device {} not found", uuid)))?;
+
+    // Get role_id from device
+    let role_id = device
+        .role_id
+        .ok_or_else(|| Error::BadRequest("Device has no role assigned".to_string()))?;
+
+    // Get role's disk_layout
+    let role = crate::roles::store::get(&conn, role_id)
+        .await
+        .map_err(Error::ServerInternalError)?;
+
+    let layout = role.disk_layout;
+
+    // Check if layout uses labels
+    if crate::disk_layout::layout_uses_labels(&layout) {
+        // Need platform to resolve labels
+        let platform_id = device.platform_id.ok_or_else(|| {
+            Error::BadRequest(
+                "Disk layout uses platform labels but device has no platform assigned".to_string(),
+            )
+        })?;
+
+        let platform = crate::platforms::store::get(&conn, platform_id)
+            .await
+            .map_err(Error::ServerInternalError)?;
+
+        let resolved = crate::disk_layout::resolve_disk_layout(&layout, &platform.attributes)
+            .map_err(Error::ServerInternalError)?;
+
+        Ok(extract::Json(resolved))
+    } else {
+        // No labels, return as-is
+        Ok(extract::Json(layout))
+    }
 }
 
 #[cfg(test)]
@@ -1344,5 +1402,185 @@ mod tests {
             Director::new(&conn).get_device(&test_uuid).await.unwrap()
         };
         assert!(device.attributes.bmc_config.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_disk_layout_success_with_paths() {
+        // Device with role that uses paths only (no platform needed)
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x70);
+
+        let conn = test_db(&state).await;
+        let director = Director::new(&conn);
+
+        // Register device
+        director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create OS and role with path-based layout
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![common::disk_layout::PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role =
+            crate::roles::store::create(&conn, "test-role", None, os.id.unwrap(), &layout, None)
+                .await
+                .unwrap();
+
+        // Assign role to device
+        director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+        let request = Request::builder()
+            .uri(format!("/cnc/devices/{}/disk_layout", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: common::disk_layout::DiskLayout = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result.disks.len(), 1);
+        assert_eq!(result.disks[0].device, "/dev/sda");
+    }
+
+    #[tokio::test]
+    async fn test_get_disk_layout_no_role() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x71);
+
+        // Register device but don't assign a role
+        let conn = test_db(&state).await;
+        Director::new(&conn)
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+        let request = Request::builder()
+            .uri(format!("/cnc/devices/{}/disk_layout", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_disk_layout_not_found() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let fake_uuid = test_uuid(0x72);
+
+        let app = routes(state.clone());
+        let request = Request::builder()
+            .uri(format!("/cnc/devices/{}/disk_layout", fake_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_disk_layout_labels_resolved_with_platform() {
+        // Device with role that uses labels AND has platform assigned -> labels resolved
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x74);
+
+        let conn = test_db(&state).await;
+        let director = Director::new(&conn);
+
+        director
+            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create platform with ROOT label
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![crate::platforms::PlatformDisk {
+                path: "/dev/sda".to_string(),
+                size_gb: 480,
+                disk_type: crate::platforms::DiskType::Ssd,
+                label: Some("ROOT".to_string()),
+            }],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 32,
+        };
+        let platform =
+            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
+                .await
+                .unwrap();
+        director
+            .assign_platform_to_device(&test_uuid, platform.id.unwrap())
+            .await
+            .unwrap();
+
+        // Create role with label-based layout
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![common::disk_layout::PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role =
+            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None)
+                .await
+                .unwrap();
+        director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await
+            .unwrap();
+
+        let app = routes(state.clone());
+        let request = Request::builder()
+            .uri(format!("/cnc/devices/{}/disk_layout", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: common::disk_layout::DiskLayout = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result.disks[0].device, "/dev/sda"); // Label resolved to path
     }
 }
