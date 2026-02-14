@@ -243,7 +243,7 @@ mod tests {
     use super::*;
     use crate::database;
     use crate::operating_systems::OperatingSystemsStore;
-    use crate::roles::{DiskLayout, Partition};
+    use common::disk_layout::{DiskConfig, DiskLayout, PartitionConfig};
 
     fn setup_db() -> Arc<Mutex<Connection>> {
         let conn = Connection::open_in_memory().unwrap();
@@ -262,13 +262,20 @@ mod tests {
 
         // Create role
         let disk_layout = DiskLayout {
-            partitions: vec![Partition {
-                device: "/dev/sda1".to_string(),
-                size: "100G".to_string(),
-                filesystem: "ext4".to_string(),
-                mount_point: Some("/".to_string()),
-                flags: vec![],
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "100G".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
             }],
+            volume_groups: None,
+            zfs_pools: None,
         };
 
         let role = role_store
@@ -287,7 +294,8 @@ mod tests {
 
         let retrieved = role_store.get(role.id.unwrap()).await.unwrap();
         assert_eq!(retrieved.name, role.name);
-        assert_eq!(retrieved.disk_layout.partitions.len(), 1);
+        assert_eq!(retrieved.disk_layout.disks.len(), 1);
+        assert_eq!(retrieved.disk_layout.disks[0].partitions.len(), 1);
     }
 
     #[tokio::test]
@@ -297,7 +305,11 @@ mod tests {
         let role_store = RolesStore::new(db);
 
         let os = os_store.create("Ubuntu", "24.04", None).await.unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         role_store
             .create("role1", None, os.id.unwrap(), &disk_layout, None)
@@ -319,7 +331,11 @@ mod tests {
         let role_store = RolesStore::new(db);
 
         let os = os_store.create("Ubuntu", "24.04", None).await.unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         let role = role_store
             .create("web-server", None, os.id.unwrap(), &disk_layout, None)
@@ -338,7 +354,11 @@ mod tests {
         let role_store = RolesStore::new(db);
 
         let os = os_store.create("Ubuntu", "24.04", None).await.unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         let role = role_store
             .create("web-server", None, os.id.unwrap(), &disk_layout, None)
@@ -368,7 +388,11 @@ mod tests {
         let role_store = RolesStore::new(db);
 
         let os = os_store.create("Ubuntu", "24.04", None).await.unwrap();
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
 
         let role = role_store
             .create("web-server", None, os.id.unwrap(), &disk_layout, None)

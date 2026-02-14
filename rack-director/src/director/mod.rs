@@ -603,12 +603,41 @@ impl Director {
 
     // Role assignment methods
 
+    /// Assign a role to a device, validating disk layout labels against the platform
+    ///
+    /// If the role's disk layout uses platform labels (device names not starting with '/'),
+    /// the device must have a platform assigned, and all labels must exist in that platform.
     pub async fn assign_role_to_device(
         &self,
         device_uuid: &Uuid,
         role_id: i64,
     ) -> anyhow::Result<()> {
-        self.store.assign_role_to_device(device_uuid, role_id).await
+        // Get the role to check its disk layout
+        let role = self.roles_store.get(role_id).await?;
+
+        // Check if disk layout uses labels
+        if crate::disk_layout::layout_uses_labels(&role.disk_layout) {
+            // Get device to check platform
+            let device = self.store.get_device(device_uuid).await?;
+
+            let platform_id = device.platform_id.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot assign role '{}': disk layout uses platform labels but device has no platform assigned",
+                    role.name
+                )
+            })?;
+
+            // Validate labels exist in platform
+            let platform = self.platforms_store.get(platform_id).await?;
+            crate::disk_layout::validate_layout_against_platform(
+                &role.disk_layout,
+                &platform.attributes,
+            )?;
+        }
+
+        self.store
+            .assign_role_to_device(device_uuid, role_id)
+            .await
     }
 
     pub async fn get_device_role_id(&self, device_uuid: &Uuid) -> anyhow::Result<Option<i64>> {
@@ -1954,5 +1983,212 @@ mod tests {
         assert_eq!(device.platform_id, Some(manual_platform.id.unwrap()));
         assert_ne!(device.platform_id, Some(auto_platform_id));
         assert!(device.attributes.warnings.is_empty());
+    }
+
+    // ========== Role Assignment Validation Tests ==========
+
+    #[tokio::test]
+    async fn test_assign_role_with_labels_no_platform_fails() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440060").unwrap();
+
+        // Register device (no platform)
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create OS and role with label-based layout
+        let os = director
+            .os_store
+            .create("Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "ROOT".to_string(), // Platform label
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = director
+            .roles_store
+            .create("label-role", None, os.id.unwrap(), &layout, None)
+            .await
+            .unwrap();
+
+        // Assign role should fail - labels used but no platform
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no platform assigned"));
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_with_missing_labels_fails() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440061").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create platform without the label the role needs
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![crate::platforms::PlatformDisk {
+                path: "/dev/sda".to_string(),
+                size_gb: 480,
+                disk_type: crate::platforms::DiskType::Ssd,
+                label: Some("DATA1".to_string()), // Has DATA1, not ROOT
+            }],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 32,
+        };
+        let platform = director
+            .platforms_store
+            .create("Test Platform", None, &platform_attrs)
+            .await
+            .unwrap();
+        director
+            .assign_platform_to_device(&test_uuid, platform.id.unwrap())
+            .await
+            .unwrap();
+
+        // Create role that references ROOT label (not in platform)
+        let os = director
+            .os_store
+            .create("Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = director
+            .roles_store
+            .create("missing-label-role", None, os.id.unwrap(), &layout, None)
+            .await
+            .unwrap();
+
+        // Assign should fail - label not in platform
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ROOT"));
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_with_matching_labels_succeeds() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440062").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create platform with ROOT label
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![crate::platforms::PlatformDisk {
+                path: "/dev/sda".to_string(),
+                size_gb: 480,
+                disk_type: crate::platforms::DiskType::Ssd,
+                label: Some("ROOT".to_string()),
+            }],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 32,
+        };
+        let platform = director
+            .platforms_store
+            .create("Test Platform", None, &platform_attrs)
+            .await
+            .unwrap();
+        director
+            .assign_platform_to_device(&test_uuid, platform.id.unwrap())
+            .await
+            .unwrap();
+
+        // Create role that uses ROOT label
+        let os = director
+            .os_store
+            .create("Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = director
+            .roles_store
+            .create("label-role", None, os.id.unwrap(), &layout, None)
+            .await
+            .unwrap();
+
+        // Assign should succeed - label matches platform
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_with_paths_no_platform_succeeds() {
+        let (director, _temp_dir) = setup_test_director().await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440063").unwrap();
+
+        // Register device (no platform)
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create role with path-based layout (no labels)
+        let os = director
+            .os_store
+            .create("Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "/dev/sda".to_string(), // Absolute path, not a label
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = director
+            .roles_store
+            .create("path-role", None, os.id.unwrap(), &layout, None)
+            .await
+            .unwrap();
+
+        // Assign should succeed - no labels, no platform needed
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_ok());
     }
 }

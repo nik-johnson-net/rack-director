@@ -42,6 +42,7 @@ impl Action {
             Action::DiscoverHardware => generate_agent_boot_target("device-scan"),
             Action::ConfigureBmc => generate_agent_boot_target("configure-bmc"),
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
+            Action::PartitionDisks => generate_agent_boot_target("partition-disks"),
             // All other actions default to local disk boot
             _ => Ok(BootTarget::LocalDisk),
         }
@@ -243,7 +244,11 @@ mod tests {
             .unwrap();
 
         // Create a role
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
         let role = roles_store
             .create(
                 "web-server",
@@ -368,7 +373,11 @@ mod tests {
             .unwrap();
 
         // Create a role
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
         let role = roles_store
             .create(
                 "database-server",
@@ -523,6 +532,41 @@ mod tests {
             _ => {
                 panic!("Expected LocalDisk for RebootDevice, got NetBoot")
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_partition_disks_boot_target() {
+        let (_db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
+
+        let device = Device {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440009").unwrap(),
+            architecture: Architecture::X86_64,
+            lifecycle: None,
+            role_id: None,
+            platform_id: None,
+            attributes: common::device_attributes::DeviceAttributes::default(),
+            created_at: None,
+            first_seen_at: None,
+            last_seen_at: None,
+        };
+
+        let ctx = ActionContext {
+            device: &device,
+            os_store: &os_store,
+            roles_store: &roles_store,
+            director: None,
+        };
+
+        let action = Action::PartitionDisks;
+        let boot_target = action.to_boot_target(&ctx).await.unwrap();
+
+        match boot_target {
+            BootTarget::AgentImage { action, cmdline } => {
+                assert_eq!(action, "partition-disks");
+                assert!(cmdline.contains("console=ttyS1"));
+            }
+            _ => panic!("Expected AgentImage for PartitionDisks, got {:?}", boot_target),
         }
     }
 }
