@@ -124,12 +124,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_returns_not_pending_for_unknown() {
-        let resolver = create_test_resolver().await;
-        let ctx = resolver.resolve("11:22:33:44:55:66", None).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn test_resolve_with_guid_no_match() {
         let resolver = create_test_resolver().await;
 

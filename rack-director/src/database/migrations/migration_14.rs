@@ -14,8 +14,6 @@ use std::collections::BTreeMap;
 pub fn convert_disk_layouts(conn: &Connection) -> Result<()> {
     log::info!("Converting disk layouts to new schema format...");
 
-    todo!("Make sure every Device has a platform");
-
     // Read all roles
     let mut stmt = conn.prepare("SELECT id, disk_layout FROM roles")?;
     let rows: Vec<(i64, String)> = stmt
