@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::database::FromRow;
+use crate::database::{Connection, FromRow};
 use crate::lifecycle::DeviceLifecycle;
 use crate::operating_systems::Architecture;
 use common::device_attributes::{DeviceAttributes, NetworkInterface};
@@ -64,6 +63,14 @@ impl FromRow for Device {
     }
 }
 
+impl TryFrom<Row<'_>> for Device {
+    type Error = rusqlite::Error;
+
+    fn try_from(value: Row<'_>) -> std::result::Result<Self, Self::Error> {
+        Self::from_row(&value)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingDevice {
     pub id: i64,
@@ -89,43 +96,44 @@ impl FromRow for PendingDevice {
 
 #[derive(Clone)]
 pub struct DirectorStore {
-    pub conn: Arc<Mutex<rusqlite::Connection>>,
+    db: Arc<Connection>,
 }
 
 impl DirectorStore {
-    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
-        Self { conn }
+    pub fn new(db: Arc<Connection>) -> Self {
+        Self { db }
     }
 
     pub async fn register_device(&self, uuid: &Uuid, architecture: Architecture) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', ?2)",
-            params![uuid, architecture.as_str()],
-        )?;
+        self.db
+            .execute(
+                "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', ?2)",
+                (*uuid, architecture.as_str().to_string()),
+            )
+            .await
+            .map(|_| ())?;
         Ok(())
     }
 
     pub async fn device_exists(&self, uuid: &Uuid) -> Result<bool> {
-        let conn = self.conn.lock().await;
-        let res = conn
-            .query_one(
-                "SELECT 1 FROM devices WHERE uuid = ?1",
-                params![uuid],
-                |r| r.get(0),
-            )
+        let res = self
+            .db
+            .query_one("SELECT 1 FROM devices WHERE uuid = ?1", (*uuid,), |r| {
+                r.get::<_, i32>(0)
+            })
+            .await
             .optional()
             .map(|op: Option<i32>| op.is_some())?;
         Ok(res)
     }
 
     pub async fn update_device_last_seen(&self, uuid: &Uuid) -> Result<()> {
-        let conn = self.conn.lock().await;
-
-        conn.execute(
-            "UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
-            params![uuid],
-        )?;
+        self.db
+            .execute(
+                "UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
+                (*uuid,),
+            )
+            .await?;
         Ok(())
     }
 
@@ -150,140 +158,155 @@ impl DirectorStore {
         let merged: DeviceAttributes = serde_json::from_value(existing_json)?;
 
         // Update with merged attributes
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
-            params![serde_json::to_string(&merged)?, uuid,],
-        )?;
+        self.db
+            .execute(
+                "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
+                (serde_json::to_string(&merged)?, *uuid),
+            )
+            .await?;
 
         Ok(())
     }
 
     pub async fn get_device(&self, uuid: &Uuid) -> Result<Device> {
-        let conn = self.conn.lock().await;
-
-        let device = crate::database::query_one::<Device>(
-            &conn,
-            "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
-            &[uuid],
-        )?;
+        let device = self
+            .db
+            .query_one(
+                "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
+                (*uuid,),
+                Device::from_row,
+            )
+            .await?;
 
         Ok(device)
     }
 
     pub async fn get_all_devices(&self) -> Result<Vec<Device>> {
-        let conn = self.conn.lock().await;
-
-        let devices = crate::database::query_map_all::<Device>(
-            &conn,
-            "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
-            &[],
-        )?;
+        let devices = self
+            .db
+            .query(
+                "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
+                (),
+                Device::from_row,
+            )
+            .await?;
 
         Ok(devices)
     }
 
-    /// Find device UUID by MAC address from device attributes
-    /// Searches both legacy mac_address field and network_interfaces array
+    /// Find device UUID by MAC address from device attributes.
+    ///
+    /// Searches both legacy mac_address field and network_interfaces array.
     pub async fn find_device_by_mac(&self, mac: &str) -> Result<Option<Uuid>> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn.prepare(
-            "SELECT uuid FROM devices
-             WHERE json_extract(attributes, '$.mac_address') = ?
-                OR EXISTS (
-                  SELECT 1 FROM json_each(attributes, '$.network_interfaces')
-                  WHERE json_extract(value, '$.mac_address') = ?
-                )",
-        )?;
-
-        let result = stmt
-            .query_row(params![mac, mac], |row| row.get(0))
+        let mac = mac.to_string();
+        let result = self
+            .db
+            .query_row(
+                "SELECT uuid FROM devices
+                 WHERE json_extract(attributes, '$.mac_address') = ?1
+                    OR EXISTS (
+                      SELECT 1 FROM json_each(attributes, '$.network_interfaces')
+                      WHERE json_extract(value, '$.mac_address') = ?1
+                    )",
+                (mac,),
+                |row| row.get(0),
+            )
+            .await
             .optional()?;
 
         Ok(result)
     }
 
-    /// Set hostname in device attributes
+    /// Set hostname in device attributes.
     pub async fn set_hostname(&self, uuid: &Uuid, hostname: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-
-        conn.execute(
-            "UPDATE devices SET attributes = json_set(attributes, '$.hostname', ?) WHERE uuid = ?",
-            params![hostname, uuid],
-        )?;
+        self.db
+            .execute(
+                "UPDATE devices SET attributes = json_set(attributes, '$.hostname', ?1) WHERE uuid = ?2",
+                (hostname.to_string(), *uuid),
+            )
+            .await?;
 
         Ok(())
     }
 
-    /// Set MAC address in device attributes
+    /// Set MAC address in device attributes.
     pub async fn set_mac_address(&self, uuid: &Uuid, mac: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-
         // First, update the legacy mac_address field
-        conn.execute(
-            "UPDATE devices SET attributes = json_set(attributes, '$.mac_address', ?) WHERE uuid = ?",
-            params![mac, uuid],
-        )?;
+        self.db
+            .execute(
+                "UPDATE devices SET attributes = json_set(attributes, '$.mac_address', ?1) WHERE uuid = ?2",
+                (mac.to_string(), *uuid),
+            )
+            .await?;
 
         // Then, if network_interfaces array exists, update the first NIC's MAC address
-        let has_interfaces: bool = conn
+        let uuid_copy = *uuid;
+        let has_interfaces: bool = self
+            .db
             .query_row(
-                "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
-                params![uuid],
+                "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?1",
+                (*uuid,),
                 |row| {
                     let json_type: Option<String> = row.get(0)?;
                     Ok(json_type == Some("array".to_string()))
                 },
             )
+            .await
             .optional()?
             .unwrap_or(false);
 
         if has_interfaces {
             // Find the index of the first interface
-            let first_index: Option<i64> = conn
+            let first_index: Option<i64> = self
+                .db
                 .query_row(
-                    "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?), '$.network_interfaces')
+                    "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?1), '$.network_interfaces')
                      LIMIT 1",
-                    params![uuid],
+                    (uuid_copy,),
                     |row| row.get::<_, i64>(0),
                 )
+                .await
                 .optional()?;
 
             if let Some(index) = first_index {
                 let path = format!("$.network_interfaces[{}].mac_address", index);
-                conn.execute(
-                    "UPDATE devices SET attributes = json_set(attributes, ?, ?) WHERE uuid = ?",
-                    params![path, mac, uuid],
-                )?;
+                self.db
+                    .execute(
+                        "UPDATE devices SET attributes = json_set(attributes, ?1, ?2) WHERE uuid = ?3",
+                        (path, mac.to_string(), uuid_copy),
+                    )
+                    .await?;
             }
         }
 
         Ok(())
     }
 
-    /// Set IP address in device attributes (called by DHCP when lease becomes active)
-    /// Updates either BMC IP or network interface IP based on the MAC address
+    /// Set IP address in device attributes (called by DHCP when lease becomes active).
+    ///
+    /// Updates either BMC IP or network interface IP based on the MAC address.
     pub async fn set_ip_address(&self, uuid: &Uuid, ip: &str, mac: &str) -> Result<()> {
         // Check if this MAC belongs to the BMC
-        let is_bmc: bool = {
-            let conn = self.conn.lock().await;
-            conn.query_row(
-                "SELECT COALESCE(json_extract(attributes, '$.bmc.mac_address') = ?, 0) FROM devices WHERE uuid = ?",
-                params![mac, uuid],
+        let mac_str = mac.to_string();
+        let is_bmc: bool = self
+            .db
+            .query_row(
+                "SELECT COALESCE(json_extract(attributes, '$.bmc.mac_address') = ?1, 0) FROM devices WHERE uuid = ?2",
+                (mac_str, *uuid),
                 |row| row.get::<_, bool>(0),
             )
+            .await
             .optional()?
-            .unwrap_or(false)
-        };
+            .unwrap_or(false);
 
         if is_bmc {
             // Update BMC IP address
-            let conn = self.conn.lock().await;
-            conn.execute(
-                "UPDATE devices SET attributes = json_set(attributes, '$.bmc.ip_address', ?) WHERE uuid = ?",
-                params![ip, uuid],
-            )?;
+            self.db
+                .execute(
+                    "UPDATE devices SET attributes = json_set(attributes, '$.bmc.ip_address', ?1) WHERE uuid = ?2",
+                    (ip.to_string(), *uuid),
+                )
+                .await?;
             return Ok(());
         }
 
@@ -314,16 +337,16 @@ impl DirectorStore {
         Ok(())
     }
 
-    /// Get network interfaces from device attributes
+    /// Get network interfaces from device attributes.
     pub async fn get_network_interfaces(&self, uuid: &Uuid) -> Result<Vec<NetworkInterface>> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn.prepare(
-            "SELECT json_extract(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?",
-        )?;
-
-        let result = stmt
-            .query_row(params![uuid], |row| row.get::<_, Option<String>>(0))
+        let result = self
+            .db
+            .query_row(
+                "SELECT json_extract(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?1",
+                (*uuid,),
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .await
             .optional()?;
 
         match result {
@@ -337,287 +360,298 @@ impl DirectorStore {
         }
     }
 
-    /// Set network interfaces in device attributes
+    /// Set network interfaces in device attributes.
     pub async fn set_network_interfaces(
         &self,
         uuid: &Uuid,
         interfaces: &[NetworkInterface],
     ) -> Result<()> {
-        let conn = self.conn.lock().await;
-
         let json_str = serde_json::to_string(interfaces)?;
 
-        conn.execute(
-            "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', json(?)) WHERE uuid = ?",
-            params![json_str, uuid],
-        )?;
+        self.db
+            .execute(
+                "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', json(?1)) WHERE uuid = ?2",
+                (json_str, *uuid),
+            )
+            .await?;
 
         Ok(())
     }
 
-    /// Find device UUID by MAC address in either legacy mac_address field or network_interfaces array
+    /// Find device UUID by MAC address in either legacy mac_address field or network_interfaces array.
     #[cfg(test)]
     pub async fn find_device_by_any_mac(&self, mac: &str) -> Result<Option<Uuid>> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn.prepare(
-            "SELECT uuid FROM devices
-             WHERE json_extract(attributes, '$.mac_address') = ?
-                OR EXISTS (
-                  SELECT 1 FROM json_each(attributes, '$.network_interfaces')
-                  WHERE json_extract(value, '$.mac_address') = ?
-                )",
-        )?;
-
-        let result = stmt
-            .query_row(params![mac, mac], |row| row.get(0))
+        let mac = mac.to_string();
+        let result = self
+            .db
+            .query_row(
+                "SELECT uuid FROM devices
+                 WHERE json_extract(attributes, '$.mac_address') = ?1
+                    OR EXISTS (
+                      SELECT 1 FROM json_each(attributes, '$.network_interfaces')
+                      WHERE json_extract(value, '$.mac_address') = ?1
+                    )",
+                (mac,),
+                |row| row.get(0),
+            )
+            .await
             .optional()?;
 
         Ok(result)
     }
 
-    /// Create a pending device entry for a MAC address
-    /// Returns the ID of the created pending device
-    /// If a pending device already exists for this MAC, does nothing and returns the existing ID
+    /// Create a pending device entry for a MAC address.
+    ///
+    /// Returns the ID of the created pending device. If a pending device already exists
+    /// for this MAC, does nothing and returns the existing ID.
     pub async fn create_pending_device(&self, mac_address: &str, network_id: i64) -> Result<i64> {
-        let conn = self.conn.lock().await;
+        self.db
+            .execute(
+                "INSERT INTO pending_devices (mac_address, network_id) VALUES (?1, ?2)
+                 ON CONFLICT(mac_address) DO NOTHING",
+                (mac_address.to_string(), network_id),
+            )
+            .await?;
 
-        conn.execute(
-            "INSERT INTO pending_devices (mac_address, network_id) VALUES (?1, ?2)
-             ON CONFLICT(mac_address) DO NOTHING",
-            params![mac_address, network_id],
-        )?;
-
-        let id = conn.last_insert_rowid();
+        let id = self.db.last_insert_rowid().await;
 
         // If no rows were inserted (conflict), get the existing ID
         if id == 0 {
-            let existing_id: i64 = conn.query_row(
-                "SELECT id FROM pending_devices WHERE mac_address = ?1",
-                params![mac_address],
-                |row| row.get(0),
-            )?;
+            let existing_id: i64 = self
+                .db
+                .query_one(
+                    "SELECT id FROM pending_devices WHERE mac_address = ?1",
+                    (mac_address.to_string(),),
+                    |row| row.get(0),
+                )
+                .await?;
             Ok(existing_id)
         } else {
             Ok(id)
         }
     }
 
-    /// Find pending device ID by MAC address
-    /// Returns None if no pending device exists or if it's already completed
+    /// Find pending device ID by MAC address.
+    ///
+    /// Returns None if no pending device exists or if it's already completed.
     pub async fn find_pending_device_by_mac(&self, mac_address: &str) -> Result<Option<i64>> {
-        let conn = self.conn.lock().await;
-
-        let result = conn
+        let result = self
+            .db
             .query_row(
                 "SELECT id FROM pending_devices WHERE mac_address = ?1 AND completed_at IS NULL",
-                params![mac_address],
+                (mac_address.to_string(),),
                 |row| row.get::<_, i64>(0),
             )
+            .await
             .optional()?;
 
         Ok(result)
     }
 
-    /// Complete a pending device by linking it to a device UUID
-    /// Marks the pending device as completed
+    /// Complete a pending device by linking it to a device UUID.
+    ///
+    /// Marks the pending device as completed.
     pub async fn complete_pending_device(
         &self,
         mac_address: &str,
         device_uuid: &Uuid,
     ) -> Result<()> {
-        let conn = self.conn.lock().await;
-
-        conn.execute(
-            "UPDATE pending_devices
-             SET device_uuid = ?1, completed_at = CURRENT_TIMESTAMP
-             WHERE mac_address = ?2 AND completed_at IS NULL",
-            params![device_uuid, mac_address],
-        )?;
+        self.db
+            .execute(
+                "UPDATE pending_devices
+                 SET device_uuid = ?1, completed_at = CURRENT_TIMESTAMP
+                 WHERE mac_address = ?2 AND completed_at IS NULL",
+                (*device_uuid, mac_address.to_string()),
+            )
+            .await?;
 
         Ok(())
     }
 
-    /// Get all pending devices that haven't been completed yet
+    /// Get all pending devices that haven't been completed yet.
     pub async fn get_pending_devices(&self) -> Result<Vec<PendingDevice>> {
-        let conn = self.conn.lock().await;
-
-        let devices = crate::database::query_map_all::<PendingDevice>(
-            &conn,
-            "SELECT id, mac_address, device_uuid, network_id, created_at, completed_at
-             FROM pending_devices
-             WHERE completed_at IS NULL
-             ORDER BY created_at DESC",
-            &[],
-        )?;
+        let devices = self
+            .db
+            .query(
+                "SELECT id, mac_address, device_uuid, network_id, created_at, completed_at
+                 FROM pending_devices
+                 WHERE completed_at IS NULL
+                 ORDER BY created_at DESC",
+                (),
+                PendingDevice::from_row,
+            )
+            .await?;
 
         Ok(devices)
     }
 
-    /// Delete a pending device by ID
+    /// Delete a pending device by ID.
     pub async fn delete_pending_device(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute("DELETE FROM pending_devices WHERE id = ?1", params![id])?;
+        self.db
+            .execute("DELETE FROM pending_devices WHERE id = ?1", (id,))
+            .await?;
         Ok(())
     }
 
-    /// Delete a device by UUID
-    /// Cascades to plans and transitions, sets leases device_uuid to NULL
+    /// Delete a device by UUID.
+    ///
+    /// Cascades to plans and transitions, sets leases device_uuid to NULL.
     pub async fn delete_device(&self, uuid: &Uuid) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "DELETE FROM pending_devices WHERE device_uuid = ?1",
-            params![uuid],
-        )?;
-        conn.execute("DELETE FROM devices WHERE uuid = ?1", params![uuid])?;
+        self.db
+            .execute(
+                "DELETE FROM pending_devices WHERE device_uuid = ?1",
+                (*uuid,),
+            )
+            .await?;
+        self.db
+            .execute("DELETE FROM devices WHERE uuid = ?1", (*uuid,))
+            .await?;
         Ok(())
     }
 
-    /// Find device UUID by BMC MAC address
+    /// Find device UUID by BMC MAC address.
     ///
     /// Searches all devices for a BMC with the given MAC address in their attributes.
     /// Returns the device UUID if a match is found.
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> Result<Option<Uuid>> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn.prepare(
-            "SELECT uuid FROM devices
-             WHERE json_extract(attributes, '$.bmc.mac_address') = ?",
-        )?;
-
-        let result = stmt.query_row(params![mac], |row| row.get(0)).optional()?;
+        let result = self
+            .db
+            .query_row(
+                "SELECT uuid FROM devices
+                 WHERE json_extract(attributes, '$.bmc.mac_address') = ?1",
+                (mac.to_string(),),
+                |row| row.get(0),
+            )
+            .await
+            .optional()?;
 
         Ok(result)
     }
 
-    /// Assign a platform to a device
+    /// Assign a platform to a device.
     pub async fn assign_platform_to_device(
         &self,
         device_uuid: &Uuid,
         platform_id: i64,
     ) -> Result<()> {
-        let conn = self.conn.lock().await;
-
-        conn.execute(
-            "UPDATE devices SET platform_id = ?1 WHERE uuid = ?2",
-            params![platform_id, device_uuid],
-        )
-        .context("Failed to assign platform to device")?;
+        self.db
+            .execute(
+                "UPDATE devices SET platform_id = ?1 WHERE uuid = ?2",
+                (platform_id, *device_uuid),
+            )
+            .await
+            .context("Failed to assign platform to device")?;
 
         Ok(())
     }
 
-    /// Get the platform ID assigned to a device
+    /// Get the platform ID assigned to a device.
     pub async fn get_device_platform_id(&self, device_uuid: &Uuid) -> Result<Option<i64>> {
-        let conn = self.conn.lock().await;
-
-        let result = conn
+        let result = self
+            .db
             .query_row(
                 "SELECT platform_id FROM devices WHERE uuid = ?1",
-                params![device_uuid],
+                (*device_uuid,),
                 |row| row.get::<_, Option<i64>>(0),
             )
+            .await
             .optional()?;
 
         Ok(result.flatten())
     }
 
-    /// List all devices with a specific platform
+    /// List all devices with a specific platform.
     pub async fn list_devices_with_platform(&self, platform_id: i64) -> Result<Vec<Uuid>> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt =
-            conn.prepare("SELECT uuid FROM devices WHERE platform_id = ?1 ORDER BY uuid")?;
-
-        let rows = stmt.query_map(params![platform_id], |row| row.get(0))?;
-
-        let mut uuids = Vec::new();
-        for row in rows {
-            uuids.push(row?);
-        }
+        let uuids = self
+            .db
+            .query(
+                "SELECT uuid FROM devices WHERE platform_id = ?1 ORDER BY uuid",
+                (platform_id,),
+                |row| row.get(0),
+            )
+            .await?;
 
         Ok(uuids)
     }
 
-    /// Assign a role to a device
+    /// Assign a role to a device.
     pub async fn assign_role_to_device(&self, device_uuid: &Uuid, role_id: i64) -> Result<()> {
-        let conn = self.conn.lock().await;
-
-        conn.execute(
-            "UPDATE devices SET role_id = ?1 WHERE uuid = ?2",
-            params![role_id, device_uuid],
-        )
-        .context("Failed to assign role to device")?;
+        self.db
+            .execute(
+                "UPDATE devices SET role_id = ?1 WHERE uuid = ?2",
+                (role_id, *device_uuid),
+            )
+            .await
+            .context("Failed to assign role to device")?;
 
         Ok(())
     }
 
-    /// Get the role ID assigned to a device
+    /// Get the role ID assigned to a device.
     pub async fn get_device_role_id(&self, device_uuid: &Uuid) -> Result<Option<i64>> {
-        let conn = self.conn.lock().await;
-
-        let result = conn
+        let result = self
+            .db
             .query_row(
                 "SELECT role_id FROM devices WHERE uuid = ?1",
-                params![device_uuid],
+                (*device_uuid,),
                 |row| row.get::<_, Option<i64>>(0),
             )
+            .await
             .optional()?;
 
         Ok(result.flatten())
     }
 
-    /// List all devices with a specific role
+    /// List all devices with a specific role.
     pub async fn list_devices_with_role(&self, role_id: i64) -> Result<Vec<Uuid>> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn.prepare("SELECT uuid FROM devices WHERE role_id = ?1 ORDER BY uuid")?;
-
-        let rows = stmt.query_map(params![role_id], |row| row.get(0))?;
-
-        let mut uuids = Vec::new();
-        for row in rows {
-            uuids.push(row?);
-        }
+        let uuids = self
+            .db
+            .query(
+                "SELECT uuid FROM devices WHERE role_id = ?1 ORDER BY uuid",
+                (role_id,),
+                |row| row.get(0),
+            )
+            .await?;
 
         Ok(uuids)
     }
 
-    /// Find devices with the same MAC address on the same network
-    /// Returns Vec<(device_uuid, interface_name)>
+    /// Find devices with the same MAC address on the same network.
     ///
-    /// This function searches for duplicate MAC addresses on a specific network,
-    /// excluding a given device UUID. It's used to detect MAC conflicts during
-    /// device registration.
+    /// Returns Vec<(device_uuid, interface_name)>. This function searches for duplicate MAC
+    /// addresses on a specific network, excluding a given device UUID. It's used to detect
+    /// MAC conflicts during device registration.
     pub async fn find_duplicate_macs_on_network(
         &self,
         mac: &str,
         network_id: i64,
         exclude_device: &Uuid,
     ) -> Result<Vec<(Uuid, String)>> {
-        let conn = self.conn.lock().await;
+        let mac = mac.to_string();
+        let exclude = *exclude_device;
 
-        let mut stmt = conn.prepare(
-            "SELECT uuid, attributes FROM devices
-             WHERE uuid != ?1
-             AND EXISTS (
-               SELECT 1 FROM json_each(attributes, '$.network_interfaces') as iface
-               WHERE json_extract(iface.value, '$.mac_address') = ?2
-                 AND json_extract(iface.value, '$.network_id') = ?3
-             )",
-        )?;
-
-        let rows = stmt.query_map(params![exclude_device, mac, network_id], |row| {
-            let uuid = row.get(0)?;
-            let attributes_json: Option<String> = row.get(1)?;
-            Ok((uuid, attributes_json))
-        })?;
+        let rows = self
+            .db
+            .query(
+                "SELECT uuid, attributes FROM devices
+                 WHERE uuid != ?1
+                 AND EXISTS (
+                   SELECT 1 FROM json_each(attributes, '$.network_interfaces') as iface
+                   WHERE json_extract(iface.value, '$.mac_address') = ?2
+                     AND json_extract(iface.value, '$.network_id') = ?3
+                 )",
+                (exclude, mac.clone(), network_id),
+                |row| {
+                    let uuid: Uuid = row.get(0)?;
+                    let attributes_json: Option<String> = row.get(1)?;
+                    Ok((uuid, attributes_json))
+                },
+            )
+            .await?;
 
         let mut duplicates = Vec::new();
 
-        for row in rows {
-            let (uuid, attributes_json) = row?;
-
+        for (uuid, attributes_json) in rows {
             // Parse attributes to find the matching interface name
             if let Some(json_str) = attributes_json
                 && let Ok(attributes) =
@@ -642,7 +676,7 @@ impl DirectorStore {
     }
 }
 
-/// Extract last UUID segment (after final hyphen) for hostname generation
+/// Extract last UUID segment (after final hyphen) for hostname generation.
 pub fn extract_uuid_last_segment(uuid: &Uuid) -> String {
     let uuid_str = uuid.to_string();
     uuid_str
@@ -652,15 +686,16 @@ pub fn extract_uuid_last_segment(uuid: &Uuid) -> String {
         .to_string()
 }
 
-/// Generate hostname from UUID: "node-{last_segment}"
+/// Generate hostname from UUID: "node-{last_segment}".
 pub fn generate_hostname_from_uuid(uuid: &Uuid) -> String {
     format!("node-{}", extract_uuid_last_segment(uuid))
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::test_database_path;
+
     use super::*;
-    use tempfile::tempdir;
     use uuid::Uuid;
 
     fn test_uuid(suffix: u16) -> Uuid {
@@ -668,19 +703,14 @@ mod tests {
             .expect("test UUID should be valid")
     }
 
-    async fn create_test_store() -> (DirectorStore, tempfile::TempDir) {
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let conn = crate::database::open(&db_path).unwrap();
-        let db = Arc::new(Mutex::new(conn));
-
+    async fn create_test_store(path: String) -> DirectorStore {
+        let db = Arc::new(crate::database::open(path).await.unwrap());
         // Note: No default network is created. Tests that need networks should create them explicitly.
-
-        (DirectorStore::new(db), temp_dir)
+        DirectorStore::new(db)
     }
 
-    /// Helper to create a test network and pool for tests that need DHCP functionality
-    async fn create_test_network(db: &Arc<Mutex<rusqlite::Connection>>) -> i64 {
+    /// Helper to create a test network and pool for tests that need DHCP functionality.
+    async fn create_test_network(db: &Arc<crate::database::Connection>) -> i64 {
         let dhcp_store = crate::dhcp::DhcpStore::new(db.clone());
         let network = dhcp_store
             .create_network(
@@ -717,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_hostname() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x20);
 
         // Register device
@@ -739,7 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_mac_address() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x21);
 
         // Register device
@@ -764,7 +794,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_ip_address() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x23);
         let mac = "aa:bb:cc:dd:ee:ff";
 
@@ -793,7 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hostname_generation_on_register() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x22);
 
         // Register device
@@ -816,7 +846,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_attributes_preserves_existing() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x24);
 
         // Register device
@@ -879,7 +909,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_attributes_overwrites_existing_keys() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x25);
 
         // Register device
@@ -934,7 +964,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_attributes_empty_map() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x26);
 
         // Register device
@@ -959,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_network_interfaces_empty() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x30);
 
         // Register device without any NICs
@@ -975,7 +1005,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_network_interfaces_single() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x31);
 
         // Register device
@@ -1009,7 +1039,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_network_interfaces_multiple() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x32);
 
         // Register device
@@ -1063,7 +1093,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_network_interfaces_overwrites() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x33);
 
         // Register device
@@ -1116,7 +1146,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_device_by_mac_legacy_field() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x34);
 
         // Register device
@@ -1142,7 +1172,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_device_by_mac_in_interfaces_array() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x35);
 
         // Register device
@@ -1192,7 +1222,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_device_by_any_mac() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x36);
 
         // Register device
@@ -1249,7 +1279,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_mac_address_legacy_only() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x37);
 
         // Register device
@@ -1278,7 +1308,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_mac_address_updates_first_interface() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x38);
 
         // Register device
@@ -1335,7 +1365,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_ip_address_creates_interface_when_missing() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x39);
         let mac = "aa:bb:cc:dd:ee:ff";
 
@@ -1364,7 +1394,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_ip_address_updates_by_mac() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x40);
 
         // Register device
@@ -1424,7 +1454,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_backward_compatibility_legacy_device() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x41);
 
         // Register device and set up as a legacy device (no network_interfaces)
@@ -1465,7 +1495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_ip_address_for_bmc() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x42);
         let bmc_mac = "aa:bb:cc:dd:ee:aa";
 
@@ -1476,15 +1506,15 @@ mod tests {
             .unwrap();
 
         // Set BMC information in device attributes
-        let conn = store.conn.lock().await;
-        conn.execute(
-            r#"UPDATE devices SET attributes = json_set(attributes, '$.bmc',
+        store.db
+            .execute(
+                r#"UPDATE devices SET attributes = json_set(attributes, '$.bmc',
                json('{"mac_address":"aa:bb:cc:dd:ee:aa","ip_address":null,"ip_address_source":"Unknown"}')
-            ) WHERE uuid = ?"#,
-            params![uuid],
-        )
-        .unwrap();
-        drop(conn);
+            ) WHERE uuid = ?1"#,
+                (uuid,),
+            )
+            .await
+            .unwrap();
 
         // Set IP address for BMC MAC
         store
@@ -1504,7 +1534,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_network_interfaces_invalid_json() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x42);
 
         // Register device
@@ -1514,12 +1544,13 @@ mod tests {
             .unwrap();
 
         // Manually set invalid JSON in network_interfaces field
-        let conn = store.conn.lock().await;
-        conn.execute(
-            "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', 'invalid') WHERE uuid = ?",
-            params![uuid],
-        ).unwrap();
-        drop(conn);
+        store.db
+            .execute(
+                "UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces', 'invalid') WHERE uuid = ?1",
+                (uuid,),
+            )
+            .await
+            .unwrap();
 
         // Should return empty vec instead of error
         let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
@@ -1530,7 +1561,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_interface_disabled_fields_serialization() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x43);
 
         // Register device
@@ -1568,7 +1599,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_interface_backward_compatibility() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid = test_uuid(0x44);
 
         // Register device
@@ -1578,15 +1609,15 @@ mod tests {
             .unwrap();
 
         // Manually set old-style interface without new fields
-        let conn = store.conn.lock().await;
-        conn.execute(
-            r#"UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces',
+        store.db
+            .execute(
+                r#"UPDATE devices SET attributes = json_set(attributes, '$.network_interfaces',
                json('[{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:01","ip_address":"10.0.0.100"}]')
-            ) WHERE uuid = ?"#,
-            params![uuid],
-        )
-        .unwrap();
-        drop(conn);
+            ) WHERE uuid = ?1"#,
+                (uuid,),
+            )
+            .await
+            .unwrap();
 
         // Should deserialize with default values for new fields
         let interfaces = store.get_network_interfaces(&uuid).await.unwrap();
@@ -1598,7 +1629,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_duplicate_macs_on_network_no_duplicates() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid1 = test_uuid(0x45);
         let uuid2 = test_uuid(0x46);
 
@@ -1652,7 +1683,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_duplicate_macs_on_network_finds_duplicate() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid1 = test_uuid(0x47);
         let uuid2 = test_uuid(0x48);
 
@@ -1720,7 +1751,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_duplicate_macs_on_different_networks() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid1 = test_uuid(0x49);
         let uuid2 = test_uuid(0x4A);
 
@@ -1784,7 +1815,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_duplicate_macs_multiple_duplicates() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid1 = test_uuid(0x51);
         let uuid2 = test_uuid(0x52);
         let uuid3 = test_uuid(0x53);
@@ -1867,7 +1898,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_duplicate_macs_no_network_id() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
         let uuid1 = test_uuid(0x54);
         let uuid2 = test_uuid(0x55);
 
@@ -1924,8 +1955,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_pending_device() {
-        let (store, _temp) = create_test_store().await;
-        let network_id = create_test_network(&store.conn).await;
+        let store = create_test_store(test_database_path!()).await;
+        let network_id = create_test_network(&store.db).await;
         let mac = "aa:bb:cc:dd:ee:99";
 
         // Create a pending device
@@ -1947,7 +1978,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_nonexistent_pending_device() {
-        let (store, _temp) = create_test_store().await;
+        let store = create_test_store(test_database_path!()).await;
 
         // Deleting a non-existent pending device should not error
         // (SQL DELETE on non-existent row succeeds with 0 rows affected)
@@ -1957,8 +1988,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_device_with_pending() {
-        let (store, _temp) = create_test_store().await;
-        let network_id = create_test_network(&store.conn).await;
+        let store = create_test_store(test_database_path!()).await;
+        let network_id = create_test_network(&store.db).await;
         let uuid = test_uuid(0x54);
         let mac = "aa:bb:cc:dd:ee:99";
 
@@ -1976,13 +2007,18 @@ mod tests {
         store.delete_device(&uuid).await.unwrap();
 
         // Ensure pending entry is removed
-        let exists: Result<bool, rusqlite::Error> = store.conn.lock().await.query_one(
-            "SELECT 1 FROM pending_devices WHERE mac_address = ?1",
-            [mac],
-            |r| r.get(0),
-        );
+        let exists: rusqlite::Result<bool> = store
+            .db
+            .query_one(
+                "SELECT 1 FROM pending_devices WHERE mac_address = ?1",
+                (mac.to_string(),),
+                |r| r.get(0),
+            )
+            .await
+            .optional()
+            .map(|op: Option<bool>| op.is_some());
         assert!(
-            matches!(exists, Err(rusqlite::Error::QueryReturnedNoRows)),
+            matches!(exists, Ok(false)),
             "Deleting a Device must delete pending records. {:?}",
             exists
         );

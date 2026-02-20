@@ -8,10 +8,8 @@ mod request;
 mod store;
 
 use anyhow::Result;
-use rusqlite::Connection;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 use crate::director::Director;
@@ -38,7 +36,7 @@ pub struct StartResult {
 
 impl DhcpServer {
     pub async fn new(
-        db: Arc<Mutex<Connection>>,
+        db: Arc<crate::database::Connection>,
         director: Director,
         tftp_server: String,
         http_server: String,
@@ -142,16 +140,15 @@ pub fn spawn_lease_cleanup_task(store: DhcpStore) -> JoinHandle<()> {
 mod tests {
 
     use super::*;
-    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_dhcp_server_creation() {
         use crate::boot_files::FilesystemBootFileProvider;
+        use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let conn = crate::database::open(db_path).unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let db = Arc::new(crate::database::open(db_path).await.unwrap());
         let director = Director::new(db.clone());
 
         // Create a temporary boot files directory for testing

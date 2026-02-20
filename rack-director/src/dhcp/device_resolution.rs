@@ -96,13 +96,11 @@ mod tests {
     use crate::database;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
 
     async fn create_test_resolver() -> DirectorDeviceResolver {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let conn = database::open(db_path).unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let db = Arc::new(database::open(db_path).await.unwrap());
         let director = Director::new(db.clone());
         DirectorDeviceResolver::new(director)
     }
@@ -126,7 +124,7 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_returns_not_pending_for_unknown() {
         let resolver = create_test_resolver().await;
-        let ctx = resolver.resolve("11:22:33:44:55:66", None).await.unwrap();
+        let _ctx = resolver.resolve("11:22:33:44:55:66", None).await.unwrap();
     }
 
     #[tokio::test]

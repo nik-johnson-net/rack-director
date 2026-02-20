@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::database::Connection;
 use crate::dhcp::DhcpStore;
 use crate::director::store::DirectorStore;
 use crate::director::store::generate_hostname_from_uuid;
@@ -13,6 +13,7 @@ use crate::plans::{Plan, PlanStatus, PlansStore};
 use crate::platforms::PlatformsStore;
 use crate::roles::RolesStore;
 
+mod devices;
 mod ipmi;
 pub(crate) mod store;
 
@@ -32,14 +33,14 @@ pub struct Director {
 }
 
 impl Director {
-    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
-        let store = DirectorStore::new(conn.clone());
-        let plans_store = PlansStore::new(conn.clone());
-        let lifecycle_store = LifecycleStore::new(conn.clone());
-        let os_store = OperatingSystemsStore::new(conn.clone());
-        let roles_store = RolesStore::new(conn.clone());
-        let platforms_store = PlatformsStore::new(conn.clone());
-        let dhcp_store = DhcpStore::new(conn);
+    pub fn new(db: Arc<Connection>) -> Self {
+        let store = DirectorStore::new(db.clone());
+        let plans_store = PlansStore::new(db.clone());
+        let lifecycle_store = LifecycleStore::new(db.clone());
+        let os_store = OperatingSystemsStore::new(db.clone());
+        let roles_store = RolesStore::new(db.clone());
+        let platforms_store = PlatformsStore::new(db.clone());
+        let dhcp_store = DhcpStore::new(db);
         Director {
             store,
             plans_store,
@@ -779,13 +780,12 @@ mod tests {
     use crate::{database, plans::PlanStatus};
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
 
     async fn setup_test_director() -> (Director, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let db = database::open(&db_path).unwrap();
-        let director = Director::new(Arc::new(Mutex::new(db)));
+        let db = Arc::new(database::open(db_path).await.unwrap());
+        let director = Director::new(db);
         (director, temp_dir)
     }
 
@@ -1395,9 +1395,8 @@ mod tests {
 
         // Create a DHCP network first
         let db_path = temp_dir.path().join("test.db");
-        let db = crate::database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(Mutex::new(db));
-        let dhcp_store = crate::dhcp::DhcpStore::new(db_tokio);
+        let db = Arc::new(crate::database::open(db_path).await.unwrap());
+        let dhcp_store = crate::dhcp::DhcpStore::new(db);
 
         let network = dhcp_store
             .create_network(
@@ -1465,9 +1464,8 @@ mod tests {
 
         // Create DHCP network
         let db_path = temp_dir.path().join("test.db");
-        let db = crate::database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(Mutex::new(db));
-        let dhcp_store = crate::dhcp::DhcpStore::new(db_tokio);
+        let db = Arc::new(crate::database::open(db_path).await.unwrap());
+        let dhcp_store = crate::dhcp::DhcpStore::new(db);
 
         let network = dhcp_store
             .create_network(

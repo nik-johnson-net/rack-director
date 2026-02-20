@@ -1,21 +1,21 @@
 use super::{DiskLayout, Role, RoleWithOs};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use rusqlite::{Connection, params};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
+use crate::database::{Connection, FromRow};
 
 #[derive(Clone)]
 pub struct RolesStore {
-    db: Arc<Mutex<Connection>>,
+    db: Arc<Connection>,
 }
 
 impl RolesStore {
-    pub fn new(db: Arc<Mutex<Connection>>) -> Self {
+    pub fn new(db: Arc<Connection>) -> Self {
         Self { db }
     }
 
-    /// Create a new role
+    /// Create a new role.
     pub async fn create(
         &self,
         name: &str,
@@ -24,19 +24,20 @@ impl RolesStore {
         disk_layout: &DiskLayout,
         config_template: Option<&serde_json::Value>,
     ) -> Result<Role> {
-        let conn = self.db.lock().await;
         let now = Utc::now();
         let disk_layout_json = serde_json::to_string(disk_layout)?;
         let config_json = config_template.map(serde_json::to_string).transpose()?;
 
-        conn.execute(
-            "INSERT INTO roles (name, description, os_id, disk_layout, config_template, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![name, description, os_id, disk_layout_json, config_json, now, now],
-        )
-        .context("Failed to insert role")?;
+        self.db
+            .execute(
+                "INSERT INTO roles (name, description, os_id, disk_layout, config_template, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (name.to_string(), description.map(|s| s.to_string()), os_id, disk_layout_json, config_json, now, now),
+            )
+            .await
+            .context("Failed to insert role")?;
 
-        let id = conn.last_insert_rowid();
+        let id = self.db.last_insert_rowid().await;
 
         Ok(Role {
             id: Some(id),
@@ -50,118 +51,116 @@ impl RolesStore {
         })
     }
 
-    /// Get a role by ID
+    /// Get a role by ID.
     pub async fn get(&self, id: i64) -> Result<Role> {
-        let conn = self.db.lock().await;
-
-        let role = crate::database::query_one::<Role>(
-            &conn,
-            "SELECT id, name, description, os_id, disk_layout, config_template, created_at, updated_at
-             FROM roles WHERE id = ?1",
-            &[&id],
-        )
-        .context("Role not found")?;
-
-        Ok(role)
-    }
-
-    /// Get a role with its associated OS information
-    pub async fn get_with_os(&self, id: i64) -> Result<RoleWithOs> {
-        let conn = self.db.lock().await;
-
-        let mut stmt = conn.prepare(
-            "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
-                    r.created_at, r.updated_at, o.name, o.version
-             FROM roles r
-             JOIN operating_systems o ON r.os_id = o.id
-             WHERE r.id = ?1",
-        )?;
-
-        let role = stmt
-            .query_row(params![id], |row| {
-                let disk_layout_json: String = row.get(4)?;
-                let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
-                let config_json: Option<String> = row.get(5)?;
-                let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
-
-                Ok(RoleWithOs {
-                    role: Role {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        description: row.get(2)?,
-                        os_id: row.get(3)?,
-                        disk_layout,
-                        config_template,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                    },
-                    os_name: row.get(8)?,
-                    os_version: row.get(9)?,
-                })
-            })
+        let role = self
+            .db
+            .query_one(
+                "SELECT id, name, description, os_id, disk_layout, config_template, created_at, updated_at
+                 FROM roles WHERE id = ?1",
+                (id,),
+                Role::from_row,
+            )
+            .await
             .context("Role not found")?;
 
         Ok(role)
     }
 
-    /// List all roles (only used in tests)
+    /// Get a role with its associated OS information.
+    pub async fn get_with_os(&self, id: i64) -> Result<RoleWithOs> {
+        let role = self
+            .db
+            .query_one(
+                "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
+                        r.created_at, r.updated_at, o.name, o.version
+                 FROM roles r
+                 JOIN operating_systems o ON r.os_id = o.id
+                 WHERE r.id = ?1",
+                (id,),
+                |row| {
+                    let disk_layout_json: String = row.get(4)?;
+                    let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
+                    let config_json: Option<String> = row.get(5)?;
+                    let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
+
+                    Ok(RoleWithOs {
+                        role: Role {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            description: row.get(2)?,
+                            os_id: row.get(3)?,
+                            disk_layout,
+                            config_template,
+                            created_at: row.get(6)?,
+                            updated_at: row.get(7)?,
+                        },
+                        os_name: row.get(8)?,
+                        os_version: row.get(9)?,
+                    })
+                },
+            )
+            .await
+            .context("Role not found")?;
+
+        Ok(role)
+    }
+
+    /// List all roles (only used in tests).
     #[cfg(test)]
     pub async fn list(&self) -> Result<Vec<Role>> {
-        let conn = self.db.lock().await;
-
-        let roles = crate::database::query_map_all::<Role>(
-            &conn,
-            "SELECT id, name, description, os_id, disk_layout, config_template, created_at, updated_at
-             FROM roles ORDER BY name",
-            &[],
-        )?;
+        let roles = self
+            .db
+            .query(
+                "SELECT id, name, description, os_id, disk_layout, config_template, created_at, updated_at
+                 FROM roles ORDER BY name",
+                (),
+                Role::from_row,
+            )
+            .await?;
 
         Ok(roles)
     }
 
-    /// List all roles with their OS information
+    /// List all roles with their OS information.
     pub async fn list_with_os(&self) -> Result<Vec<RoleWithOs>> {
-        let conn = self.db.lock().await;
+        let roles = self
+            .db
+            .query(
+                "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
+                        r.created_at, r.updated_at, o.name, o.version
+                 FROM roles r
+                 JOIN operating_systems o ON r.os_id = o.id
+                 ORDER BY r.name",
+                (),
+                |row| {
+                    let disk_layout_json: String = row.get(4)?;
+                    let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
+                    let config_json: Option<String> = row.get(5)?;
+                    let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
 
-        let mut stmt = conn.prepare(
-            "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
-                    r.created_at, r.updated_at, o.name, o.version
-             FROM roles r
-             JOIN operating_systems o ON r.os_id = o.id
-             ORDER BY r.name",
-        )?;
-
-        let rows = stmt.query_map(params![], |row| {
-            let disk_layout_json: String = row.get(4)?;
-            let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
-            let config_json: Option<String> = row.get(5)?;
-            let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
-
-            Ok(RoleWithOs {
-                role: Role {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    os_id: row.get(3)?,
-                    disk_layout,
-                    config_template,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
+                    Ok(RoleWithOs {
+                        role: Role {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            description: row.get(2)?,
+                            os_id: row.get(3)?,
+                            disk_layout,
+                            config_template,
+                            created_at: row.get(6)?,
+                            updated_at: row.get(7)?,
+                        },
+                        os_name: row.get(8)?,
+                        os_version: row.get(9)?,
+                    })
                 },
-                os_name: row.get(8)?,
-                os_version: row.get(9)?,
-            })
-        })?;
-
-        let mut roles = Vec::new();
-        for row in rows {
-            roles.push(row?);
-        }
+            )
+            .await?;
 
         Ok(roles)
     }
 
-    /// Update a role
+    /// Update a role.
     pub async fn update(
         &self,
         id: i64,
@@ -171,63 +170,59 @@ impl RolesStore {
         disk_layout: Option<&DiskLayout>,
         config_template: Option<&serde_json::Value>,
     ) -> Result<Role> {
-        let needs_update = {
-            let conn = self.db.lock().await;
-            let now = Utc::now();
+        let now = Utc::now();
 
-            let mut updates = Vec::new();
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut updates = Vec::new();
+        // Collect params as rusqlite Values for Send + 'static compatibility
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
 
-            if let Some(name) = name {
-                updates.push("name = ?");
-                params.push(Box::new(name.to_string()));
-            }
-            if let Some(description) = description {
-                updates.push("description = ?");
-                params.push(Box::new(description.to_string()));
-            }
-            if let Some(os_id) = os_id {
-                updates.push("os_id = ?");
-                params.push(Box::new(os_id));
-            }
-            if let Some(disk_layout) = disk_layout {
-                updates.push("disk_layout = ?");
-                let json = serde_json::to_string(disk_layout)?;
-                params.push(Box::new(json));
-            }
-            if let Some(config_template) = config_template {
-                updates.push("config_template = ?");
-                let json = serde_json::to_string(config_template)?;
-                params.push(Box::new(json));
-            }
+        if let Some(name) = name {
+            updates.push("name = ?");
+            values.push(rusqlite::types::Value::Text(name.to_string()));
+        }
+        if let Some(description) = description {
+            updates.push("description = ?");
+            values.push(rusqlite::types::Value::Text(description.to_string()));
+        }
+        if let Some(os_id) = os_id {
+            updates.push("os_id = ?");
+            values.push(rusqlite::types::Value::Integer(os_id));
+        }
+        if let Some(disk_layout) = disk_layout {
+            updates.push("disk_layout = ?");
+            let json = serde_json::to_string(disk_layout)?;
+            values.push(rusqlite::types::Value::Text(json));
+        }
+        if let Some(config_template) = config_template {
+            updates.push("config_template = ?");
+            let json = serde_json::to_string(config_template)?;
+            values.push(rusqlite::types::Value::Text(json));
+        }
 
-            if updates.is_empty() {
-                false
-            } else {
-                updates.push("updated_at = ?");
-                params.push(Box::new(now));
-                params.push(Box::new(id));
-
-                let query = format!("UPDATE roles SET {} WHERE id = ?", updates.join(", "));
-
-                conn.execute(&query, rusqlite::params_from_iter(params.iter()))?;
-                true
-            }
-        };
-
-        if !needs_update {
+        if updates.is_empty() {
             return self.get(id).await;
         }
+
+        updates.push("updated_at = ?");
+        values.push(rusqlite::types::Value::Text(now.to_rfc3339()));
+        values.push(rusqlite::types::Value::Integer(id));
+
+        let query = format!("UPDATE roles SET {} WHERE id = ?", updates.join(", "));
+
+        // Use execute with params_from_iter for dynamic query
+        self.db
+            .execute(query, rusqlite::params_from_iter(values))
+            .await?;
 
         self.get(id).await
     }
 
-    /// Delete a role
+    /// Delete a role.
     pub async fn delete(&self, id: i64) -> Result<()> {
-        let conn = self.db.lock().await;
-
-        let rows_affected = conn
-            .execute("DELETE FROM roles WHERE id = ?1", params![id])
+        let rows_affected = self
+            .db
+            .execute("DELETE FROM roles WHERE id = ?1", (id,))
+            .await
             .context("Failed to delete role")?;
 
         if rows_affected == 0 {
@@ -241,19 +236,17 @@ impl RolesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database;
     use crate::operating_systems::OperatingSystemsStore;
     use crate::roles::{DiskLayout, Partition};
+    use crate::test_database_path;
 
-    fn setup_db() -> Arc<Mutex<Connection>> {
-        let conn = Connection::open_in_memory().unwrap();
-        database::run_migrations(&conn).unwrap();
-        Arc::new(Mutex::new(conn))
+    async fn setup_db(path: String) -> Arc<Connection> {
+        Arc::new(crate::database::open(path).await.unwrap())
     }
 
     #[tokio::test]
     async fn test_create_and_get_role() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let os_store = OperatingSystemsStore::new(db.clone());
         let role_store = RolesStore::new(db);
 
@@ -292,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_roles() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let os_store = OperatingSystemsStore::new(db.clone());
         let role_store = RolesStore::new(db);
 
@@ -314,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_os() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let os_store = OperatingSystemsStore::new(db.clone());
         let role_store = RolesStore::new(db);
 
@@ -333,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_role() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let os_store = OperatingSystemsStore::new(db.clone());
         let role_store = RolesStore::new(db);
 
@@ -363,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_role() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let os_store = OperatingSystemsStore::new(db.clone());
         let role_store = RolesStore::new(db);
 

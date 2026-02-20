@@ -134,19 +134,18 @@ mod tests {
     use crate::{database, operating_systems::OperatingSystemsStore, roles::RolesStore};
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     /// Helper to create test database and stores for ActionContext
     async fn setup_test_stores() -> (
-        Arc<Mutex<rusqlite::Connection>>,
+        Arc<crate::database::Connection>,
         OperatingSystemsStore,
         RolesStore,
         tempfile::TempDir,
     ) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let db = Arc::new(Mutex::new(database::open(&db_path).unwrap()));
+        let db = Arc::new(database::open(db_path).await.unwrap());
         let os_store = OperatingSystemsStore::new(db.clone());
         let roles_store = RolesStore::new(db.clone());
         (db, os_store, roles_store, temp_dir)
@@ -258,14 +257,12 @@ mod tests {
 
         // Create and register device with role
         let device_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440003").unwrap();
-        {
-            let conn = db.lock().await;
-            conn.execute(
-                "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
-                rusqlite::params![device_uuid, role_id],
-            )
-            .unwrap();
-        }
+        db.execute(
+            "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
+            (device_uuid, role_id),
+        )
+        .await
+        .unwrap();
 
         let device = Device {
             uuid: device_uuid,
@@ -383,14 +380,12 @@ mod tests {
 
         // Create and register device with role
         let device_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440005").unwrap();
-        {
-            let conn = db.lock().await;
-            conn.execute(
-                "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
-                rusqlite::params![device_uuid, role_id],
-            )
-            .unwrap();
-        }
+        db.execute(
+            "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
+            (device_uuid, role_id),
+        )
+        .await
+        .unwrap();
 
         let device = Device {
             uuid: device_uuid,

@@ -572,12 +572,10 @@ mod tests {
         use crate::director::Director;
         use std::sync::Arc;
         use tempfile::tempdir;
-        use tokio::sync::Mutex;
 
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let conn = database::open(db_path).unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let db = Arc::new(database::open(db_path).await.unwrap());
         let store = DhcpStore::new(db.clone());
 
         // Create test network
@@ -689,12 +687,10 @@ mod tests {
         use crate::director::Director;
         use std::sync::Arc;
         use tempfile::tempdir;
-        use tokio::sync::Mutex;
 
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let conn = database::open(db_path).unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let db = Arc::new(database::open(db_path).await.unwrap());
         let store = DhcpStore::new(db.clone());
 
         // Create test network

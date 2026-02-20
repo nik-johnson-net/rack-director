@@ -334,15 +334,11 @@ fn generate_platform_name(attrs: &PlatformAttributes) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database;
-    use rusqlite::Connection;
+    use crate::{database, test_database_path};
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
-    fn setup_db() -> Arc<Mutex<Connection>> {
-        let conn = Connection::open_in_memory().unwrap();
-        database::run_migrations(&conn).unwrap();
-        Arc::new(Mutex::new(conn))
+    async fn setup_db(path: String) -> Arc<crate::database::Connection> {
+        Arc::new(database::open(path).await.unwrap())
     }
 
     fn sample_platform_attributes() -> PlatformAttributes {
@@ -620,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_exact_match() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let store = PlatformsStore::new(db);
 
         let attrs = sample_platform_attributes();
@@ -635,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_with_size_tolerance() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let store = PlatformsStore::new(db);
 
         let attrs = sample_platform_attributes();
@@ -653,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_with_memory_tolerance() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let store = PlatformsStore::new(db);
 
         let attrs = sample_platform_attributes();
@@ -670,7 +666,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_disk_count() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let store = PlatformsStore::new(db);
 
         let attrs = sample_platform_attributes();
@@ -687,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_disk_type() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let store = PlatformsStore::new(db);
 
         let attrs = sample_platform_attributes();
@@ -704,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_nic_count() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let store = PlatformsStore::new(db);
 
         let attrs = sample_platform_attributes();
@@ -721,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_cpu_config() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let store = PlatformsStore::new(db);
 
         let attrs = sample_platform_attributes();

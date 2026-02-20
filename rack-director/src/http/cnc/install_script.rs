@@ -144,6 +144,7 @@ pub async fn get_device_network_info(
     let lease = state
         .dhcp_store
         .find_lease_by_device_uuid(device_uuid)
+        .await
         .map_err(Error::ServerInternalError)?;
 
     if let Some(lease) = lease {
@@ -174,7 +175,6 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     fn test_uuid() -> Uuid {
@@ -184,8 +184,7 @@ mod tests {
     async fn create_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let db = database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(Mutex::new(db));
+        let db = Arc::new(database::open(db_path).await.unwrap());
 
         // Note: No default network is created. Tests that need networks should create them explicitly.
 
@@ -203,12 +202,12 @@ mod tests {
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
         let state = Arc::new(AppState {
-            director: Director::new(db_tokio.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
+            director: Director::new(db.clone()),
+            dhcp_store: crate::dhcp::DhcpStore::new(db.clone()),
             image_store: Arc::new(image_store),
-            os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
-            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
+            os_store: crate::operating_systems::OperatingSystemsStore::new(db.clone()),
+            roles_store: crate::roles::RolesStore::new(db.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db),
             agent_images_path,
             boot_file_provider,
         });

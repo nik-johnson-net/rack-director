@@ -284,16 +284,13 @@ mod tests {
         director::Director,
         operating_systems::Architecture,
         platforms::{DiskType, PlatformCpu, PlatformDisk, PlatformNic},
+        test_database_path,
     };
-    use rusqlite::Connection;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
     use uuid::Uuid;
 
-    fn setup_db() -> Arc<Mutex<Connection>> {
-        let conn = Connection::open_in_memory().unwrap();
-        database::run_migrations(&conn).unwrap();
-        Arc::new(Mutex::new(conn))
+    async fn setup_db(path: String) -> Arc<crate::database::Connection> {
+        Arc::new(database::open(path).await.unwrap())
     }
 
     fn test_uuid(n: u8) -> Uuid {
@@ -340,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_empty() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let platforms_store = PlatformsStore::new(db.clone());
         let director = Director::new(db);
 
@@ -364,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_single_device() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let platforms_store = PlatformsStore::new(db.clone());
         let director = Director::new(db);
 
@@ -412,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_multiple_devices() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let platforms_store = PlatformsStore::new(db.clone());
         let director = Director::new(db);
 
@@ -495,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_lifecycle_states() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let platforms_store = PlatformsStore::new(db.clone());
         let director = Director::new(db);
 
@@ -541,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_nonexistent_platform() {
-        let db = setup_db();
+        let db = setup_db(test_database_path!()).await;
         let director = Director::new(db);
 
         // Try to get devices for a nonexistent platform

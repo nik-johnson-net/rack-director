@@ -4,91 +4,156 @@
 //! The table schemas are created by 11.sql, and this code populates them.
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
 use uuid::Uuid;
+
+use crate::database::Connection;
 
 /// Post-migration hook for migration 11: Convert TEXT UUIDs to BLOB
 /// Reads TEXT UUIDs from old tables and inserts as BLOB into new tables
-pub fn convert_uuids(conn: &Connection) -> Result<()> {
+pub async fn convert_uuids(conn: &Connection) -> Result<()> {
     log::info!("Converting TEXT UUIDs to BLOB format...");
 
-    // Convert each table
-    convert_devices_table(conn)?;
-    convert_plans_table(conn)?;
-    convert_lifecycle_transitions_table(conn)?;
-    convert_dhcp_leases_table(conn)?;
-    convert_pending_devices_table(conn)?;
+    convert_devices_table(conn).await?;
+    convert_plans_table(conn).await?;
+    convert_lifecycle_transitions_table(conn).await?;
+    convert_dhcp_leases_table(conn).await?;
+    convert_pending_devices_table(conn).await?;
 
-    // Replace old tables with new tables
-    finalize_migration(conn)?;
+    finalize_migration(conn).await?;
 
     log::info!("UUID conversion complete");
     Ok(())
 }
 
-fn convert_devices_table(conn: &Connection) -> Result<()> {
+/// Parse a TEXT UUID string into its 16-byte BLOB representation.
+fn parse_uuid_bytes(uuid_str: &str, context: &str) -> Result<Vec<u8>> {
+    let uuid = Uuid::parse_str(uuid_str).map_err(|e| {
+        anyhow::anyhow!("Failed to parse UUID '{}' in {}: {}", uuid_str, context, e)
+    })?;
+    Ok(uuid.into_bytes().to_vec())
+}
+
+/// Parse an optional TEXT UUID string into its 16-byte BLOB representation.
+fn parse_optional_uuid_bytes(uuid_str: Option<String>, context: &str) -> Result<Option<Vec<u8>>> {
+    match uuid_str {
+        None => Ok(None),
+        Some(s) => parse_uuid_bytes(&s, context).map(Some),
+    }
+}
+
+async fn convert_devices_table(conn: &Connection) -> Result<()> {
     log::debug!("Converting devices table...");
 
-    let mut stmt = conn.prepare(
-        "SELECT id, uuid, created_at, first_seen_at, last_seen_at, attributes, lifecycle, role_id, architecture FROM devices"
-    )?;
+    type DeviceRow = (
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        Option<i64>,
+        String,
+    );
 
-    let mut rows = stmt.query([])?;
+    let rows: Vec<DeviceRow> = conn
+        .query(
+            "SELECT id, uuid, created_at,
+                NULLIF(first_seen_at, 0),
+                NULLIF(last_seen_at, 0),
+                attributes, lifecycle, role_id, architecture FROM devices",
+            (),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .await?;
 
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        let uuid_str: String = row.get(1)?;
-        let created_at: Option<String> = row.get(2).ok();
-        let first_seen_at: Option<String> = row.get(3).ok();
-        let last_seen_at: Option<String> = row.get(4).ok();
-        let attributes: String = row.get(5)?;
-        let lifecycle: String = row.get(6)?;
-        let role_id: Option<i64> = row.get(7)?;
-        let architecture: String = row.get(8)?;
-
-        let uuid = Uuid::parse_str(&uuid_str).map_err(|e| {
-            anyhow::anyhow!("Failed to parse UUID '{}' in devices: {}", uuid_str, e)
-        })?;
-
+    for (
+        id,
+        uuid_str,
+        created_at,
+        first_seen_at,
+        last_seen_at,
+        attributes,
+        lifecycle,
+        role_id,
+        architecture,
+    ) in rows
+    {
+        let uuid_bytes = parse_uuid_bytes(&uuid_str, "devices")?;
         conn.execute(
             "INSERT INTO devices_new (id, uuid, created_at, first_seen_at, last_seen_at, attributes, lifecycle, role_id, architecture)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, uuid, created_at, first_seen_at, last_seen_at, attributes, lifecycle, role_id, architecture],
-        )?;
+            (id, uuid_bytes, created_at, first_seen_at, last_seen_at, attributes, lifecycle, role_id, architecture),
+        ).await?;
     }
 
     Ok(())
 }
 
-fn convert_plans_table(conn: &Connection) -> Result<()> {
+async fn convert_plans_table(conn: &Connection) -> Result<()> {
     log::debug!("Converting plans table...");
 
-    let mut stmt = conn.prepare(
-        "SELECT id, device_uuid, status, current_step, total_steps, actions, error_message, created_at, started_at, completed_at FROM plans"
-    )?;
+    type PlanRow = (
+        i64,
+        String,
+        String,
+        i32,
+        i32,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
 
-    let mut rows = stmt.query([])?;
+    let rows: Vec<PlanRow> = conn.query(
+        "SELECT id, device_uuid, status, current_step, total_steps, actions, error_message, created_at, started_at, completed_at FROM plans",
+        (),
+        |row| Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+        )),
+    ).await?;
 
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        let uuid_str: String = row.get(1)?;
-        let status: String = row.get(2)?;
-        let current_step: i32 = row.get(3)?;
-        let total_steps: i32 = row.get(4)?;
-        let actions: String = row.get(5)?;
-        let error_message: Option<String> = row.get(6)?;
-        let created_at: String = row.get(7)?;
-        let started_at: Option<String> = row.get(8)?;
-        let completed_at: Option<String> = row.get(9)?;
-
-        let uuid = Uuid::parse_str(&uuid_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse UUID '{}' in plans: {}", uuid_str, e))?;
-
+    for (
+        id,
+        uuid_str,
+        status,
+        current_step,
+        total_steps,
+        actions,
+        error_message,
+        created_at,
+        started_at,
+        completed_at,
+    ) in rows
+    {
+        let uuid_bytes = parse_uuid_bytes(&uuid_str, "plans")?;
         conn.execute(
             "INSERT INTO plans_new VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
+            (
                 id,
-                uuid,
+                uuid_bytes,
                 status,
                 current_step,
                 total_steps,
@@ -96,91 +161,132 @@ fn convert_plans_table(conn: &Connection) -> Result<()> {
                 error_message,
                 created_at,
                 started_at,
-                completed_at
-            ],
-        )?;
+                completed_at,
+            ),
+        )
+        .await?;
     }
 
     Ok(())
 }
 
-fn convert_lifecycle_transitions_table(conn: &Connection) -> Result<()> {
+async fn convert_lifecycle_transitions_table(conn: &Connection) -> Result<()> {
     log::debug!("Converting lifecycle_transitions table...");
 
-    let mut stmt = conn.prepare(
-        "SELECT id, device_uuid, from_state, to_state, plan_id, created_at, completed_at, success, error_message FROM lifecycle_transitions"
-    )?;
+    type TransitionRow = (
+        i64,
+        String,
+        String,
+        String,
+        Option<i64>,
+        String,
+        Option<String>,
+        Option<bool>,
+        Option<String>,
+    );
 
-    let mut rows = stmt.query([])?;
+    let rows: Vec<TransitionRow> = conn.query(
+        "SELECT id, device_uuid, from_state, to_state, plan_id, created_at, completed_at, success, error_message FROM lifecycle_transitions",
+        (),
+        |row| Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+        )),
+    ).await?;
 
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        let uuid_str: String = row.get(1)?;
-        let from_state: String = row.get(2)?;
-        let to_state: String = row.get(3)?;
-        let plan_id: Option<i64> = row.get(4)?;
-        let created_at: String = row.get(5)?;
-        let completed_at: Option<String> = row.get(6)?;
-        let success: Option<bool> = row.get(7)?;
-        let error_message: Option<String> = row.get(8)?;
-
-        let uuid = Uuid::parse_str(&uuid_str).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to parse UUID '{}' in lifecycle_transitions: {}",
-                uuid_str,
-                e
-            )
-        })?;
-
+    for (
+        id,
+        uuid_str,
+        from_state,
+        to_state,
+        plan_id,
+        created_at,
+        completed_at,
+        success,
+        error_message,
+    ) in rows
+    {
+        let uuid_bytes = parse_uuid_bytes(&uuid_str, "lifecycle_transitions")?;
         conn.execute(
             "INSERT INTO lifecycle_transitions_new VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
+            (
                 id,
-                uuid,
+                uuid_bytes,
                 from_state,
                 to_state,
                 plan_id,
                 created_at,
                 completed_at,
                 success,
-                error_message
-            ],
-        )?;
+                error_message,
+            ),
+        )
+        .await?;
     }
 
     Ok(())
 }
 
-fn convert_dhcp_leases_table(conn: &Connection) -> Result<()> {
+async fn convert_dhcp_leases_table(conn: &Connection) -> Result<()> {
     log::debug!("Converting dhcp_leases table...");
 
-    let mut stmt = conn.prepare(
-        "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname, created_at, updated_at, network_id FROM dhcp_leases"
-    )?;
+    type LeaseRow = (
+        i64,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        Option<i64>,
+    );
 
-    let mut rows = stmt.query([])?;
+    let rows: Vec<LeaseRow> = conn.query(
+        "SELECT id, mac_address, ip_address, device_uuid, lease_start, lease_end, state, hostname, created_at, updated_at, network_id FROM dhcp_leases",
+        (),
+        |row| Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+        )),
+    ).await?;
 
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        let mac_address: String = row.get(1)?;
-        let ip_address: String = row.get(2)?;
-        let uuid_str: Option<String> = row.get(3)?;
-        let lease_start: String = row.get(4)?;
-        let lease_end: String = row.get(5)?;
-        let state: String = row.get(6)?;
-        let hostname: Option<String> = row.get(7)?;
-        let created_at: String = row.get(8)?;
-        let updated_at: String = row.get(9)?;
-        let network_id: Option<i64> = row.get(10)?;
-
-        let device_uuid = uuid_str
-            .map(|s| Uuid::parse_str(&s))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("Failed to parse UUID in dhcp_leases: {}", e))?;
-
+    for (
+        id,
+        mac_address,
+        ip_address,
+        uuid_str,
+        lease_start,
+        lease_end,
+        state,
+        hostname,
+        created_at,
+        updated_at,
+        network_id,
+    ) in rows
+    {
+        let device_uuid = parse_optional_uuid_bytes(uuid_str, "dhcp_leases")?;
         conn.execute(
             "INSERT INTO dhcp_leases_new VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
+            (
                 id,
                 mac_address,
                 ip_address,
@@ -191,53 +297,53 @@ fn convert_dhcp_leases_table(conn: &Connection) -> Result<()> {
                 hostname,
                 created_at,
                 updated_at,
-                network_id
-            ],
-        )?;
+                network_id,
+            ),
+        )
+        .await?;
     }
 
     Ok(())
 }
 
-fn convert_pending_devices_table(conn: &Connection) -> Result<()> {
+async fn convert_pending_devices_table(conn: &Connection) -> Result<()> {
     log::debug!("Converting pending_devices table...");
 
-    let mut stmt = conn.prepare(
-        "SELECT id, mac_address, device_uuid, network_id, created_at, completed_at FROM pending_devices"
-    )?;
+    type PendingRow = (i64, String, Option<String>, i64, String, Option<String>);
 
-    let mut rows = stmt.query([])?;
+    let rows: Vec<PendingRow> = conn.query(
+        "SELECT id, mac_address, device_uuid, network_id, created_at, completed_at FROM pending_devices",
+        (),
+        |row| Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        )),
+    ).await?;
 
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        let mac_address: String = row.get(1)?;
-        let uuid_str: Option<String> = row.get(2)?;
-        let network_id: i64 = row.get(3)?;
-        let created_at: String = row.get(4)?;
-        let completed_at: Option<String> = row.get(5)?;
-
-        let device_uuid = uuid_str
-            .map(|s| Uuid::parse_str(&s))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("Failed to parse UUID in pending_devices: {}", e))?;
-
+    for (id, mac_address, uuid_str, network_id, created_at, completed_at) in rows {
+        let device_uuid = parse_optional_uuid_bytes(uuid_str, "pending_devices")?;
         conn.execute(
             "INSERT INTO pending_devices_new VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
+            (
                 id,
                 mac_address,
                 device_uuid,
                 network_id,
                 created_at,
-                completed_at
-            ],
-        )?;
+                completed_at,
+            ),
+        )
+        .await?;
     }
 
     Ok(())
 }
 
-fn finalize_migration(conn: &Connection) -> Result<()> {
+async fn finalize_migration(conn: &Connection) -> Result<()> {
     log::debug!("Finalizing migration: replacing old tables with new tables...");
 
     conn.execute_batch(
@@ -284,7 +390,7 @@ fn finalize_migration(conn: &Connection) -> Result<()> {
 
          -- Re-enable foreign keys
          PRAGMA foreign_keys=ON;"
-    )?;
+    ).await?;
 
     Ok(())
 }

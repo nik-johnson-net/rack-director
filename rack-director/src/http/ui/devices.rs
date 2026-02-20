@@ -713,8 +713,7 @@ mod tests {
     async fn setup_test_state() -> (Arc<AppState>, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let db = database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(tokio::sync::Mutex::new(db));
+        let db = Arc::new(database::open(db_path).await.unwrap());
 
         // Note: No default network is created. Tests that need networks should create them explicitly.
 
@@ -743,12 +742,12 @@ mod tests {
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
         let state = Arc::new(AppState {
-            director: Director::new(db_tokio.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
+            director: Director::new(db.clone()),
+            dhcp_store: crate::dhcp::DhcpStore::new(db.clone()),
             image_store: store.into(),
-            os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
-            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
+            os_store: crate::operating_systems::OperatingSystemsStore::new(db.clone()),
+            roles_store: crate::roles::RolesStore::new(db.clone()),
+            platforms_store: crate::platforms::PlatformsStore::new(db),
             agent_images_path,
             boot_file_provider,
         });

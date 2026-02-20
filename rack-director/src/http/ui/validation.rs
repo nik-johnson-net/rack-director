@@ -387,13 +387,12 @@ mod tests {
     use crate::dhcp::DhcpStore;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
 
     async fn create_test_store() -> (DhcpStore, tempfile::TempDir) {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let conn = crate::database::open(db_path).unwrap();
-        (DhcpStore::new(Arc::new(Mutex::new(conn))), temp_dir)
+        let db = Arc::new(crate::database::open(db_path).await.unwrap());
+        (DhcpStore::new(db), temp_dir)
     }
 
     // Test generic validators
