@@ -10,12 +10,13 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 
-use super::allocator::IpAllocator;
+use super::allocator;
 use super::boot_config::BootConfigProvider;
 use super::device_resolution::{DeviceContext, DeviceResolver};
 use super::message_builder;
 use super::request::{RequestContext, extract_server_identifier};
-use super::store::{DhcpNetwork, DhcpStore, LeaseState, format_mac};
+use super::store::{self, DhcpNetwork, LeaseState, format_mac};
+use crate::database::{Connection, ConnectionFactory};
 
 /// Determines the appropriate vendor class identifier (Option 60) based on client architecture.
 ///
@@ -54,25 +55,22 @@ fn determine_vendor_class_identifier(client_arch: Option<Architecture>) -> &'sta
 
 #[derive(Clone)]
 pub struct DhcpHandler {
-    store: DhcpStore,
+    db: Arc<dyn ConnectionFactory>,
     device_resolver: Arc<dyn DeviceResolver>,
-    allocator: IpAllocator,
     boot_config: BootConfigProvider,
     server_identifier: Ipv4Addr,
 }
 
 impl DhcpHandler {
     pub fn new(
-        store: DhcpStore,
+        db: Arc<dyn ConnectionFactory>,
         device_resolver: Arc<dyn DeviceResolver>,
-        allocator: IpAllocator,
         boot_config: BootConfigProvider,
         server_identifier: Ipv4Addr,
     ) -> Self {
         Self {
-            store,
+            db,
             device_resolver,
-            allocator,
             boot_config,
             server_identifier,
         }
@@ -95,6 +93,9 @@ impl DhcpHandler {
 
         trace!("DHCP: Received packet {:?}", msg);
 
+        // Open one connection per packet to avoid shared-connection contention
+        let conn = self.db.open().await?;
+
         // Extract relay agent address (giaddr)
         let relay_agent = if msg.giaddr() != Ipv4Addr::UNSPECIFIED {
             Some(msg.giaddr())
@@ -103,7 +104,7 @@ impl DhcpHandler {
         };
 
         // Match to network based on relay agent
-        let network = match self.store.get_network_by_relay(relay_agent).await? {
+        let network = match store::get_network_by_relay(&conn, relay_agent).await? {
             Some(network) => network,
             None => {
                 log::warn!("No network found for relay agent {:?}", relay_agent);
@@ -117,14 +118,14 @@ impl DhcpHandler {
         );
 
         let response = match msg.opts().msg_type() {
-            Some(MessageType::Discover) => self.handle_discover(&msg, &network).await?,
-            Some(MessageType::Request) => self.handle_request(&msg, &network).await?,
+            Some(MessageType::Discover) => self.handle_discover(&conn, &msg, &network).await?,
+            Some(MessageType::Request) => self.handle_request(&conn, &msg, &network).await?,
             Some(MessageType::Release) => {
-                self.handle_release(&msg).await?;
+                self.handle_release(&conn, &msg).await?;
                 None
             }
             Some(MessageType::Decline) => {
-                self.handle_decline(&msg).await?;
+                self.handle_decline(&conn, &msg).await?;
                 None
             }
             _ => {
@@ -174,6 +175,7 @@ impl DhcpHandler {
 
     async fn handle_discover(
         &self,
+        conn: &Connection,
         msg: &Message,
         network: &DhcpNetwork,
     ) -> Result<Option<Message>> {
@@ -191,7 +193,7 @@ impl DhcpHandler {
 
         let dev_ctx = self
             .device_resolver
-            .resolve(&req_ctx.mac, req_ctx.guid.as_ref())
+            .resolve(conn, &req_ctx.mac, req_ctx.guid.as_ref())
             .await?;
 
         if dev_ctx.is_disabled {
@@ -211,30 +213,26 @@ impl DhcpHandler {
         // Allocate or retrieve existing IP in this network
         let ip = if let Some(uuid) = &dev_ctx.device_uuid {
             debug!("Device UUID {} found for MAC {}", uuid, req_ctx.mac);
-            self.allocator
-                .allocate_for_device_in_network(&req_ctx.mac, uuid, network.id)
-                .await?
+            allocator::allocate_for_device_in_network(conn, &req_ctx.mac, uuid, network.id).await?
         } else {
             debug!(
                 "No device UUID found for MAC {}, allocating from pool",
                 req_ctx.mac
             );
-            self.allocator
-                .allocate_for_mac_in_network(&req_ctx.mac, network.id)
-                .await?
+            allocator::allocate_for_mac_in_network(conn, &req_ctx.mac, network.id).await?
         };
 
         // Create lease in 'offered' state
-        self.store
-            .create_or_update_lease_with_network(
-                &req_ctx.mac,
-                &ip,
-                dev_ctx.device_uuid.as_ref(),
-                LeaseState::Offered,
-                network.lease_duration,
-                network.id,
-            )
-            .await?;
+        store::create_or_update_lease_with_network(
+            conn,
+            &req_ctx.mac,
+            &ip,
+            dev_ctx.device_uuid.as_ref(),
+            LeaseState::Offered,
+            network.lease_duration,
+            network.id,
+        )
+        .await?;
 
         let offer = self
             .build_offer(msg, ip, network, &req_ctx, &dev_ctx)
@@ -249,6 +247,7 @@ impl DhcpHandler {
 
     async fn handle_request(
         &self,
+        conn: &Connection,
         msg: &Message,
         network: &DhcpNetwork,
     ) -> Result<Option<Message>> {
@@ -281,7 +280,7 @@ impl DhcpHandler {
 
         let dev_ctx = self
             .device_resolver
-            .resolve(&req_ctx.mac, req_ctx.guid.as_ref())
+            .resolve(conn, &req_ctx.mac, req_ctx.guid.as_ref())
             .await?;
 
         if dev_ctx.is_disabled {
@@ -311,10 +310,8 @@ impl DhcpHandler {
         debug!("Requested IP: {}", requested_ip);
 
         // Check for static reservation - takes priority over everything
-        let static_reservation = self
-            .store
-            .get_static_reservation(network.id, &req_ctx.mac)
-            .await?;
+        let static_reservation =
+            store::get_static_reservation(conn, network.id, &req_ctx.mac).await?;
 
         if let Some(reservation) = &static_reservation {
             let reserved_ip: Ipv4Addr = reservation.ip_address.parse()?;
@@ -329,20 +326,20 @@ impl DhcpHandler {
             }
 
             // Static reservation matches requested IP - update or create lease
-            self.store
-                .create_or_update_lease_with_network(
-                    &req_ctx.mac,
-                    &reserved_ip,
-                    dev_ctx.device_uuid.as_ref(),
-                    LeaseState::Active,
-                    network.lease_duration,
-                    network.id,
-                )
-                .await?;
+            store::create_or_update_lease_with_network(
+                conn,
+                &req_ctx.mac,
+                &reserved_ip,
+                dev_ctx.device_uuid.as_ref(),
+                LeaseState::Active,
+                network.lease_duration,
+                network.id,
+            )
+            .await?;
 
             if let Some(uuid) = &dev_ctx.device_uuid {
                 self.device_resolver
-                    .on_lease_activated(uuid, &reserved_ip.to_string(), &req_ctx.mac)
+                    .on_lease_activated(conn, uuid, &reserved_ip.to_string(), &req_ctx.mac)
                     .await?;
             }
 
@@ -358,7 +355,7 @@ impl DhcpHandler {
         }
 
         // No static reservation - validate request matches our offer
-        let lease = self.store.get_lease_by_mac(&req_ctx.mac).await?;
+        let lease = store::get_lease_by_mac(conn, &req_ctx.mac).await?;
         if let Some(lease) = lease {
             let lease_ip: Ipv4Addr = lease.ip_address.parse()?;
             if lease_ip != requested_ip {
@@ -370,10 +367,10 @@ impl DhcpHandler {
             }
 
             // Update lease to 'active'
-            self.store.activate_lease(&req_ctx.mac).await?;
+            store::activate_lease(conn, &req_ctx.mac).await?;
             if let Some(uuid) = &dev_ctx.device_uuid {
                 self.device_resolver
-                    .on_lease_activated(uuid, &lease_ip.to_string(), &req_ctx.mac)
+                    .on_lease_activated(conn, uuid, &lease_ip.to_string(), &req_ctx.mac)
                     .await?;
             }
 
@@ -392,25 +389,25 @@ impl DhcpHandler {
         }
     }
 
-    async fn handle_release(&self, msg: &Message) -> Result<()> {
+    async fn handle_release(&self, conn: &Connection, msg: &Message) -> Result<()> {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
         info!("DHCP RELEASE from MAC {}", mac_str);
 
-        self.store.release_lease(&mac_str).await?;
+        store::release_lease(conn, &mac_str).await?;
 
         Ok(())
     }
 
-    async fn handle_decline(&self, msg: &Message) -> Result<()> {
+    async fn handle_decline(&self, conn: &Connection, msg: &Message) -> Result<()> {
         let mac = msg.chaddr();
         let mac_str = format_mac(mac);
 
         warn!("DHCP DECLINE from MAC {}", mac_str);
 
         // Mark lease as released to prevent reuse
-        self.store.release_lease(&mac_str).await?;
+        store::release_lease(conn, &mac_str).await?;
 
         Ok(())
     }
@@ -473,10 +470,12 @@ mod tests {
     use dhcproto::v4::Opcode;
 
     use super::*;
+    use crate::test_connection_factory;
 
     #[tokio::test]
     async fn test_server_identifier_in_offer() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a minimal DISCOVER message
         let mut discover = Message::default();
@@ -488,7 +487,7 @@ mod tests {
             .insert(v4::DhcpOption::MessageType(MessageType::Discover));
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&discover);
@@ -531,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_identifier_in_nak() {
-        let handler = create_test_handler().await;
+        let handler = create_test_handler(test_connection_factory!()).await;
 
         // Create a minimal REQUEST message
         let mut request = Message::default();
@@ -568,40 +567,38 @@ mod tests {
     async fn test_custom_server_identifier() {
         use super::super::device_resolution::DirectorDeviceResolver;
         use crate::boot_files::FilesystemBootFileProvider;
-        use crate::database;
-        use crate::director::Director;
+        use crate::database::DatabaseConnectionFactory;
         use std::sync::Arc;
         use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let db = Arc::new(database::open(db_path).await.unwrap());
-        let store = DhcpStore::new(db.clone());
+        let factory: Arc<dyn crate::database::ConnectionFactory> =
+            Arc::new(DatabaseConnectionFactory::new(db_path));
+        let conn = crate::database::run_migrations(factory.as_ref())
+            .await
+            .unwrap();
 
         // Create test network
-        let network = store
-            .create_network(
-                "Test Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
-                86400,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
+        let network = store::create_network(
+            &conn,
+            "Test Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         // Create test pool
-        store
-            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+        store::create_pool(&conn, network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
             .await
             .unwrap();
 
-        let director = Director::new(db.clone());
-
-        let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
-        let allocator = IpAllocator::new(store.clone());
+        let device_resolver = Arc::new(DirectorDeviceResolver::new());
 
         // Create a temporary boot files directory for testing
         let boot_files_dir = temp_dir.path().join("boot_files");
@@ -617,13 +614,7 @@ mod tests {
 
         // Use a custom server identifier different from gateway
         let custom_server_id: Ipv4Addr = "192.168.1.50".parse().unwrap();
-        let handler = DhcpHandler::new(
-            store.clone(),
-            device_resolver,
-            allocator,
-            boot_config,
-            custom_server_id,
-        );
+        let handler = DhcpHandler::new(factory, device_resolver, boot_config, custom_server_id);
 
         // Verify the handler stores the custom value
         assert_eq!(
@@ -632,7 +623,7 @@ mod tests {
         );
 
         // Get the test network we just created
-        let network = store.get_network(network.id).await.unwrap();
+        let network = store::get_network(&conn, network.id).await.unwrap();
 
         // Build an OFFER and verify it uses the custom identifier
         let mut discover = Message::default();
@@ -680,45 +671,47 @@ mod tests {
         );
     }
 
-    async fn create_test_handler_with_store() -> (DhcpHandler, DhcpStore, i64, tempfile::TempDir) {
+    async fn create_test_handler_with_store(
+        factory: crate::database::DatabaseConnectionFactory,
+    ) -> (
+        DhcpHandler,
+        crate::database::Connection,
+        i64,
+        tempfile::TempDir,
+    ) {
         use super::super::device_resolution::DirectorDeviceResolver;
         use crate::boot_files::FilesystemBootFileProvider;
         use crate::database;
-        use crate::director::Director;
         use std::sync::Arc;
         use tempfile::tempdir;
 
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = Arc::new(database::open(db_path).await.unwrap());
-        let store = DhcpStore::new(db.clone());
+        let factory: Arc<dyn crate::database::ConnectionFactory> = Arc::new(factory);
+        // Run migrations and get connection for setup and test assertions
+        let conn = database::run_migrations(factory.as_ref()).await.unwrap();
 
         // Create test network
-        let network = store
-            .create_network(
-                "Test Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
-                86400,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
+        let network = store::create_network(
+            &conn,
+            "Test Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         // Create test pool
-        store
-            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+        store::create_pool(&conn, network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
             .await
             .unwrap();
 
-        let director = Director::new(db.clone());
-
-        let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
-        let allocator = IpAllocator::new(store.clone());
+        let device_resolver = Arc::new(DirectorDeviceResolver::new());
 
         // Create a temporary boot files directory for testing
+        let temp_dir = tempdir().unwrap();
         let boot_files_dir = temp_dir.path().join("boot_files");
         std::fs::create_dir_all(&boot_files_dir).unwrap();
         let boot_file_provider =
@@ -731,24 +724,20 @@ mod tests {
         );
         let server_identifier = "10.0.0.1".parse().unwrap();
 
-        let handler = DhcpHandler::new(
-            store.clone(),
-            device_resolver,
-            allocator,
-            boot_config,
-            server_identifier,
-        );
-        (handler, store, network.id, temp_dir)
+        let handler = DhcpHandler::new(factory, device_resolver, boot_config, server_identifier);
+        (handler, conn, network.id, temp_dir)
     }
 
-    async fn create_test_handler() -> DhcpHandler {
-        let (handler, _store, _network_id, _temp_dir) = create_test_handler_with_store().await;
+    async fn create_test_handler(
+        factory: crate::database::DatabaseConnectionFactory,
+    ) -> DhcpHandler {
+        let (handler, _db, _network_id, _temp_dir) = create_test_handler_with_store(factory).await;
         handler
     }
 
     #[tokio::test]
     async fn test_option_60_default_pxe() {
-        let handler = create_test_handler().await;
+        let handler = create_test_handler(test_connection_factory!()).await;
 
         // Create a minimal REQUEST message without architecture
         let mut request = Message::default();
@@ -881,7 +870,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_vendor_class_identifier_in_offer_http_boot() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a DISCOVER message with HTTP boot architecture (14)
         let mut discover = Message::default();
@@ -898,7 +888,7 @@ mod tests {
             ));
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&discover);
@@ -941,7 +931,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_vendor_class_identifier_in_offer_traditional_pxe() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a DISCOVER message with traditional UEFI architecture (7)
         let mut discover = Message::default();
@@ -958,7 +949,7 @@ mod tests {
             ));
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&discover);
@@ -1001,7 +992,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_vendor_class_identifier_in_ack_http_boot() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a REQUEST message with HTTP boot architecture (15)
         let mut request = Message::default();
@@ -1018,7 +1010,7 @@ mod tests {
             ));
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Create contexts
         let req_ctx = RequestContext::from_message(&request);
@@ -1063,22 +1055,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_matching_server_id() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
-        store
-            .create_or_update_lease_with_network(
-                mac,
-                &ip,
-                None,
-                LeaseState::Offered,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        store::create_or_update_lease_with_network(
+            &conn,
+            mac,
+            &ip,
+            None,
+            LeaseState::Offered,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         // Create a REQUEST message with matching server ID
         let mut request = Message::default();
@@ -1096,10 +1089,13 @@ mod tests {
             .insert(v4::DhcpOption::ServerIdentifier(handler.server_identifier));
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Handle the request
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should receive an ACK
         assert!(
@@ -1125,22 +1121,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_non_matching_server_id() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
-        store
-            .create_or_update_lease_with_network(
-                mac,
-                &ip,
-                None,
-                LeaseState::Offered,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        store::create_or_update_lease_with_network(
+            &conn,
+            mac,
+            &ip,
+            None,
+            LeaseState::Offered,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         // Create a REQUEST message with non-matching server ID
         let wrong_server_id: Ipv4Addr = "192.168.1.99".parse().unwrap();
@@ -1164,10 +1161,13 @@ mod tests {
             .insert(v4::DhcpOption::ServerIdentifier(wrong_server_id));
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Handle the request
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should NOT respond (silently ignore)
         assert!(
@@ -1178,22 +1178,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_without_server_id() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
-        store
-            .create_or_update_lease_with_network(
-                mac,
-                &ip,
-                None,
-                LeaseState::Offered,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        store::create_or_update_lease_with_network(
+            &conn,
+            mac,
+            &ip,
+            None,
+            LeaseState::Offered,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         // Create a REQUEST message WITHOUT server ID (RENEWING or INIT-REBOOT)
         let mut request = Message::default();
@@ -1209,10 +1210,13 @@ mod tests {
         // Note: No ServerIdentifier option added
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Handle the request
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should process the request (RENEWING/REBINDING case)
         assert!(
@@ -1238,22 +1242,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_init_reboot_without_server_id() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
-        store
-            .create_or_update_lease_with_network(
-                mac,
-                &ip,
-                None,
-                LeaseState::Active,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        store::create_or_update_lease_with_network(
+            &conn,
+            mac,
+            &ip,
+            None,
+            LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         // Create an INIT-REBOOT REQUEST (has requested IP, no server ID, no ciaddr)
         let mut request = Message::default();
@@ -1270,10 +1275,13 @@ mod tests {
         // No ServerIdentifier - characteristic of INIT-REBOOT
 
         // Get test network
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
 
         // Handle the request
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should process INIT-REBOOT request
         assert!(
@@ -1305,15 +1313,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_nak_on_wrong_requested_ip() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
         let requested_ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
 
         // Create static reservation
-        store
-            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+        store::create_static_reservation(&conn, network_id, mac, &reserved_ip.to_string(), None)
             .await
             .unwrap();
 
@@ -1329,8 +1337,11 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::RequestedIpAddress(requested_ip));
 
-        let network = store.get_network(network_id).await.unwrap();
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should receive NAK
         assert!(response.is_some(), "Should respond with NAK");
@@ -1357,15 +1368,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_nak_on_wrong_ciaddr() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
         let ciaddr: Ipv4Addr = "10.0.0.100".parse().unwrap();
 
         // Create static reservation
-        store
-            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+        store::create_static_reservation(&conn, network_id, mac, &reserved_ip.to_string(), None)
             .await
             .unwrap();
 
@@ -1379,8 +1390,11 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Request));
 
-        let network = store.get_network(network_id).await.unwrap();
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should receive NAK
         assert!(response.is_some(), "Should respond with NAK");
@@ -1407,14 +1421,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_ack_on_correct_ip() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
 
         // Create static reservation
-        store
-            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+        store::create_static_reservation(&conn, network_id, mac, &reserved_ip.to_string(), None)
             .await
             .unwrap();
 
@@ -1430,8 +1444,11 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::RequestedIpAddress(reserved_ip));
 
-        let network = store.get_network(network_id).await.unwrap();
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should receive ACK
         assert!(response.is_some(), "Should respond with ACK");
@@ -1465,28 +1482,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_overrides_existing_lease() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let old_ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
 
         // Create an active lease for the old IP
-        store
-            .create_or_update_lease_with_network(
-                mac,
-                &old_ip,
-                None,
-                LeaseState::Active,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        store::create_or_update_lease_with_network(
+            &conn,
+            mac,
+            &old_ip,
+            None,
+            LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         // Admin creates static reservation for different IP
-        store
-            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+        store::create_static_reservation(&conn, network_id, mac, &reserved_ip.to_string(), None)
             .await
             .unwrap();
 
@@ -1500,8 +1517,11 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Request));
 
-        let network = store.get_network(network_id).await.unwrap();
-        let response = handler.handle_request(&request, &network).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
+        let response = handler
+            .handle_request(&conn, &request, &network)
+            .await
+            .unwrap();
 
         // Should receive NAK because old IP doesn't match static reservation
         assert!(response.is_some(), "Should respond with NAK");
@@ -1528,28 +1548,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_full_workflow() {
-        let (handler, store, network_id, _temp_dir) = create_test_handler_with_store().await;
+        let (handler, conn, network_id, _temp_dir) =
+            create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let old_ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
         let reserved_ip: Ipv4Addr = "10.0.0.50".parse().unwrap();
 
         // Step 1: Client gets IP from pool
-        store
-            .create_or_update_lease_with_network(
-                mac,
-                &old_ip,
-                None,
-                LeaseState::Active,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        store::create_or_update_lease_with_network(
+            &conn,
+            mac,
+            &old_ip,
+            None,
+            LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         // Step 2: Admin creates static reservation for different IP
-        store
-            .create_static_reservation(network_id, mac, &reserved_ip.to_string(), None)
+        store::create_static_reservation(&conn, network_id, mac, &reserved_ip.to_string(), None)
             .await
             .unwrap();
 
@@ -1563,9 +1583,9 @@ mod tests {
             .opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Request));
 
-        let network = store.get_network(network_id).await.unwrap();
+        let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&renew_request, &network)
+            .handle_request(&conn, &renew_request, &network)
             .await
             .unwrap();
 
@@ -1590,7 +1610,7 @@ mod tests {
             .insert(v4::DhcpOption::RequestedIpAddress(reserved_ip));
 
         let response = handler
-            .handle_request(&new_request, &network)
+            .handle_request(&conn, &new_request, &network)
             .await
             .unwrap();
 
@@ -1613,7 +1633,7 @@ mod tests {
         );
 
         // Verify lease was updated to new IP
-        let lease = store.get_lease_by_mac(mac).await.unwrap();
+        let lease = store::get_lease_by_mac(&conn, mac).await.unwrap();
         assert!(lease.is_some());
         let lease = lease.unwrap();
         assert_eq!(

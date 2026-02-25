@@ -1,10 +1,56 @@
 mod connection;
 mod migrations;
 
-use std::path::Path;
-
 use anyhow::Result;
 pub use connection::Connection;
+
+/// A factory for opening database connections.
+///
+/// Implementors produce independent `Connection` instances on demand,
+/// allowing callers to open a fresh connection per request or operation
+/// without sharing a single connection across concurrent tasks.
+#[async_trait::async_trait]
+pub trait ConnectionFactory: Send + Sync {
+    /// Open a new database connection.
+    async fn open(&self) -> Result<Connection>;
+}
+
+/// A `ConnectionFactory` backed by a filesystem path to a SQLite database.
+///
+/// Each call to `open` runs the full migration sequence and returns an
+/// independent connection with no shared state.
+pub struct DatabaseConnectionFactory {
+    path: std::path::PathBuf,
+}
+
+impl DatabaseConnectionFactory {
+    /// Create a new factory that opens connections to the SQLite database at `path`.
+    pub fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectionFactory for DatabaseConnectionFactory {
+    async fn open(&self) -> Result<Connection> {
+        Connection::open(self.path.clone()).await
+    }
+}
+
+/// Macro to create a `DatabaseConnectionFactory` pointing at this test's in-memory database.
+///
+/// Must be called at the top level of the test (same scoping rules as `test_database_path!`).
+/// Call `database::run_migrations(&factory).await` before opening connections to ensure the
+/// schema is up to date.
+#[cfg(test)]
+#[macro_export]
+macro_rules! test_connection_factory {
+    () => {
+        crate::database::DatabaseConnectionFactory::new(std::path::PathBuf::from(
+            crate::test_database_path!(),
+        ))
+    };
+}
 
 /// Trait for types that can be constructed from a database row.
 /// Provides a standard interface for row-to-struct conversion.
@@ -54,8 +100,18 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
     None,                                                               // Migration 13
 ];
 
-pub async fn open<T: AsRef<Path> + Send + 'static>(path: T) -> Result<Connection> {
-    let mut conn = Connection::open(path).await?;
+/// Run all pending database migrations against the database opened by `factory`.
+///
+/// This function opens a single connection via the factory, applies any SQL migrations that
+/// have not yet been applied, runs any associated post-migration hooks, and performs
+/// a one-time bad-data cleanup. The migrated connection is returned so that callers can
+/// hold it open — this is important for in-memory SQLite databases, which are destroyed
+/// when all connections close.
+///
+/// Callers should invoke this once at startup before opening any other connections so that
+/// the schema is fully initialised before concurrent factory calls begin.
+pub async fn run_migrations(factory: &dyn ConnectionFactory) -> Result<Connection> {
+    let mut conn = factory.open().await?;
     let current_version = get_or_init_current_migration(&mut conn).await?;
     perform_migrations(&mut conn, current_version).await?;
 
@@ -132,15 +188,17 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_open() {
+    async fn test_run_migrations() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        assert!(open(db_path).await.is_ok());
+        let factory = DatabaseConnectionFactory::new(db_path);
+        assert!(run_migrations(&factory).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_database_schema() {
-        let conn = open(test_database_path!()).await.unwrap();
+        let factory = test_connection_factory!();
+        let conn = run_migrations(&factory).await.unwrap();
 
         // Test that tables exist
         let table_names: Vec<String> = conn
@@ -162,7 +220,8 @@ mod tests {
     async fn test_device_operations() {
         use uuid::Uuid;
 
-        let conn = open(test_database_path!()).await.unwrap();
+        let factory = test_connection_factory!();
+        let conn = run_migrations(&factory).await.unwrap();
 
         // Test creating a device with BLOB UUID
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -246,7 +305,8 @@ mod tests {
         assert_eq!(uuid_type, "text");
 
         // Run migration 11
-        let conn2 = open(test_database_path!()).await.unwrap();
+        let factory2 = test_connection_factory!();
+        let conn2 = run_migrations(&factory2).await.unwrap();
 
         // Verify UUIDs are now stored as BLOB
         let uuid_type: String = conn2

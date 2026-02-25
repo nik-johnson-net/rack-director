@@ -5,7 +5,6 @@ use uuid::Uuid;
 use crate::database::FromRow;
 
 pub mod store;
-pub use store::LifecycleStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]

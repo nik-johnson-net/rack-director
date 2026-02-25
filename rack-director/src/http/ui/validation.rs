@@ -165,13 +165,14 @@ impl ValidationErrors {
 // NETWORK-SPECIFIC VALIDATORS
 // ============================================================================
 
+use crate::{database::Connection, dhcp};
+
 use super::networks::{CreateNetworkRequest, UpdateNetworkRequest};
-use crate::dhcp::DhcpStore;
 
 /// Validate create network request using the generic validators
 pub async fn validate_create_network_request(
+    conn: &Connection,
     req: &CreateNetworkRequest,
-    dhcp_store: &DhcpStore,
 ) -> Result<(), HashMap<String, String>> {
     let mut errors = ValidationErrors::new();
 
@@ -183,7 +184,7 @@ pub async fn validate_create_network_request(
     );
 
     // Check for duplicate network name
-    match dhcp_store.get_network_by_name(&req.name).await {
+    match dhcp::store::get_network_by_name(conn, &req.name).await {
         Ok(Some(_)) => {
             errors.add_error(
                 "name",
@@ -235,10 +236,7 @@ pub async fn validate_create_network_request(
         .as_ref()
         .and_then(|r| if r.is_empty() { None } else { Some(r.as_str()) });
 
-    match dhcp_store
-        .get_network_by_relay_string(relay_for_check)
-        .await
-    {
+    match dhcp::store::get_network_by_relay_string(conn, relay_for_check).await {
         Ok(Some(_)) => {
             if relay_for_check.is_none() {
                 errors.add_error(
@@ -264,9 +262,9 @@ pub async fn validate_create_network_request(
 /// Validate update network request using the generic validators
 /// Excludes the network being updated from duplicate checks
 pub async fn validate_update_network_request(
+    conn: &Connection,
     network_id: i64,
     req: &UpdateNetworkRequest,
-    dhcp_store: &DhcpStore,
 ) -> Result<(), HashMap<String, String>> {
     let mut errors = ValidationErrors::new();
 
@@ -276,7 +274,7 @@ pub async fn validate_update_network_request(
         errors.add_if_err("name", validate_string_length(name, 255, "Network name"));
 
         // Check for duplicate network name (excluding current network)
-        match dhcp_store.get_network_by_name(name).await {
+        match dhcp::store::get_network_by_name(conn, name).await {
             Ok(Some(existing_network)) => {
                 if existing_network.id != network_id {
                     errors.add_error(
@@ -295,7 +293,7 @@ pub async fn validate_update_network_request(
     // Validate subnet and gateway together if either is provided
     if req.subnet.is_some() || req.gateway.is_some() {
         // Get the current network to fill in missing values
-        let current_network = match dhcp_store.get_network(network_id).await {
+        let current_network = match dhcp::store::get_network(conn, network_id).await {
             Ok(net) => net,
             Err(e) => {
                 log::warn!("Failed to fetch current network for validation: {}", e);
@@ -348,10 +346,7 @@ pub async fn validate_update_network_request(
             Some(relay.as_str())
         };
 
-        match dhcp_store
-            .get_network_by_relay_string(relay_for_check)
-            .await
-        {
+        match dhcp::store::get_network_by_relay_string(conn, relay_for_check).await {
             Ok(Some(existing_network)) => {
                 if existing_network.id != network_id {
                     if relay_for_check.is_none() {
@@ -383,16 +378,17 @@ pub async fn validate_update_network_request(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::dhcp::DhcpStore;
-    use std::sync::Arc;
-    use tempfile::tempdir;
+    use crate::{database::ConnectionFactory, test_connection_factory};
 
-    async fn create_test_store() -> (DhcpStore, tempfile::TempDir) {
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = Arc::new(crate::database::open(db_path).await.unwrap());
-        (DhcpStore::new(db), temp_dir)
+    use super::*;
+    use std::sync::Arc;
+
+    async fn create_test_store(factory: Arc<dyn ConnectionFactory>) -> Connection {
+        // Run migrations; drop the returned connection (file-backed DB persists)
+        let conn = crate::database::run_migrations(factory.as_ref())
+            .await
+            .unwrap();
+        conn
     }
 
     // Test generic validators
@@ -453,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_valid() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "Test Network".to_string(),
             subnet: "192.168.1.0/24".to_string(),
@@ -464,12 +460,12 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        assert!(validate_create_network_request(&req, &store).await.is_ok());
+        assert!(validate_create_network_request(&conn, &req).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_validate_create_network_request_empty_name() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "".to_string(),
             subnet: "192.168.1.0/24".to_string(),
@@ -480,7 +476,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("name"));
@@ -488,21 +484,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_duplicate_name() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a network with a specific name
-        store
-            .create_network(
-                "Existing Network",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_network(
+            &conn,
+            "Existing Network",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Try to create another network with the same name
         let req = CreateNetworkRequest {
@@ -515,7 +511,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("name"));
@@ -524,21 +520,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_duplicate_relay_agent() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a network with a specific relay agent
-        store
-            .create_network(
-                "Network 1",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_network(
+            &conn,
+            "Network 1",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Try to create another network with the same relay agent
         let req = CreateNetworkRequest {
@@ -551,7 +547,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("relay_agent_address"));
@@ -565,21 +561,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_duplicate_local_l2() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a local L2 network (no relay agent) first
-        store
-            .create_network(
-                "Local Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_network(
+            &conn,
+            "Local Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         // Try to create another local L2 network (no relay agent)
         let req = CreateNetworkRequest {
@@ -592,7 +588,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("relay_agent_address"));
@@ -606,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_invalid_subnet() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "invalid".to_string(),
@@ -617,7 +613,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("subnet"));
@@ -625,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_gateway_out_of_subnet() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
@@ -636,7 +632,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("gateway"));
@@ -644,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_no_dns() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
@@ -655,7 +651,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("dns_servers"));
@@ -663,7 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_invalid_lease_duration() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
@@ -674,7 +670,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("lease_duration"));
@@ -682,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_invalid_relay() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
@@ -693,7 +689,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("relay_agent_address"));
@@ -701,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_multiple_errors() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "".to_string(),
             subnet: "invalid".to_string(),
@@ -712,7 +708,7 @@ mod tests {
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&req, &store).await;
+        let result = validate_create_network_request(&conn, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("name"));
@@ -725,21 +721,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_update_network_request_valid() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a network to update
-        let network = store
-            .create_network(
-                "Original Network",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        let network = dhcp::store::create_network(
+            &conn,
+            "Original Network",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
         let req = UpdateNetworkRequest {
             name: Some("Updated Network".to_string()),
@@ -752,7 +748,7 @@ mod tests {
         };
 
         assert!(
-            validate_update_network_request(network.id, &req, &store)
+            validate_update_network_request(&conn, network.id, &req)
                 .await
                 .is_ok()
         );
@@ -760,34 +756,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_update_network_request_duplicate_name_different_network() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create two networks
-        let network1 = store
-            .create_network(
-                "Network 1",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        let network1 = dhcp::store::create_network(
+            &conn,
+            "Network 1",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
-        store
-            .create_network(
-                "Network 2",
-                "192.168.2.0/24",
-                "192.168.2.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.3"),
-                false,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_network(
+            &conn,
+            "Network 2",
+            "192.168.2.0/24",
+            "192.168.2.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.3"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Try to update network1 to have the same name as network2
         let req = UpdateNetworkRequest {
@@ -800,7 +796,7 @@ mod tests {
             enable_autodiscovery: None,
         };
 
-        let result = validate_update_network_request(network1.id, &req, &store).await;
+        let result = validate_update_network_request(&conn, network1.id, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("name"));
@@ -812,21 +808,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_update_network_request_same_name_same_network() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a network
-        let network = store
-            .create_network(
-                "Test Network",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        let network = dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Update with the same name (should be allowed)
         let req = UpdateNetworkRequest {
@@ -840,7 +836,7 @@ mod tests {
         };
 
         assert!(
-            validate_update_network_request(network.id, &req, &store)
+            validate_update_network_request(&conn, network.id, &req)
                 .await
                 .is_ok()
         );
@@ -848,34 +844,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_update_network_request_duplicate_relay_agent() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create two networks
-        let network1 = store
-            .create_network(
-                "Network 1",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        let network1 = dhcp::store::create_network(
+            &conn,
+            "Network 1",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
-        store
-            .create_network(
-                "Network 2",
-                "192.168.2.0/24",
-                "192.168.2.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.3"),
-                false,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_network(
+            &conn,
+            "Network 2",
+            "192.168.2.0/24",
+            "192.168.2.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.3"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Try to update network1 to have the same relay agent as network2
         let req = UpdateNetworkRequest {
@@ -888,7 +884,7 @@ mod tests {
             enable_autodiscovery: None,
         };
 
-        let result = validate_update_network_request(network1.id, &req, &store).await;
+        let result = validate_update_network_request(&conn, network1.id, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("relay_agent_address"));
@@ -896,21 +892,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_update_network_request_same_relay_agent_same_network() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a network
-        let network = store
-            .create_network(
-                "Test Network",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        let network = dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Update with the same relay agent (should be allowed)
         let req = UpdateNetworkRequest {
@@ -924,7 +920,7 @@ mod tests {
         };
 
         assert!(
-            validate_update_network_request(network.id, &req, &store)
+            validate_update_network_request(&conn, network.id, &req)
                 .await
                 .is_ok()
         );
@@ -932,21 +928,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_update_network_request_gateway_out_of_new_subnet() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a network
-        let network = store
-            .create_network(
-                "Test Network",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        let network = dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Update subnet to a range that doesn't contain the gateway
         let req = UpdateNetworkRequest {
@@ -959,7 +955,7 @@ mod tests {
             enable_autodiscovery: None,
         };
 
-        let result = validate_update_network_request(network.id, &req, &store).await;
+        let result = validate_update_network_request(&conn, network.id, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("gateway"));
@@ -967,21 +963,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_update_network_request_invalid_dns() {
-        let (store, _temp_dir) = create_test_store().await;
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
 
         // Create a network
-        let network = store
-            .create_network(
-                "Test Network",
-                "192.168.1.0/24",
-                "192.168.1.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                Some("10.0.0.2"),
-                false,
-            )
-            .await
-            .unwrap();
+        let network = dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Update with invalid DNS
         let req = UpdateNetworkRequest {
@@ -994,7 +990,7 @@ mod tests {
             enable_autodiscovery: None,
         };
 
-        let result = validate_update_network_request(network.id, &req, &store).await;
+        let result = validate_update_network_request(&conn, network.id, &req).await;
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("dns_servers"));

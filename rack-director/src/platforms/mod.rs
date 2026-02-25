@@ -1,9 +1,8 @@
 mod cpu_model;
 mod detection;
-mod store;
+pub mod store;
 
 pub use detection::detect_or_create_platform;
-pub use store::PlatformsStore;
 
 // Re-export types for convenience
 pub use common::device_attributes::DiskType;

@@ -170,10 +170,14 @@ async fn create_platform(
         return Err(HttpError::ValidationError(errors));
     }
 
-    let platform = state
-        .platforms_store
-        .create(&req.name, req.description.as_deref(), &req.attributes)
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let platform = crate::platforms::store::create(
+        &conn,
+        &req.name,
+        req.description.as_deref(),
+        &req.attributes,
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(platform)))
 }
@@ -182,7 +186,8 @@ async fn create_platform(
 async fn list_platforms(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<Platform>>, HttpError> {
-    let platforms = state.platforms_store.list().await?;
+    let conn = state.connection_factory.open().await?;
+    let platforms = crate::platforms::store::list(&conn).await?;
     Ok(Json(platforms))
 }
 
@@ -191,7 +196,8 @@ async fn get_platform(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Platform>, HttpError> {
-    let platform = state.platforms_store.get(id).await?;
+    let conn = state.connection_factory.open().await?;
+    let platform = crate::platforms::store::get(&conn, id).await?;
     Ok(Json(platform))
 }
 
@@ -205,15 +211,15 @@ async fn update_platform(
         return Err(HttpError::ValidationError(errors));
     }
 
-    let platform = state
-        .platforms_store
-        .update(
-            id,
-            req.name.as_deref(),
-            req.description.as_deref(),
-            req.attributes.as_ref(),
-        )
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let platform = crate::platforms::store::update(
+        &conn,
+        id,
+        req.name.as_deref(),
+        req.description.as_deref(),
+        req.attributes.as_ref(),
+    )
+    .await?;
 
     Ok(Json(platform))
 }
@@ -223,7 +229,8 @@ async fn delete_platform(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, HttpError> {
-    state.platforms_store.delete(id).await?;
+    let conn = state.connection_factory.open().await?;
+    crate::platforms::store::delete(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -232,10 +239,8 @@ async fn list_platform_devices(
     State(state): State<Arc<AppState>>,
     Path(platform_id): Path<i64>,
 ) -> Result<Json<Vec<String>>, HttpError> {
-    let devices = state
-        .director
-        .list_devices_with_platform(platform_id)
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let devices = crate::director::store::list_devices_with_platform(&conn, platform_id).await?;
     let device_strs: Vec<String> = devices.iter().map(|u| u.to_string()).collect();
     Ok(Json(device_strs))
 }
@@ -255,16 +260,16 @@ async fn get_platform_devices_with_details(
     State(state): State<Arc<AppState>>,
     Path(platform_id): Path<i64>,
 ) -> Result<Json<Vec<PlatformDeviceInfo>>, HttpError> {
-    let device_uuids = state
-        .director
-        .list_devices_with_platform(platform_id)
-        .await?;
+    let conn = state.connection_factory.open().await?;
+
+    let device_uuids =
+        crate::director::store::list_devices_with_platform(&conn, platform_id).await?;
 
     let mut devices_info = Vec::new();
     for uuid in device_uuids {
         // Get device info
-        let device = state.director.get_device(&uuid).await?;
-        let lifecycle = state.director.get_device_lifecycle(&uuid).await?;
+        let device = crate::director::store::get_device(&conn, &uuid).await?;
+        let lifecycle = crate::lifecycle::store::get_device_lifecycle(&conn, &uuid).await?;
 
         devices_info.push(PlatformDeviceInfo {
             uuid: uuid.to_string(),
@@ -289,8 +294,17 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
-    async fn setup_db(path: String) -> Arc<crate::database::Connection> {
-        Arc::new(database::open(path).await.unwrap())
+    async fn setup_db(
+        path: String,
+    ) -> (
+        Arc<crate::database::Connection>,
+        Arc<dyn crate::database::ConnectionFactory>,
+    ) {
+        let factory: Arc<dyn crate::database::ConnectionFactory> = Arc::new(
+            crate::database::DatabaseConnectionFactory::new(std::path::PathBuf::from(path)),
+        );
+        let db = Arc::new(database::run_migrations(factory.as_ref()).await.unwrap());
+        (db, factory)
     }
 
     fn test_uuid(n: u8) -> Uuid {
@@ -337,16 +351,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_empty() {
-        let db = setup_db(test_database_path!()).await;
-        let platforms_store = PlatformsStore::new(db.clone());
-        let director = Director::new(db);
+        let (conn, _factory) = setup_db(test_database_path!()).await;
+        let director = Director::new(&conn);
 
         // Create a platform
         let attrs = sample_platform_attributes();
-        let platform = platforms_store
-            .create("Test Platform", Some("Test Description"), &attrs)
-            .await
-            .unwrap();
+        let platform = crate::platforms::store::create(
+            &conn,
+            "Test Platform",
+            Some("Test Description"),
+            &attrs,
+        )
+        .await
+        .unwrap();
 
         let platform_id = platform.id.unwrap();
 
@@ -361,16 +378,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_single_device() {
-        let db = setup_db(test_database_path!()).await;
-        let platforms_store = PlatformsStore::new(db.clone());
-        let director = Director::new(db);
+        let (conn, _factory) = setup_db(test_database_path!()).await;
+        let director = Director::new(&conn);
 
         // Create a platform
         let attrs = sample_platform_attributes();
-        let platform = platforms_store
-            .create("Test Platform", Some("Test Description"), &attrs)
-            .await
-            .unwrap();
+        let platform = crate::platforms::store::create(
+            &conn,
+            "Test Platform",
+            Some("Test Description"),
+            &attrs,
+        )
+        .await
+        .unwrap();
 
         let platform_id = platform.id.unwrap();
 
@@ -409,16 +429,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_multiple_devices() {
-        let db = setup_db(test_database_path!()).await;
-        let platforms_store = PlatformsStore::new(db.clone());
-        let director = Director::new(db);
+        let (conn, _factory) = setup_db(test_database_path!()).await;
+        let director = Director::new(&conn);
 
         // Create a platform
         let attrs = sample_platform_attributes();
-        let platform = platforms_store
-            .create("Test Platform", Some("Test Description"), &attrs)
-            .await
-            .unwrap();
+        let platform = crate::platforms::store::create(
+            &conn,
+            "Test Platform",
+            Some("Test Description"),
+            &attrs,
+        )
+        .await
+        .unwrap();
 
         let platform_id = platform.id.unwrap();
 
@@ -492,16 +515,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_lifecycle_states() {
-        let db = setup_db(test_database_path!()).await;
-        let platforms_store = PlatformsStore::new(db.clone());
-        let director = Director::new(db);
+        let (conn, _factory) = setup_db(test_database_path!()).await;
+        let director = Director::new(&conn);
 
         // Create a platform
         let attrs = sample_platform_attributes();
-        let platform = platforms_store
-            .create("Test Platform", Some("Test Description"), &attrs)
-            .await
-            .unwrap();
+        let platform = crate::platforms::store::create(
+            &conn,
+            "Test Platform",
+            Some("Test Description"),
+            &attrs,
+        )
+        .await
+        .unwrap();
 
         let platform_id = platform.id.unwrap();
 
@@ -538,8 +564,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_nonexistent_platform() {
-        let db = setup_db(test_database_path!()).await;
-        let director = Director::new(db);
+        let (conn, _factory) = setup_db(test_database_path!()).await;
+        let director = Director::new(&conn);
 
         // Try to get devices for a nonexistent platform
         let result = director.list_devices_with_platform(999).await;

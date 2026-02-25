@@ -12,20 +12,17 @@ use axum::Router;
 use tokio::task::JoinHandle;
 
 use crate::boot_files::BootFileProvider;
-use crate::dhcp::DhcpStore;
-use crate::director::Director;
-use crate::operating_systems::OperatingSystemsStore;
-use crate::platforms::PlatformsStore;
-use crate::roles::RolesStore;
+use crate::database::ConnectionFactory;
 use crate::storage::ImageStore;
 
+/// Shared application state for all HTTP handlers.
+///
+/// Handlers open a fresh database connection per request via the `db` factory.
+/// This avoids connection sharing across async tasks and ensures each
+/// request has an independent SQLite connection.
 pub struct AppState {
-    pub director: Director,
-    pub dhcp_store: DhcpStore,
+    pub connection_factory: Arc<dyn ConnectionFactory>,
     pub image_store: Arc<ImageStore>,
-    pub os_store: OperatingSystemsStore,
-    pub roles_store: RolesStore,
-    pub platforms_store: PlatformsStore,
     pub agent_images_path: PathBuf,
     pub boot_file_provider: Arc<dyn BootFileProvider>,
 }
@@ -35,25 +32,17 @@ pub struct StartResult {
     pub port: u16,
 }
 
-pub async fn start<T: Into<SocketAddr>, P: Into<PathBuf>>(
-    director: Director,
-    dhcp_store: DhcpStore,
+pub async fn start<T: Into<SocketAddr>>(
+    connection_factory: Arc<dyn ConnectionFactory>,
     image_store: Arc<ImageStore>,
-    os_store: OperatingSystemsStore,
-    roles_store: RolesStore,
-    platforms_store: PlatformsStore,
     bind: T,
-    agent_images_path: P,
+    agent_images_path: PathBuf,
     boot_file_provider: Arc<dyn BootFileProvider>,
 ) -> Result<StartResult> {
     let state = Arc::new(AppState {
-        director,
-        dhcp_store,
+        connection_factory,
         image_store,
-        os_store,
-        roles_store,
-        platforms_store,
-        agent_images_path: agent_images_path.into(),
+        agent_images_path,
         boot_file_provider,
     });
 

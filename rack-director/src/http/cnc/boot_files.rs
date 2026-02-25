@@ -85,18 +85,12 @@ mod tests {
 
     use crate::{
         boot_files::FilesystemBootFileProvider,
-        database,
-        director::Director,
         storage::{ImageStore, ImageStoreConfig},
     };
 
     /// Create a test AppState with temporary directory and sample boot files
     async fn create_test_state() -> (Arc<AppState>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-
-        // Create database
-        let db_path = temp_dir.path().join("test.db");
-        let db = Arc::new(database::open(db_path).await.unwrap());
 
         // Create boot files directory with test files
         let boot_files_dir = temp_dir.path().join("boot");
@@ -138,13 +132,19 @@ mod tests {
         })
         .unwrap();
 
+        let db_path = temp_dir.path().join("test.db");
+
+        let connection_factory: Arc<dyn crate::database::ConnectionFactory> = Arc::new(
+            crate::database::DatabaseConnectionFactory::new(db_path.clone()),
+        );
+        // Run migrations; drop the returned connection (file-backed DB persists)
+        let _ = crate::database::run_migrations(connection_factory.as_ref())
+            .await
+            .unwrap();
+
         let state = Arc::new(AppState {
-            director: Director::new(db.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db.clone()),
+            connection_factory,
             image_store: Arc::new(image_store),
-            os_store: crate::operating_systems::OperatingSystemsStore::new(db.clone()),
-            roles_store: crate::roles::RolesStore::new(db.clone()),
-            platforms_store: crate::platforms::PlatformsStore::new(db),
             agent_images_path,
             boot_file_provider,
         });

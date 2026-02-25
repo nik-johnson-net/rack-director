@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::validation::validate_hostname;
+
 use crate::{
+    director::Director,
     http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
     operating_systems::Architecture,
@@ -268,8 +270,14 @@ pub fn routes(state: Arc<AppState>) -> Router {
 async fn get_all_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DevicesIndex>, StatusCode> {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let director = Director::new(&conn);
     // Fetch all devices from Director (single source of truth)
-    let devices = match state.director.get_all_devices().await {
+    let devices = match director.get_all_devices().await {
         Ok(devices) => devices,
         Err(e) => {
             log::error!("Failed to fetch devices: {}", e);
@@ -321,8 +329,14 @@ async fn get_device_by_uuid(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceResponse>, StatusCode> {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let director = Director::new(&conn);
     // Get device from Director (single source of truth)
-    let device = match state.director.get_device(&uuid).await {
+    let device = match director.get_device(&uuid).await {
         Ok(device) => device,
         Err(_) => return Err(StatusCode::NOT_FOUND),
     };
@@ -400,12 +414,15 @@ async fn update_device_attributes(
         }
     }
 
-    // Update device attributes
-    match state
-        .director
-        .update_attributes(&uuid, payload.attributes)
+    let conn = state
+        .connection_factory
+        .open()
         .await
-    {
+        .map_err(HttpError::ServerInternalError)?;
+    let director = Director::new(&conn);
+
+    // Update device attributes
+    match director.update_attributes(&uuid, payload.attributes).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
             log::error!("Failed to update device attributes for {}: {}", uuid, e);
@@ -418,7 +435,13 @@ async fn get_device_lifecycle(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceLifecycle>, StatusCode> {
-    match state.director.get_device_lifecycle(&uuid).await {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let director = Director::new(&conn);
+    match director.get_device_lifecycle(&uuid).await {
         Ok(Some(lifecycle)) => Ok(Json(lifecycle)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -447,11 +470,17 @@ async fn start_lifecycle_transition(
         }
     };
 
-    match state
-        .director
-        .start_lifecycle_transition(&uuid, to_state)
-        .await
-    {
+    let conn = state.connection_factory.open().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })?;
+    let director = Director::new(&conn);
+
+    match director.start_lifecycle_transition(&uuid, to_state).await {
         Ok(transition_id) => Ok(Json(StartTransitionResponse {
             transition_id,
             message: format!("Started lifecycle transition for device {}", uuid),
@@ -471,9 +500,14 @@ async fn get_device_transitions(
     Query(params): Query<DeviceTransitionsQuery>,
 ) -> Result<Json<Vec<LifecycleTransition>>, StatusCode> {
     let include_completed = params.include_completed.unwrap_or(false);
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let director = Director::new(&conn);
 
-    match state
-        .director
+    match director
         .get_device_transitions(&uuid, include_completed)
         .await
     {
@@ -486,7 +520,13 @@ async fn get_active_transition(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Option<LifecycleTransition>>, StatusCode> {
-    match state.director.get_active_transition_for_device(&uuid).await {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let director = Director::new(&conn);
+    match director.get_active_transition_for_device(&uuid).await {
         Ok(transition) => Ok(Json(transition)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -496,12 +536,19 @@ async fn get_device_status(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceStatusResponse>, StatusCode> {
-    let current_lifecycle = match state.director.get_device_lifecycle(&uuid).await {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let director = Director::new(&conn);
+
+    let current_lifecycle = match director.get_device_lifecycle(&uuid).await {
         Ok(lifecycle) => lifecycle.map(String::from),
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
-    let active_transition = match state.director.get_active_transition_for_device(&uuid).await {
+    let active_transition = match director.get_active_transition_for_device(&uuid).await {
         Ok(transition) => transition,
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
@@ -517,12 +564,22 @@ async fn create_pending_device(
     State(state): State<Arc<AppState>>,
     extract::Json(payload): extract::Json<CreatePendingDeviceRequest>,
 ) -> Result<(StatusCode, Json<PendingDeviceResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let conn = match state.connection_factory.open().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::error!("Failed to open database: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                }),
+            ));
+        }
+    };
+    let director = Director::new(&conn);
+
     // Validate that the lease exists by MAC address
-    let lease = match state
-        .dhcp_store
-        .get_lease_by_mac(&payload.mac_address)
-        .await
-    {
+    let lease = match crate::dhcp::store::get_lease_by_mac(&conn, &payload.mac_address).await {
         Ok(Some(lease)) => lease,
         Ok(None) => {
             return Err((
@@ -573,8 +630,7 @@ async fn create_pending_device(
     }
 
     // Create the pending device
-    let id = match state
-        .director
+    let id = match director
         .create_pending_device(&payload.mac_address, payload.network_id)
         .await
     {
@@ -607,7 +663,13 @@ async fn create_pending_device(
 async fn get_pending_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PendingDeviceResponse>>, StatusCode> {
-    match state.director.get_pending_devices().await {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let director = Director::new(&conn);
+    match director.get_pending_devices().await {
         Ok(devices) => {
             let responses: Vec<PendingDeviceResponse> = devices
                 .into_iter()
@@ -633,7 +695,16 @@ async fn delete_pending_device(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    match state.director.delete_pending_device(id).await {
+    let conn = state.connection_factory.open().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })?;
+    let director = Director::new(&conn);
+    match director.delete_pending_device(id).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
             log::error!("Failed to delete pending device {}: {}", id, e);
@@ -651,7 +722,16 @@ async fn delete_device_by_uuid(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    match state.director.delete_device(&uuid).await {
+    let conn = state.connection_factory.open().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })?;
+    let director = Director::new(&conn);
+    match director.delete_device(&uuid).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
             log::error!("Failed to delete device {}: {}", uuid, e);
@@ -674,32 +754,10 @@ mod tests {
             .expect("test UUID should be valid")
     }
 
-    /// Helper to create a test network for tests that need DHCP functionality
-    async fn create_test_network(state: &AppState) -> i64 {
-        let network = state
-            .dhcp_store
-            .create_network(
-                "Test Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
-
-        state
-            .dhcp_store
-            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
-            .await
-            .unwrap();
-
-        network.id
-    }
-
-    use crate::{database, director::Director, storage::ImageStore};
+    use crate::{
+        database, database::DatabaseConnectionFactory, director::Director, storage::ImageStore,
+        test_connection_factory,
+    };
 
     use super::*;
     use axum::{
@@ -710,19 +768,21 @@ mod tests {
     use tempfile::tempdir;
     use tower::util::ServiceExt;
 
-    async fn setup_test_state() -> (Arc<AppState>, tempfile::TempDir) {
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = Arc::new(database::open(db_path).await.unwrap());
-
-        // Note: No default network is created. Tests that need networks should create them explicitly.
-
+    async fn setup_test_state(
+        factory: DatabaseConnectionFactory,
+    ) -> (
+        Arc<AppState>,
+        tempfile::TempDir,
+        crate::database::Connection,
+    ) {
         // Create image store for testing
-        let _storage_path = temp_dir.path().join("images");
         let store = ImageStore::new(crate::storage::ImageStoreConfig::Memory {
             base_url: "http://localhost:8080/images".into(),
         })
         .unwrap();
+
+        // Create temporary directories needed for agent images and boot files
+        let temp_dir = tempdir().unwrap();
 
         // Create agent-image directory with mock files for testing
         let agent_images_path = temp_dir.path().join("agent-image");
@@ -741,30 +801,64 @@ mod tests {
         let boot_file_provider =
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
+        let conn: Arc<dyn crate::database::ConnectionFactory> = Arc::new(factory);
+        // Run migrations and retain the connection so the in-memory DB persists for the test
+        let migration_conn = database::run_migrations(conn.as_ref()).await.unwrap();
+
         let state = Arc::new(AppState {
-            director: Director::new(db.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db.clone()),
+            connection_factory: conn,
             image_store: store.into(),
-            os_store: crate::operating_systems::OperatingSystemsStore::new(db.clone()),
-            roles_store: crate::roles::RolesStore::new(db.clone()),
-            platforms_store: crate::platforms::PlatformsStore::new(db),
             agent_images_path,
             boot_file_provider,
         });
-        (state, temp_dir)
+        (state, temp_dir, migration_conn)
+    }
+
+    /// Open a database connection for test assertions.
+    ///
+    /// Usage: `let db = test_db(&state).await; let director = Director::new(&db);`
+    /// For one-liners: `{ let db = test_db(&state).await; Director::new(&db).method().await }`
+    async fn test_db(state: &AppState) -> crate::database::Connection {
+        state.connection_factory.open().await.unwrap()
+    }
+
+    /// Helper to create a test network for tests that need DHCP functionality
+    async fn create_test_network(state: &AppState) -> i64 {
+        let db = Arc::new(state.connection_factory.open().await.unwrap());
+        let network = crate::dhcp::store::create_network(
+            &db,
+            "Test Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        crate::dhcp::store::create_pool(&db, network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+            .await
+            .unwrap();
+
+        network.id
     }
 
     #[tokio::test]
     async fn test_get_device_lifecycle() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x10);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state);
 
@@ -779,15 +873,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_lifecycle_transition() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x11);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state);
 
@@ -808,15 +905,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_device_status() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x12);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state);
 
@@ -831,17 +931,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_pending_device() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let network_id = create_test_network(&state).await;
 
         // Create a pending device directly (bypassing network/lease setup for simplicity)
         let mac = "aa:bb:cc:dd:ee:ff";
 
-        let pending_id = state
-            .director
-            .create_pending_device(mac, network_id)
-            .await
-            .unwrap();
+        let pending_id = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .create_pending_device(mac, network_id)
+                .await
+                .unwrap()
+        };
 
         let app = routes(state.clone());
 
@@ -856,7 +959,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify it's deleted - should return empty list
-        let pending_devices = state.director.get_pending_devices().await.unwrap();
+        let pending_devices = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_pending_devices().await.unwrap()
+        };
         assert!(
             pending_devices.is_empty(),
             "Pending device should be deleted"
@@ -865,19 +971,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_device() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x20);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         // Verify device exists before deletion
         assert!(
-            state.director.device_exists(&test_uuid).await.unwrap(),
+            {
+                let conn = test_db(&state).await;
+                Director::new(&conn)
+                    .device_exists(&test_uuid)
+                    .await
+                    .unwrap()
+            },
             "Device should exist before deletion"
         );
 
@@ -895,29 +1010,39 @@ mod tests {
 
         // Verify device is deleted
         assert!(
-            !state.director.device_exists(&test_uuid).await.unwrap(),
+            !{
+                let conn = test_db(&state).await;
+                Director::new(&conn)
+                    .device_exists(&test_uuid)
+                    .await
+                    .unwrap()
+            },
             "Device should be deleted"
         );
     }
 
     #[tokio::test]
     async fn test_delete_multiple_devices() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let uuid1 = test_uuid(0x21);
         let uuid2 = test_uuid(0x22);
 
         // Register two devices
-        state
-            .director
-            .register_device(&uuid1, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
-
-        state
-            .director
-            .register_device(&uuid2, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&uuid1, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&uuid2, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -942,13 +1067,20 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify both devices are deleted
-        assert!(!state.director.device_exists(&uuid1).await.unwrap());
-        assert!(!state.director.device_exists(&uuid2).await.unwrap());
+        assert!(!{
+            let conn = test_db(&state).await;
+            Director::new(&conn).device_exists(&uuid1).await.unwrap()
+        });
+        assert!(!{
+            let conn = test_db(&state).await;
+            Director::new(&conn).device_exists(&uuid2).await.unwrap()
+        });
     }
 
     #[tokio::test]
     async fn test_delete_nonexistent_device() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x22);
 
         // Don't register the device - it doesn't exist
@@ -977,15 +1109,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_hostname_valid() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x30);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1009,21 +1144,27 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify hostname was updated
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         assert_eq!(device.attributes.hostname, Some("server-01".to_string()));
     }
 
     #[tokio::test]
     async fn test_update_device_hostname_empty() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x31);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1057,15 +1198,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_hostname_too_long() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x32);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1099,15 +1243,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_hostname_invalid_characters() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x33);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1141,15 +1288,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_hostname_leading_hyphen() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x34);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1183,15 +1333,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_hostname_trailing_hyphen() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x35);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1225,15 +1378,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_hostname_with_dots() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x36);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1257,7 +1413,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify hostname was updated
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         assert_eq!(
             device.attributes.hostname,
             Some("server.example.com".to_string())
@@ -1266,15 +1425,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_hostname_not_string() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x37);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1308,15 +1470,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_device_attributes_without_hostname() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x38);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1340,7 +1505,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify attribute was updated
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         assert_eq!(
             device.attributes.manufacturer,
             Some("Dell Inc.".to_string())
@@ -1349,15 +1517,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_bmc_config_rejects_password() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x39);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1395,15 +1566,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_bmc_config_rejects_username() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x3A);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1440,15 +1614,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_bmc_config_allows_valid_fields() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x3B);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1477,7 +1654,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify bmc_config was updated
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         let bmc_config = device
             .attributes
             .bmc_config
@@ -1490,14 +1670,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_bmc_config_invalid_ip_address() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x3C);
 
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1534,14 +1717,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_bmc_config_invalid_netmask() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x3D);
 
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1578,14 +1764,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_bmc_config_missing_static_fields() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x3E);
 
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1619,14 +1808,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_bmc_config_dhcp_no_validation() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x3F);
 
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1652,7 +1844,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify bmc_config was updated
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         let bmc_config = device
             .attributes
             .bmc_config
@@ -1733,15 +1928,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_device_sanitizes_password() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x50);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         // Set BMC config with password
         let mut attributes = serde_json::Map::new();
@@ -1755,11 +1953,13 @@ mod tests {
             }),
         );
 
-        state
-            .director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .update_attributes(&test_uuid, attributes)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1795,15 +1995,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_all_devices_sanitizes_passwords() {
-        let (state, _temp_dir) = setup_test_state().await;
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x51);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         // Set BMC config with password
         let mut attributes = serde_json::Map::new();
@@ -1817,11 +2020,13 @@ mod tests {
             }),
         );
 
-        state
-            .director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .update_attributes(&test_uuid, attributes)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1866,14 +2071,16 @@ async fn assign_platform(
     Path(uuid): Path<Uuid>,
     Json(req): Json<AssignPlatformRequest>,
 ) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
     // Verify platform exists
-    state.platforms_store.get(req.platform_id).await?;
+    crate::platforms::store::get(&conn, req.platform_id).await?;
 
     // Verify device exists
-    state.director.get_device(&uuid).await?;
+    director.get_device(&uuid).await?;
 
-    state
-        .director
+    director
         .assign_platform_to_device(&uuid, req.platform_id)
         .await?;
 
@@ -1884,12 +2091,15 @@ async fn get_device_platform(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Option<Platform>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
     // Get platform ID from device
-    let platform_id = state.director.get_device_platform_id(&uuid).await?;
+    let platform_id = director.get_device_platform_id(&uuid).await?;
 
     // If device has a platform, fetch full platform details
     if let Some(id) = platform_id {
-        let platform = state.platforms_store.get(id).await?;
+        let platform = crate::platforms::store::get(&conn, id).await?;
         Ok(Json(Some(platform)))
     } else {
         Ok(Json(None))
@@ -1903,16 +2113,16 @@ async fn assign_role(
     Path(uuid): Path<Uuid>,
     Json(req): Json<AssignRoleRequest>,
 ) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
     // Verify role exists
-    state.roles_store.get(req.role_id).await?;
+    crate::roles::store::get(&conn, req.role_id).await?;
 
     // Verify device exists
-    state.director.get_device(&uuid).await?;
+    director.get_device(&uuid).await?;
 
-    state
-        .director
-        .assign_role_to_device(&uuid, req.role_id)
-        .await?;
+    director.assign_role_to_device(&uuid, req.role_id).await?;
 
     Ok(StatusCode::OK)
 }
@@ -1921,12 +2131,15 @@ async fn get_device_role(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Option<Role>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
     // Get role ID from device
-    let role_id = state.director.get_device_role_id(&uuid).await?;
+    let role_id = director.get_device_role_id(&uuid).await?;
 
     // If device has a role, fetch full role details
     if let Some(id) = role_id {
-        let role = state.roles_store.get(id).await?;
+        let role = crate::roles::store::get(&conn, id).await?;
         Ok(Json(Some(role)))
     } else {
         Ok(Json(None))
