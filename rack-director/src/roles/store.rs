@@ -254,6 +254,8 @@ mod tests {
         assert_eq!(retrieved.name, role.name);
         assert_eq!(retrieved.disk_layout.disks.len(), 1);
         assert_eq!(retrieved.disk_layout.disks[0].partitions.len(), 1);
+        assert_eq!(retrieved.disk_layout.disks.len(), 1);
+        assert_eq!(retrieved.disk_layout.disks[0].partitions.len(), 1);
     }
 
     #[tokio::test]

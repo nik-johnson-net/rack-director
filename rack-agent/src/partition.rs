@@ -463,7 +463,7 @@ fn calculate_partition_offsets(
         };
 
         // Align size up to boundary
-        let aligned_size = size.div_ceil(ALIGN) * ALIGN;
+        let aligned_size = (size + ALIGN - 1) / ALIGN * ALIGN;
         let end = std::cmp::min(current + aligned_size, usable_end);
 
         offsets.push((current, end - 1)); // parted uses inclusive end

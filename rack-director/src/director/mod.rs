@@ -565,6 +565,10 @@ impl<'a> Director<'a> {
     ///
     /// If the role's disk layout uses platform labels (device names not starting with '/'),
     /// the device must have a platform assigned, and all labels must exist in that platform.
+    /// Assign a role to a device, validating disk layout labels against the platform
+    ///
+    /// If the role's disk layout uses platform labels (device names not starting with '/'),
+    /// the device must have a platform assigned, and all labels must exist in that platform.
     pub async fn assign_role_to_device(
         &self,
         device_uuid: &Uuid,
