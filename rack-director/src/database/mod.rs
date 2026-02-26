@@ -17,8 +17,10 @@ pub trait ConnectionFactory: Send + Sync {
 
 /// A `ConnectionFactory` backed by a filesystem path to a SQLite database.
 ///
-/// Each call to `open` runs the full migration sequence and returns an
-/// independent connection with no shared state.
+/// Each call to `open` returns an independent connection with no shared state.
+/// Migrations are NOT run on each open call — callers must invoke
+/// `database::run_migrations` once at startup before opening connections
+/// for normal use.
 pub struct DatabaseConnectionFactory {
     path: std::path::PathBuf,
 }

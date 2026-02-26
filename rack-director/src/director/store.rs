@@ -1714,6 +1714,132 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // ===== Failure-mode tests =====
+
+    /// get_device with a UUID that does not exist must return an error.
+    #[tokio::test]
+    async fn test_get_device_not_found() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF0);
+
+        let result = get_device(&db, &uuid).await;
+        assert!(
+            result.is_err(),
+            "get_device must return Err for unknown UUID"
+        );
+    }
+
+    /// register_device with a UUID that is already present must return an error
+    /// because of the PRIMARY KEY constraint on the devices table.
+    #[tokio::test]
+    async fn test_register_device_duplicate_uuid() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF1);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let result = register_device(&db, &uuid, Architecture::X86_64).await;
+        assert!(
+            result.is_err(),
+            "register_device must return Err for duplicate UUID"
+        );
+    }
+
+    /// device_exists with a UUID that does not exist must return false (not an error).
+    #[tokio::test]
+    async fn test_device_exists_not_found() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF2);
+
+        let exists = device_exists(&db, &uuid).await.unwrap();
+        assert!(!exists, "device_exists must return false for unknown UUID");
+    }
+
+    /// find_device_by_mac with a MAC that matches no device must return None.
+    #[tokio::test]
+    async fn test_find_device_by_mac_not_found() {
+        let db = setup_db(test_database_path!()).await;
+
+        let result = find_device_by_mac(&db, "ff:ff:ff:ff:ff:ff").await.unwrap();
+        assert_eq!(
+            result, None,
+            "find_device_by_mac must return None when MAC is absent"
+        );
+    }
+
+    /// delete_device with a UUID that does not exist must succeed silently
+    /// (DELETE with no matching rows is not an error in SQLite).
+    #[tokio::test]
+    async fn test_delete_device_nonexistent() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF3);
+
+        let result = delete_device(&db, &uuid).await;
+        assert!(
+            result.is_ok(),
+            "delete_device must return Ok for unknown UUID"
+        );
+    }
+
+    /// update_attributes with a UUID that does not exist must return an error
+    /// because it calls get_device internally, which fails for unknown UUIDs.
+    #[tokio::test]
+    async fn test_update_attributes_nonexistent() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF4);
+
+        let attrs = serde_json::Map::new();
+        let result = update_attributes(&db, &uuid, attrs).await;
+        assert!(
+            result.is_err(),
+            "update_attributes must return Err for unknown UUID"
+        );
+    }
+
+    /// complete_pending_device with a MAC that does not exist in pending_devices
+    /// must return Ok — the UPDATE simply affects 0 rows, which is not an error.
+    #[tokio::test]
+    async fn test_complete_pending_device_nonexistent() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF5);
+
+        let result = complete_pending_device(&db, "ff:00:00:00:00:00", &uuid).await;
+        assert!(
+            result.is_ok(),
+            "complete_pending_device must return Ok when MAC is absent (0 rows updated)"
+        );
+    }
+
+    /// assign_platform_to_device with a UUID that does not exist must return Ok —
+    /// the UPDATE simply affects 0 rows, which is not an error.
+    #[tokio::test]
+    async fn test_assign_platform_nonexistent() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF6);
+
+        let result = assign_platform_to_device(&db, &uuid, 999).await;
+        assert!(
+            result.is_ok(),
+            "assign_platform_to_device must return Ok when device UUID is absent"
+        );
+    }
+
+    /// assign_role_to_device with a UUID that does not exist must return Ok —
+    /// the UPDATE simply affects 0 rows, which is not an error.
+    #[tokio::test]
+    async fn test_assign_role_nonexistent() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0xF7);
+
+        let result = assign_role_to_device(&db, &uuid, 999).await;
+        assert!(
+            result.is_ok(),
+            "assign_role_to_device must return Ok when device UUID is absent"
+        );
+    }
+
     #[tokio::test]
     async fn test_delete_device_with_pending() {
         let db = setup_db(test_database_path!()).await;

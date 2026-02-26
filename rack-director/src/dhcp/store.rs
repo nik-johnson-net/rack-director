@@ -430,9 +430,12 @@ pub async fn create_network(
 }
 
 /// Update a network.
+///
+/// All field updates are wrapped in a single transaction so that a partial
+/// failure cannot leave the network in an inconsistent state.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_network(
-    conn: &Connection,
+    conn: &mut Connection,
     id: i64,
     name: Option<&str>,
     subnet: Option<&str>,
@@ -444,22 +447,24 @@ pub async fn update_network(
 ) -> Result<DhcpNetwork> {
     let now = Utc::now().to_rfc3339();
 
+    let tx = conn.transaction().await?;
+
     if let Some(name) = name {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_networks SET name = ?1, updated_at = ?2 WHERE id = ?3",
             (name.to_string(), now.clone(), id),
         )
         .await?;
     }
     if let Some(subnet) = subnet {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_networks SET subnet = ?1, updated_at = ?2 WHERE id = ?3",
             (subnet.to_string(), now.clone(), id),
         )
         .await?;
     }
     if let Some(gateway) = gateway {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_networks SET gateway = ?1, updated_at = ?2 WHERE id = ?3",
             (gateway.to_string(), now.clone(), id),
         )
@@ -467,14 +472,14 @@ pub async fn update_network(
     }
     if let Some(dns_servers) = dns_servers {
         let dns_servers_json = serde_json::to_string(dns_servers)?;
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_networks SET dns_servers = ?1, updated_at = ?2 WHERE id = ?3",
             (dns_servers_json, now.clone(), id),
         )
         .await?;
     }
     if let Some(lease_duration) = lease_duration {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_networks SET lease_duration = ?1, updated_at = ?2 WHERE id = ?3",
             (lease_duration, now.clone(), id),
         )
@@ -482,20 +487,21 @@ pub async fn update_network(
     }
     if let Some(relay_agent_address) = relay_agent_address {
         let relay = relay_agent_address.map(|s| s.to_string());
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_networks SET relay_agent_address = ?1, updated_at = ?2 WHERE id = ?3",
             (relay, now.clone(), id),
         )
         .await?;
     }
     if let Some(enable_autodiscovery) = enable_autodiscovery {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_networks SET enable_autodiscovery = ?1, updated_at = ?2 WHERE id = ?3",
             (enable_autodiscovery, now, id),
         )
         .await?;
     }
 
+    tx.commit().await?;
     get_network(conn, id).await
 }
 
@@ -565,8 +571,11 @@ pub async fn create_pool(
 }
 
 /// Update a pool.
+///
+/// All field updates are wrapped in a single transaction so that a partial
+/// failure cannot leave the pool in an inconsistent state.
 pub async fn update_pool(
-    conn: &Connection,
+    conn: &mut Connection,
     id: i64,
     name: Option<&str>,
     range_start: Option<&str>,
@@ -574,28 +583,31 @@ pub async fn update_pool(
 ) -> Result<DhcpPool> {
     let now = Utc::now().to_rfc3339();
 
+    let tx = conn.transaction().await?;
+
     if let Some(name) = name {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_pools SET name = ?1, updated_at = ?2 WHERE id = ?3",
             (name.to_string(), now.clone(), id),
         )
         .await?;
     }
     if let Some(range_start) = range_start {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_pools SET range_start = ?1, updated_at = ?2 WHERE id = ?3",
             (range_start.to_string(), now.clone(), id),
         )
         .await?;
     }
     if let Some(range_end) = range_end {
-        conn.execute(
+        tx.execute(
             "UPDATE dhcp_pools SET range_end = ?1, updated_at = ?2 WHERE id = ?3",
             (range_end.to_string(), now, id),
         )
         .await?;
     }
 
+    tx.commit().await?;
     get_pool(conn, id).await
 }
 

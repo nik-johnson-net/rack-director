@@ -241,25 +241,55 @@ impl Connection {
 }
 
 /// Represents a Transaction on the connection. Must be closed with commit() or rollback().
+///
+/// If dropped without calling `commit()` or `rollback()`, a best-effort ROLLBACK
+/// is issued via `try_send` so that the connection remains usable for subsequent
+/// operations. The rollback is best-effort: if the channel is full the ROLLBACK
+/// may not be sent, but in practice the channel capacity is 1 and the background
+/// thread is never blocked between operations.
 #[must_use]
 pub struct Transaction<'conn> {
     conn: &'conn mut Connection,
+    /// Set to true once commit() or rollback() has been called so that the
+    /// Drop impl does not issue a redundant ROLLBACK.
+    done: bool,
 }
 
 impl<'conn> Transaction<'conn> {
     async fn new(conn: &'conn mut Connection) -> rusqlite::Result<Self> {
         conn.execute("BEGIN ", ()).await?;
-        Ok(Self { conn })
+        Ok(Self { conn, done: false })
     }
 
     /// Commit the transaction to the database.
-    pub async fn commit(self) -> rusqlite::Result<()> {
+    pub async fn commit(mut self) -> rusqlite::Result<()> {
+        self.done = true;
         self.conn.execute("COMMIT", ()).await.map(|_| ())
     }
 
     /// Rollback the transaction.
-    pub async fn rollback(self) -> rusqlite::Result<()> {
+    pub async fn rollback(mut self) -> rusqlite::Result<()> {
+        self.done = true;
         self.conn.execute("ROLLBACK", ()).await.map(|_| ())
+    }
+}
+
+impl<'conn> Drop for Transaction<'conn> {
+    fn drop(&mut self) {
+        if !self.done {
+            // Issue a best-effort ROLLBACK so the connection is not left inside
+            // an open transaction. We use try_send rather than blocking_send
+            // because blocking_send must not be called from within a Tokio
+            // async context (it would panic).
+            let (reply_tx, _reply_rx) = oneshot::channel();
+            let request: Box<dyn SqlRequest> = Box::new(RequestWrapper::new(
+                Box::new(|conn: &mut rusqlite::Connection| {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }),
+                reply_tx,
+            ));
+            let _ = self.conn.tx.try_send(ControlMessage::Request(request));
+        }
     }
 }
 
@@ -329,5 +359,41 @@ mod tests {
         conn.execute("INSERT INTO foo(x) VALUES (2)", ())
             .await
             .unwrap();
+    }
+
+    /// Verify that dropping a Transaction without calling commit() issues a
+    /// ROLLBACK and leaves the connection in a reusable state.
+    #[tokio::test]
+    async fn transaction_drop_rolls_back() {
+        let mut conn = Connection::open(test_database_path!()).await.unwrap();
+        conn.execute("CREATE TABLE foo (x INTEGER)", ())
+            .await
+            .unwrap();
+
+        {
+            let tx = conn.transaction().await.unwrap();
+            tx.execute("INSERT INTO foo(x) VALUES (1)", ())
+                .await
+                .unwrap();
+            // Drop tx without calling commit() or rollback().
+            // The Drop impl must issue a best-effort ROLLBACK.
+        }
+
+        // Give the background thread a moment to process the ROLLBACK sent via try_send.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // The inserted row must not be visible.
+        let count: i64 = conn
+            .query_one("SELECT COUNT(*) FROM foo", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "implicit rollback must discard the inserted row");
+
+        // The connection must be reusable — starting a new transaction must succeed.
+        let tx2 = conn
+            .transaction()
+            .await
+            .expect("connection must be reusable after implicit rollback");
+        tx2.commit().await.unwrap();
     }
 }

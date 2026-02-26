@@ -157,7 +157,7 @@ async fn update_network(
     log::debug!("update network request: {:?}", req);
 
     // Open a connection for raw store calls; DhcpStore uses the factory for its own connections
-    let conn = Arc::new(state.connection_factory.open().await?);
+    let mut conn = state.connection_factory.open().await?;
 
     // Validate request
     if let Err(errors) = validate_update_network_request(&conn, id, &req).await {
@@ -165,7 +165,7 @@ async fn update_network(
     }
 
     let network = crate::dhcp::store::update_network(
-        &conn,
+        &mut conn,
         id,
         req.name.as_deref(),
         req.subnet.as_deref(),
@@ -229,9 +229,9 @@ async fn update_pool(
     Path(id): Path<i64>,
     Json(req): Json<UpdatePoolRequest>,
 ) -> Result<Json<DhcpPool>, HttpError> {
-    let conn = state.connection_factory.open().await?;
+    let mut conn = state.connection_factory.open().await?;
     let pool = crate::dhcp::store::update_pool(
-        &conn,
+        &mut conn,
         id,
         req.name.as_deref(),
         req.range_start.as_deref(),
