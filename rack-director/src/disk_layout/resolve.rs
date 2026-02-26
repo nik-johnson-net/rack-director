@@ -447,4 +447,146 @@ mod tests {
 
         assert!(layout_uses_labels(&layout));
     }
+
+    /// Resolve a layout that uses DATA1 and DATA2 labels against a platform that has those labels.
+    /// Verifies that each label resolves to its correct device path.
+    #[test]
+    fn test_resolve_disk_layout_with_data_labels() {
+        let platform = make_test_platform();
+        let layout = DiskLayout {
+            disks: vec![
+                DiskConfig {
+                    device: "DATA1".to_string(),
+                    partition_table: "gpt".to_string(),
+                    partitions: vec![PartitionConfig {
+                        label: "data1".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: Some("xfs".to_string()),
+                        mount_point: Some("/data1".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    }],
+                },
+                DiskConfig {
+                    device: "DATA2".to_string(),
+                    partition_table: "gpt".to_string(),
+                    partitions: vec![PartitionConfig {
+                        label: "data2".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: Some("xfs".to_string()),
+                        mount_point: Some("/data2".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    }],
+                },
+            ],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+
+        let resolved = resolve_disk_layout(&layout, &platform).unwrap();
+
+        assert_eq!(
+            resolved.disks[0].device, "/dev/disk/by-path/pci-0000:03:00.0-nvme-1",
+            "DATA1 should resolve to the first NVMe path"
+        );
+        assert_eq!(
+            resolved.disks[1].device, "/dev/disk/by-path/pci-0000:04:00.0-nvme-1",
+            "DATA2 should resolve to the second NVMe path"
+        );
+    }
+
+    /// Attempt to resolve a layout with a ROOT label against a platform that has no labels at all.
+    /// Should return an error because the label cannot be found.
+    #[test]
+    fn test_resolve_disk_layout_empty_platform() {
+        let empty_platform = PlatformAttributes {
+            disks: vec![],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 0,
+        };
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+
+        let result = resolve_disk_layout(&layout, &empty_platform);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Platform label 'ROOT' not found in platform attributes"),
+            "Error message should identify the missing label"
+        );
+    }
+
+    /// Validate a layout using DATA1 and DATA2 labels against a platform that has those labels.
+    /// Should succeed because all referenced labels are present.
+    #[test]
+    fn test_validate_layout_against_platform_data_labels() {
+        let platform = make_test_platform();
+        let layout = DiskLayout {
+            disks: vec![
+                DiskConfig {
+                    device: "DATA1".to_string(),
+                    partition_table: "gpt".to_string(),
+                    partitions: vec![],
+                },
+                DiskConfig {
+                    device: "DATA2".to_string(),
+                    partition_table: "gpt".to_string(),
+                    partitions: vec![],
+                },
+            ],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+
+        let result = validate_layout_against_platform(&layout, &platform);
+
+        assert!(
+            result.is_ok(),
+            "Validation should succeed when DATA1 and DATA2 are present in platform"
+        );
+    }
+
+    /// Validate a layout with a ROOT label against a platform that has no labels.
+    /// Should return an error because the required label is absent.
+    #[test]
+    fn test_validate_layout_against_platform_empty_platform() {
+        let empty_platform = PlatformAttributes {
+            disks: vec![],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 0,
+        };
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+
+        let result = validate_layout_against_platform(&layout, &empty_platform);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Disk layout references label 'ROOT'"),
+            "Error message should identify the missing label"
+        );
+    }
 }
