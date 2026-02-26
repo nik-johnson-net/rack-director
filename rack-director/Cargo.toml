@@ -21,12 +21,13 @@ rusqlite = { workspace = true, features = ["uuid"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 env_logger = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 uuid = { version = "1.20.0", features = ["serde"] }
 object_store = { version = "0.13.1", features = ["aws"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
+stdext = "0.3.3"
 tempfile = { workspace = true }
 tftp_client = "0.1"
 tokio-test = { workspace = true }

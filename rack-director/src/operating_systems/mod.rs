@@ -1,7 +1,5 @@
 pub mod store;
 
-pub use store::OperatingSystemsStore;
-
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

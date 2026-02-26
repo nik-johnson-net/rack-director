@@ -20,7 +20,12 @@ pub fn routes(state: Arc<AppState>) -> Router {
 async fn get_all_dhcp_leases(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<crate::dhcp::Lease>>, StatusCode> {
-    match state.dhcp_store.get_all_leases().await {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match crate::dhcp::store::get_all_leases(&conn).await {
         Ok(leases) => Ok(Json(leases)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -30,7 +35,12 @@ async fn get_dhcp_lease_by_mac(
     State(state): State<Arc<AppState>>,
     Path(mac): Path<String>,
 ) -> Result<Json<crate::dhcp::Lease>, StatusCode> {
-    match state.dhcp_store.get_lease_by_mac(&mac).await {
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match crate::dhcp::store::get_lease_by_mac(&conn, &mac).await {
         Ok(Some(lease)) => Ok(Json(lease)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),

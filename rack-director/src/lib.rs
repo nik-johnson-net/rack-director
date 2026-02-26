@@ -20,9 +20,9 @@ use std::{
 
 use anyhow::anyhow;
 use clap::Parser;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::task::JoinHandle;
 
-use crate::{director::Director, storage::ImageStore};
+use crate::storage::ImageStore;
 
 const DEFAULT_DATABASE_PATH: &str = env!("RACK_DIRECTOR_DATABASE_PATH");
 const DEFAULT_AGENT_IMAGES_PATH: &str = env!("RACK_DIRECTOR_AGENT_IMAGES_PATH");
@@ -142,14 +142,16 @@ impl RackDirectorHandle {
 }
 
 pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle, anyhow::Error> {
-    // Initialize database connection
-    let db_file = format!("{}/db.sqlite", args.db_path);
-    let db = Arc::new(Mutex::new(database::open(&db_file).unwrap()));
+    let db_file = std::path::PathBuf::from(format!("{}/db.sqlite", args.db_path));
 
-    // Initialize individual stores
-    let os_store = operating_systems::OperatingSystemsStore::new(db.clone());
-    let roles_store = roles::RolesStore::new(db.clone());
-    let platforms_store = platforms::PlatformsStore::new(db.clone());
+    // Create one shared factory. The factory holds only a PathBuf and opens a
+    // fresh connection on each `.open()` call, so sharing it via Arc::clone
+    // across Director, DhcpStore, DhcpServer, and the HTTP layer is safe.
+    let factory: Arc<dyn database::ConnectionFactory> =
+        Arc::new(database::DatabaseConnectionFactory::new(db_file));
+    // Run migrations once. For a file-backed database the connection can be
+    // dropped immediately after — the schema persists in the file.
+    let _ = database::run_migrations(factory.as_ref()).await?;
 
     // Initialize storage
     let storage_config = build_storage_config(&args)?;
@@ -163,11 +165,9 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let public_url = args
         .http_public_url
         .unwrap_or_else(|| format!("http://{}:{}", server_identifier, args.http_address.port()));
-    let director: Director = Director::new(db.clone());
 
-    // Initialize DHCP server and store
-    let dhcp_store = dhcp::DhcpStore::new(db.clone());
-    let lease_cleanup_handle = dhcp::spawn_lease_cleanup_task(dhcp_store.clone());
+    // Cleanup task uses the shared factory.
+    let lease_cleanup_handle = dhcp::spawn_lease_cleanup_task(factory.clone());
 
     // Determine TFTP public address
     let tftp_public = args.tftp_public_address.unwrap_or_else(|| {
@@ -186,10 +186,9 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         std::path::PathBuf::from(&args.tftp_path),
     )?);
 
-    let dhcp_server = dhcp::DhcpServer::new(
-        db.clone(),
-        director.clone(),
-        tftp_public,
+    let dhcp_server: dhcp::DhcpServer = dhcp::DhcpServer::new(
+        factory.clone(),
+        tftp_public.clone(),
         http_server,
         boot_file_provider.clone(),
         server_identifier,
@@ -202,16 +201,13 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let mut tftp_server = tftp::Server::new(boot_file_provider.clone());
     tftp_server.address(args.tftp_address);
 
-    // Start HTTP Service
+    // Start HTTP Service — each HTTP handler opens its own connection via the
+    // shared factory, keeping it independent of DHCP and Director connections.
     let http_start_result = http::start(
-        director.clone(),
-        dhcp_store,
+        factory.clone(),
         image_store.into(),
-        os_store,
-        roles_store,
-        platforms_store,
         args.http_address,
-        args.agent_images_path,
+        std::path::PathBuf::from(&args.agent_images_path),
         boot_file_provider,
     )
     .await?;

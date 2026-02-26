@@ -103,10 +103,14 @@ async fn create_os(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateOperatingSystemRequest>,
 ) -> Result<(StatusCode, Json<OperatingSystem>), HttpError> {
-    let os = state
-        .os_store
-        .create(&req.name, &req.version, req.description.as_deref())
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let os = crate::operating_systems::store::create(
+        &conn,
+        &req.name,
+        &req.version,
+        req.description.as_deref(),
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(os)))
 }
@@ -115,7 +119,8 @@ async fn create_os(
 async fn list_os(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<OperatingSystem>>, HttpError> {
-    let systems = state.os_store.list().await?;
+    let conn = state.connection_factory.open().await?;
+    let systems = crate::operating_systems::store::list(&conn).await?;
     Ok(Json(systems))
 }
 
@@ -124,7 +129,8 @@ async fn get_os(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<OperatingSystemWithArchitectures>, HttpError> {
-    let os = state.os_store.get_with_architectures(id).await?;
+    let conn = state.connection_factory.open().await?;
+    let os = crate::operating_systems::store::get_with_architectures(&conn, id).await?;
     Ok(Json(os))
 }
 
@@ -135,15 +141,15 @@ async fn update_os(
     Path(id): Path<i64>,
     Json(req): Json<UpdateOperatingSystemRequest>,
 ) -> Result<Json<OperatingSystem>, HttpError> {
-    let os = state
-        .os_store
-        .update(
-            id,
-            req.name.as_deref(),
-            req.version.as_deref(),
-            req.description.as_deref(),
-        )
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let os = crate::operating_systems::store::update(
+        &conn,
+        id,
+        req.name.as_deref(),
+        req.version.as_deref(),
+        req.description.as_deref(),
+    )
+    .await?;
 
     Ok(Json(os))
 }
@@ -153,7 +159,8 @@ async fn delete_os(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, HttpError> {
-    state.os_store.delete(id).await?;
+    let conn = state.connection_factory.open().await?;
+    crate::operating_systems::store::delete(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -171,18 +178,18 @@ async fn create_os_architecture(
         .initramfs_path
         .unwrap_or_else(|| format!("os/{}/arch/{}/initramfs", os_id, req.architecture.as_str()));
 
-    let arch = state
-        .os_store
-        .upsert_architecture(
-            os_id,
-            req.architecture,
-            &kernel_path,
-            &initramfs_path,
-            req.modules.unwrap_or_default(),
-            req.cmdline_args.as_deref(),
-            req.install_script_path.as_deref(),
-        )
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let arch = crate::operating_systems::store::upsert_architecture(
+        &conn,
+        os_id,
+        req.architecture,
+        &kernel_path,
+        &initramfs_path,
+        req.modules.unwrap_or_default(),
+        req.cmdline_args.as_deref(),
+        req.install_script_path.as_deref(),
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(arch)))
 }
@@ -193,7 +200,8 @@ async fn get_os_architecture(
     Path((os_id, arch_str)): Path<(i64, String)>,
 ) -> Result<Json<OsArchitecture>, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
-    let os_arch = state.os_store.get_architecture(os_id, arch).await?;
+    let conn = state.connection_factory.open().await?;
+    let os_arch = crate::operating_systems::store::get_architecture(&conn, os_id, arch).await?;
     Ok(Json(os_arch))
 }
 
@@ -203,7 +211,8 @@ async fn delete_os_architecture(
     Path((os_id, arch_str)): Path<(i64, String)>,
 ) -> Result<StatusCode, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
-    state.os_store.delete_architecture(os_id, arch).await?;
+    let conn = state.connection_factory.open().await?;
+    crate::operating_systems::store::delete_architecture(&conn, os_id, arch).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -226,19 +235,28 @@ async fn upload_kernel(
     // Send data to image_store
     state.image_store.upload(&path, Box::pin(stream)).await?;
 
-    state
-        .os_store
-        .update_architecture_field(os_id, arch, "kernel_path", &path)
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    crate::operating_systems::store::update_architecture_field(
+        &conn,
+        os_id,
+        arch,
+        "kernel_path",
+        &path,
+    )
+    .await?;
 
     if let Some(filename) = filename {
-        state
-            .os_store
-            .update_architecture_field(os_id, arch, "kernel_filename", filename)
-            .await?;
+        crate::operating_systems::store::update_architecture_field(
+            &conn,
+            os_id,
+            arch,
+            "kernel_filename",
+            filename,
+        )
+        .await?;
     }
 
-    let os_arch = state.os_store.get_architecture(os_id, arch).await?;
+    let os_arch = crate::operating_systems::store::get_architecture(&conn, os_id, arch).await?;
     Ok(Json(os_arch))
 }
 
@@ -258,19 +276,29 @@ async fn upload_initramfs(
         .into_data_stream()
         .map(|result| result.map_err(std::io::Error::other));
     state.image_store.upload(&path, Box::pin(stream)).await?;
-    state
-        .os_store
-        .update_architecture_field(os_id, arch, "initramfs_path", &path)
-        .await?;
+
+    let conn = state.connection_factory.open().await?;
+    crate::operating_systems::store::update_architecture_field(
+        &conn,
+        os_id,
+        arch,
+        "initramfs_path",
+        &path,
+    )
+    .await?;
 
     if let Some(filename) = filename {
-        state
-            .os_store
-            .update_architecture_field(os_id, arch, "initramfs_filename", filename)
-            .await?;
+        crate::operating_systems::store::update_architecture_field(
+            &conn,
+            os_id,
+            arch,
+            "initramfs_filename",
+            filename,
+        )
+        .await?;
     }
 
-    let os_arch = state.os_store.get_architecture(os_id, arch).await?;
+    let os_arch = crate::operating_systems::store::get_architecture(&conn, os_id, arch).await?;
     Ok(Json(os_arch))
 }
 
@@ -300,17 +328,22 @@ async fn upload_module(
     state.image_store.upload(&path, Box::pin(stream)).await?;
 
     // Add module to the architecture's modules list
-    let mut os_arch = state.os_store.get_architecture(os_id, arch).await?;
+    let conn = state.connection_factory.open().await?;
+    let mut os_arch = crate::operating_systems::store::get_architecture(&conn, os_id, arch).await?;
     if !os_arch.modules.contains(&path) {
         os_arch.modules.push(path.clone());
         let modules_json = serde_json::to_string(&os_arch.modules)?;
-        state
-            .os_store
-            .update_architecture_field(os_id, arch, "modules", &modules_json)
-            .await?;
+        crate::operating_systems::store::update_architecture_field(
+            &conn,
+            os_id,
+            arch,
+            "modules",
+            &modules_json,
+        )
+        .await?;
     }
 
-    let os_arch = state.os_store.get_architecture(os_id, arch).await?;
+    let os_arch = crate::operating_systems::store::get_architecture(&conn, os_id, arch).await?;
     Ok(Json(os_arch))
 }
 
@@ -330,19 +363,29 @@ async fn upload_install_script(
         .into_data_stream()
         .map(|result| result.map_err(std::io::Error::other));
     state.image_store.upload(&path, Box::pin(stream)).await?;
-    state
-        .os_store
-        .update_architecture_field(os_id, arch, "install_script_path", &path)
-        .await?;
+
+    let conn = state.connection_factory.open().await?;
+    crate::operating_systems::store::update_architecture_field(
+        &conn,
+        os_id,
+        arch,
+        "install_script_path",
+        &path,
+    )
+    .await?;
 
     if let Some(filename) = filename {
-        state
-            .os_store
-            .update_architecture_field(os_id, arch, "install_script_filename", filename)
-            .await?;
+        crate::operating_systems::store::update_architecture_field(
+            &conn,
+            os_id,
+            arch,
+            "install_script_filename",
+            filename,
+        )
+        .await?;
     }
 
-    let os_arch = state.os_store.get_architecture(os_id, arch).await?;
+    let os_arch = crate::operating_systems::store::get_architecture(&conn, os_id, arch).await?;
     Ok(Json(os_arch))
 }
 
@@ -352,7 +395,8 @@ async fn download_component(
     Path((os_id, arch_str, component)): Path<(i64, String, String)>,
 ) -> Result<impl IntoResponse, HttpError> {
     let arch = Architecture::from_str(&arch_str)?;
-    let os_arch = state.os_store.get_architecture(os_id, arch).await?;
+    let conn = state.connection_factory.open().await?;
+    let os_arch = crate::operating_systems::store::get_architecture(&conn, os_id, arch).await?;
 
     let path = match component.as_str() {
         "kernel" => os_arch.kernel_path,

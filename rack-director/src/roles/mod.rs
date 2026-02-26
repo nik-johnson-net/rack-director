@@ -1,6 +1,4 @@
-mod store;
-
-pub use store::RolesStore;
+pub mod store;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

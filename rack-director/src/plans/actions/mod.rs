@@ -6,9 +6,8 @@ pub use boot_target::BootTarget;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::database::Connection;
 use crate::director::Device;
-use crate::operating_systems::OperatingSystemsStore;
-use crate::roles::RolesStore;
 
 // TODO: Define common AgentAction enum.
 
@@ -26,9 +25,8 @@ pub enum Action {
 /// Context required for converting Actions to BootTargets
 pub struct ActionContext<'a> {
     pub device: &'a Device,
-    pub os_store: &'a OperatingSystemsStore,
-    pub roles_store: &'a RolesStore,
-    pub director: Option<&'a crate::director::Director>,
+    pub conn: &'a Connection,
+    pub director: Option<&'a crate::director::Director<'a>>,
 }
 
 impl Action {
@@ -107,13 +105,12 @@ async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<Boot
         .role_id
         .ok_or_else(|| anyhow::anyhow!("role not assigned to device {}", ctx.device.uuid))?;
 
-    let role = ctx.roles_store.get(role_id).await?;
+    let role = crate::roles::store::get(ctx.conn, role_id).await?;
 
     // Get OS architecture configuration
-    let os_arch = ctx
-        .os_store
-        .get_architecture(role.os_id, architecture)
-        .await?;
+    let os_arch =
+        crate::operating_systems::store::get_architecture(ctx.conn, role.os_id, architecture)
+            .await?;
 
     let cmdline = os_arch.cmdline_args.unwrap_or_default();
 
@@ -131,25 +128,16 @@ mod tests {
     use crate::director::Device;
     use crate::operating_systems::Architecture;
     use crate::roles::DiskLayout;
-    use crate::{database, operating_systems::OperatingSystemsStore, roles::RolesStore};
+    use crate::{
+        database, database::DatabaseConnectionFactory, operating_systems::store as os_store,
+        roles::store as roles_store, test_connection_factory,
+    };
     use std::sync::Arc;
-    use tempfile::tempdir;
-    use tokio::sync::Mutex;
     use uuid::Uuid;
 
-    /// Helper to create test database and stores for ActionContext
-    async fn setup_test_stores() -> (
-        Arc<Mutex<rusqlite::Connection>>,
-        OperatingSystemsStore,
-        RolesStore,
-        tempfile::TempDir,
-    ) {
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = Arc::new(Mutex::new(database::open(&db_path).unwrap()));
-        let os_store = OperatingSystemsStore::new(db.clone());
-        let roles_store = RolesStore::new(db.clone());
-        (db, os_store, roles_store, temp_dir)
+    /// Helper to create test database for ActionContext
+    async fn setup_test_db(factory: DatabaseConnectionFactory) -> Arc<crate::database::Connection> {
+        Arc::new(database::run_migrations(&factory).await.unwrap())
     }
 
     #[test]
@@ -219,53 +207,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_os_action_to_boot_target_success() {
-        let (db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
 
         // Create an OS with architecture
-        let os = os_store
-            .create("Ubuntu", "24.04", Some("Ubuntu 24.04 LTS"))
+        let os = os_store::create(&conn, "Ubuntu", "24.04", Some("Ubuntu 24.04 LTS"))
             .await
             .unwrap();
         let os_id = os.id.unwrap();
 
         // Add architecture configuration with cmdline template
-        os_store
-            .upsert_architecture(
-                os_id,
-                Architecture::X86_64,
-                "installer/ubuntu-24.04/vmlinuz",
-                "installer/ubuntu-24.04/initrd.img",
-                vec![],
-                Some("console=ttyS0 autoinstall ds=nocloud-net;s={{install_script_url}}"),
-                None,
-            )
-            .await
-            .unwrap();
+        os_store::upsert_architecture(
+            &conn,
+            os_id,
+            Architecture::X86_64,
+            "installer/ubuntu-24.04/vmlinuz",
+            "installer/ubuntu-24.04/initrd.img",
+            vec![],
+            Some("console=ttyS0 autoinstall ds=nocloud-net;s={{install_script_url}}"),
+            None,
+        )
+        .await
+        .unwrap();
 
         // Create a role
         let disk_layout = DiskLayout { partitions: vec![] };
-        let role = roles_store
-            .create(
-                "web-server",
-                Some("Web server role"),
-                os_id,
-                &disk_layout,
-                None,
-            )
-            .await
-            .unwrap();
+        let role = roles_store::create(
+            &conn,
+            "web-server",
+            Some("Web server role"),
+            os_id,
+            &disk_layout,
+            None,
+        )
+        .await
+        .unwrap();
         let role_id = role.id.unwrap();
 
         // Create and register device with role
         let device_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440003").unwrap();
-        {
-            let conn = db.lock().await;
-            conn.execute(
-                "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
-                rusqlite::params![device_uuid, role_id],
-            )
-            .unwrap();
-        }
+        conn.execute(
+            "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
+            (device_uuid, role_id),
+        )
+        .await
+        .unwrap();
 
         let device = Device {
             uuid: device_uuid,
@@ -281,8 +266,7 @@ mod tests {
 
         let ctx = ActionContext {
             device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
+            conn: &conn,
             director: None,
         };
 
@@ -308,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_os_action_missing_role_error() {
-        let (_db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
 
         // Create device without a role
         let device = Device {
@@ -325,8 +309,7 @@ mod tests {
 
         let ctx = ActionContext {
             device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
+            conn: &conn,
             director: None,
         };
 
@@ -344,53 +327,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_os_action_with_no_cmdline_template() {
-        let (db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
 
         // Create an OS with architecture but NO cmdline template
-        let os = os_store
-            .create("Debian", "12", Some("Debian 12"))
+        let os = os_store::create(&conn, "Debian", "12", Some("Debian 12"))
             .await
             .unwrap();
         let os_id = os.id.unwrap();
 
         // Add architecture configuration WITHOUT cmdline template
-        os_store
-            .upsert_architecture(
-                os_id,
-                Architecture::X86_64,
-                "installer/debian-12/vmlinuz",
-                "installer/debian-12/initrd.img",
-                vec![],
-                None, // No cmdline template
-                None,
-            )
-            .await
-            .unwrap();
+        os_store::upsert_architecture(
+            &conn,
+            os_id,
+            Architecture::X86_64,
+            "installer/debian-12/vmlinuz",
+            "installer/debian-12/initrd.img",
+            vec![],
+            None, // No cmdline template
+            None,
+        )
+        .await
+        .unwrap();
 
         // Create a role
         let disk_layout = DiskLayout { partitions: vec![] };
-        let role = roles_store
-            .create(
-                "database-server",
-                Some("Database server role"),
-                os_id,
-                &disk_layout,
-                None,
-            )
-            .await
-            .unwrap();
+        let role = roles_store::create(
+            &conn,
+            "database-server",
+            Some("Database server role"),
+            os_id,
+            &disk_layout,
+            None,
+        )
+        .await
+        .unwrap();
         let role_id = role.id.unwrap();
 
         // Create and register device with role
         let device_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440005").unwrap();
-        {
-            let conn = db.lock().await;
-            conn.execute(
-                "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
-                rusqlite::params![device_uuid, role_id],
-            )
-            .unwrap();
-        }
+        conn.execute(
+            "INSERT INTO devices (uuid, architecture, lifecycle, role_id) VALUES (?1, 'x86-64', 'new', ?2)",
+            (device_uuid, role_id),
+        )
+        .await
+        .unwrap();
 
         let device = Device {
             uuid: device_uuid,
@@ -406,8 +386,7 @@ mod tests {
 
         let ctx = ActionContext {
             device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
+            conn: &conn,
             director: None,
         };
 
@@ -464,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_device_start() {
-        let (_db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
 
         let device = Device {
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440007").unwrap(),
@@ -480,8 +459,7 @@ mod tests {
 
         let ctx = ActionContext {
             device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
+            conn: &conn,
             director: None,
         };
 
@@ -493,7 +471,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_device_boot_target() {
-        let (_db, os_store, roles_store, _temp_dir) = setup_test_stores().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
 
         let device = Device {
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440008").unwrap(),
@@ -509,8 +487,7 @@ mod tests {
 
         let ctx = ActionContext {
             device: &device,
-            os_store: &os_store,
-            roles_store: &roles_store,
+            conn: &conn,
             director: None,
         };
 

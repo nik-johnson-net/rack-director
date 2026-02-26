@@ -1,7 +1,7 @@
+use crate::database::Connection;
 use crate::director::NetworkInterface;
-use crate::http::AppState;
+use crate::{dhcp, director};
 use log::warn;
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Enriches network interfaces with IP addresses and network IDs from DHCP leases.
@@ -11,21 +11,21 @@ use uuid::Uuid;
 /// This allows us to associate discovered hardware interfaces with their network assignments.
 ///
 /// # Arguments
-/// * `state` - Application state containing DHCP store
+/// * `conn` - An open database connection
 /// * `interfaces` - Vector of NetworkInterface objects to enrich
 ///
 /// # Returns
 /// A new vector of NetworkInterface objects with IP addresses and network IDs populated
 /// from DHCP lease data where available.
 pub async fn enrich_interfaces_with_dhcp_info(
-    state: &Arc<AppState>,
+    conn: &Connection,
     interfaces: Vec<NetworkInterface>,
 ) -> Vec<NetworkInterface> {
     let mut enriched = Vec::new();
 
     for mut nic in interfaces {
         // Look up DHCP lease for this MAC
-        if let Ok(Some(lease)) = state.dhcp_store.get_lease_by_mac(&nic.mac_address).await {
+        if let Ok(Some(lease)) = dhcp::store::get_lease_by_mac(conn, &nic.mac_address).await {
             log::info!(
                 "Backfilling IP {} and network_id {} for NIC {} (MAC {})",
                 lease.ip_address,
@@ -38,15 +38,14 @@ pub async fn enrich_interfaces_with_dhcp_info(
 
             // Create static reservation for this interface
             if let Some(network_id) = lease.network_id
-                && let Err(e) = state
-                    .dhcp_store
-                    .create_or_update_static_reservation(
-                        network_id,
-                        &nic.mac_address,
-                        &lease.ip_address,
-                        None,
-                    )
-                    .await
+                && let Err(e) = dhcp::store::create_or_update_static_reservation(
+                    conn,
+                    network_id,
+                    &nic.mac_address,
+                    &lease.ip_address,
+                    None,
+                )
+                .await
             {
                 log::warn!(
                     "Couldn't create static reservation for MAC {}: {}",
@@ -68,7 +67,7 @@ pub async fn enrich_interfaces_with_dhcp_info(
 /// to prevent network conflicts.
 ///
 /// # Arguments
-/// * `state` - Application state containing director and DHCP store
+/// * `conn` - An open database connection
 /// * `device_uuid` - UUID of the device being checked
 /// * `interfaces` - Mutable reference to interfaces to check and potentially mark as disabled
 ///
@@ -76,21 +75,24 @@ pub async fn enrich_interfaces_with_dhcp_info(
 /// Modifies interfaces in-place, setting `disabled = true` and `warning_label = Some(...)`
 /// for any interface with a duplicate MAC on the same network.
 pub async fn detect_and_mark_duplicates(
-    state: &Arc<AppState>,
+    conn: &Connection,
     device_uuid: &Uuid,
     interfaces: &mut [NetworkInterface],
 ) {
     for nic in interfaces.iter_mut() {
         // Only check for duplicates if the interface has a network_id
         if let Some(network_id) = nic.network_id {
-            match state
-                .director
-                .find_duplicate_macs_on_network(&nic.mac_address, network_id, device_uuid)
-                .await
+            match director::store::find_duplicate_macs_on_network(
+                conn,
+                &nic.mac_address,
+                network_id,
+                device_uuid,
+            )
+            .await
             {
                 Ok(duplicates) if !duplicates.is_empty() => {
                     // Get network name for warning message
-                    let network_name = match state.dhcp_store.get_network(network_id).await {
+                    let network_name = match dhcp::store::get_network(conn, network_id).await {
                         Ok(network) => network.name,
                         Err(_) => format!("network {}", network_id),
                     };
@@ -136,7 +138,7 @@ pub async fn detect_and_mark_duplicates(
 /// registration yet). If a match is found, links the pending device to this device UUID.
 ///
 /// # Arguments
-/// * `state` - Application state containing director
+/// * `conn` - An open database connection
 /// * `device_uuid` - UUID of the device that owns these interfaces
 /// * `interfaces` - Network interfaces to check against pending devices
 ///
@@ -144,15 +146,13 @@ pub async fn detect_and_mark_duplicates(
 /// Completes pending device registration for any matching MAC addresses, linking them
 /// to the provided device UUID.
 pub async fn complete_pending_devices_for_interfaces(
-    state: &Arc<AppState>,
+    conn: &Connection,
     device_uuid: &Uuid,
     interfaces: &[NetworkInterface],
 ) {
     for nic in interfaces {
-        if let Err(e) = state
-            .director
-            .complete_pending_device(&nic.mac_address, device_uuid)
-            .await
+        if let Err(e) =
+            director::store::complete_pending_device(conn, &nic.mac_address, device_uuid).await
         {
             log::debug!(
                 "Could not complete pending device for MAC {}: {}",
@@ -166,73 +166,37 @@ pub async fn complete_pending_devices_for_interfaces(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database;
-    use crate::storage::ImageStore;
+    use crate::database::{DatabaseConnectionFactory, run_migrations};
+    use crate::director::Director;
+    use crate::test_database_path;
+    use std::net::Ipv4Addr;
     use uuid::Uuid;
 
     fn test_uuid() -> Uuid {
         Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
     }
-    use crate::director::Director;
-    use std::net::Ipv4Addr;
-    use std::sync::Arc;
-    use tempfile::tempdir;
-    use tokio::sync::Mutex;
 
-    async fn create_test_state() -> (Arc<AppState>, tempfile::TempDir) {
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(Mutex::new(db));
-
-        // Note: No default network is created. Tests that need networks should create them explicitly.
-
-        let _storage_path = temp_dir.path().join("images");
-        let image_store = ImageStore::memory("http://localhost:8080");
-
-        let agent_images_path = temp_dir.path().join("agent-image");
-        std::fs::create_dir_all(&agent_images_path).unwrap();
-
-        // Create boot files directory for testing
-        let boot_files_path = temp_dir.path().join("boot");
-        std::fs::create_dir_all(&boot_files_path).unwrap();
-
-        let boot_file_provider =
-            Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
-
-        let state = Arc::new(AppState {
-            director: Director::new(db_tokio.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
-            image_store: Arc::new(image_store),
-            os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
-            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
-            agent_images_path,
-            boot_file_provider,
-        });
-
-        (state, temp_dir)
+    async fn create_test_conn(path: String) -> Connection {
+        let factory = DatabaseConnectionFactory::new(std::path::PathBuf::from(path));
+        run_migrations(&factory).await.unwrap()
     }
 
     /// Helper to create a test network for tests that need DHCP functionality
-    async fn create_test_network(state: &AppState) -> i64 {
-        let network = state
-            .dhcp_store
-            .create_network(
-                "Test Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
+    async fn create_test_network(conn: &Connection) -> i64 {
+        let network = dhcp::store::create_network(
+            conn,
+            "Test Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
-        state
-            .dhcp_store
-            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+        dhcp::store::create_pool(conn, network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
             .await
             .unwrap();
 
@@ -241,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enrich_interfaces_with_dhcp_info_no_leases() {
-        let (state, _temp_dir) = create_test_state().await;
+        let conn = create_test_conn(test_database_path!()).await;
 
         let interfaces = vec![NetworkInterface {
             interface_name: "eth0".to_string(),
@@ -253,7 +217,7 @@ mod tests {
             warning_label: None,
         }];
 
-        let enriched = enrich_interfaces_with_dhcp_info(&state, interfaces).await;
+        let enriched = enrich_interfaces_with_dhcp_info(&conn, interfaces).await;
 
         assert_eq!(enriched.len(), 1);
         assert_eq!(enriched[0].interface_name, "eth0");
@@ -263,24 +227,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_enrich_interfaces_with_dhcp_info_with_lease() {
-        let (state, _temp_dir) = create_test_state().await;
-        let network_id = create_test_network(&state).await;
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
 
         // Create a DHCP lease
         let mac = "aa:bb:cc:dd:ee:ff";
         let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
-        state
-            .dhcp_store
-            .create_or_update_lease_with_network(
-                mac,
-                &ip,
-                None,
-                crate::dhcp::LeaseState::Active,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_or_update_lease_with_network(
+            &conn,
+            mac,
+            &ip,
+            None,
+            crate::dhcp::LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         let interfaces = vec![NetworkInterface {
             interface_name: "eth0".to_string(),
@@ -292,7 +255,7 @@ mod tests {
             warning_label: None,
         }];
 
-        let enriched = enrich_interfaces_with_dhcp_info(&state, interfaces).await;
+        let enriched = enrich_interfaces_with_dhcp_info(&conn, interfaces).await;
 
         assert_eq!(enriched.len(), 1);
         assert_eq!(enriched[0].interface_name, "eth0");
@@ -302,11 +265,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_and_mark_duplicates_no_duplicates() {
-        let (state, _temp_dir) = create_test_state().await;
+        let conn = create_test_conn(test_database_path!()).await;
 
         let uuid = test_uuid();
-        state
-            .director
+        Director::new(&conn)
             .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
@@ -321,7 +283,7 @@ mod tests {
             warning_label: None,
         }];
 
-        detect_and_mark_duplicates(&state, &uuid, &mut interfaces).await;
+        detect_and_mark_duplicates(&conn, &uuid, &mut interfaces).await;
 
         assert!(!interfaces[0].disabled);
         assert_eq!(interfaces[0].warning_label, None);
@@ -329,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_pending_devices_for_interfaces_no_pending() {
-        let (state, _temp_dir) = create_test_state().await;
+        let conn = create_test_conn(test_database_path!()).await;
 
         let uuid = test_uuid();
         let interfaces = vec![NetworkInterface {
@@ -343,37 +305,33 @@ mod tests {
         }];
 
         // Should not panic or error
-        complete_pending_devices_for_interfaces(&state, &uuid, &interfaces).await;
+        complete_pending_devices_for_interfaces(&conn, &uuid, &interfaces).await;
     }
 
     #[tokio::test]
     async fn test_complete_pending_devices_for_interfaces_with_pending() {
-        let (state, _temp_dir) = create_test_state().await;
-        let network_id = create_test_network(&state).await;
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let uuid = test_uuid();
 
+        let director = Director::new(&conn);
+
         // Register the device first (required due to foreign key constraint)
-        state
-            .director
+        director
             .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
             .await
             .unwrap();
 
         // Create pending device
-        state
-            .director
+        director
             .create_pending_device(mac, network_id)
             .await
             .unwrap();
 
         // Verify it exists
-        let pending = state
-            .director
-            .find_pending_device_by_mac(mac)
-            .await
-            .unwrap();
+        let pending = director.find_pending_device_by_mac(mac).await.unwrap();
         assert!(pending.is_some());
 
         let interfaces = vec![NetworkInterface {
@@ -386,12 +344,10 @@ mod tests {
             warning_label: None,
         }];
 
-        complete_pending_devices_for_interfaces(&state, &uuid, &interfaces).await;
+        complete_pending_devices_for_interfaces(&conn, &uuid, &interfaces).await;
 
         // Verify pending device was completed (removed)
-        let pending = state
-            .director
-            .find_pending_device_by_mac(mac)
+        let pending = director::store::find_pending_device_by_mac(&conn, mac)
             .await
             .unwrap();
         assert!(pending.is_none());
@@ -399,8 +355,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_enrich_interfaces_creates_static_reservations() {
-        let (state, _temp_dir) = create_test_state().await;
-        let network_id = create_test_network(&state).await;
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
 
         // Create DHCP leases for multiple MACs
         let mac1 = "aa:bb:cc:dd:ee:01";
@@ -408,31 +364,29 @@ mod tests {
         let ip1: Ipv4Addr = "10.0.0.101".parse().unwrap();
         let ip2: Ipv4Addr = "10.0.0.102".parse().unwrap();
 
-        state
-            .dhcp_store
-            .create_or_update_lease_with_network(
-                mac1,
-                &ip1,
-                None,
-                crate::dhcp::LeaseState::Active,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_or_update_lease_with_network(
+            &conn,
+            mac1,
+            &ip1,
+            None,
+            crate::dhcp::LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
-        state
-            .dhcp_store
-            .create_or_update_lease_with_network(
-                mac2,
-                &ip2,
-                None,
-                crate::dhcp::LeaseState::Active,
-                3600,
-                network_id,
-            )
-            .await
-            .unwrap();
+        dhcp::store::create_or_update_lease_with_network(
+            &conn,
+            mac2,
+            &ip2,
+            None,
+            crate::dhcp::LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
 
         // Create interfaces without IP info
         let interfaces = vec![
@@ -457,7 +411,7 @@ mod tests {
         ];
 
         // Enrich interfaces - should create static reservations
-        let enriched = enrich_interfaces_with_dhcp_info(&state, interfaces).await;
+        let enriched = enrich_interfaces_with_dhcp_info(&conn, interfaces).await;
 
         // Verify interfaces were enriched
         assert_eq!(enriched.len(), 2);
@@ -465,17 +419,13 @@ mod tests {
         assert_eq!(enriched[1].ip_address, Some("10.0.0.102".to_string()));
 
         // Verify static reservations were created
-        let res1 = state
-            .dhcp_store
-            .get_static_reservation(1, mac1)
+        let res1 = dhcp::store::get_static_reservation(&conn, network_id, mac1)
             .await
             .unwrap();
         assert!(res1.is_some());
         assert_eq!(res1.unwrap().ip_address, "10.0.0.101");
 
-        let res2 = state
-            .dhcp_store
-            .get_static_reservation(1, mac2)
+        let res2 = dhcp::store::get_static_reservation(&conn, network_id, mac2)
             .await
             .unwrap();
         assert!(res2.is_some());

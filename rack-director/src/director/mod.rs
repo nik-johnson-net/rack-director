@@ -1,17 +1,11 @@
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::dhcp::DhcpStore;
-use crate::director::store::DirectorStore;
+use crate::database::Connection;
 use crate::director::store::generate_hostname_from_uuid;
-use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleStore, LifecycleTransition};
-use crate::operating_systems::{Architecture, OperatingSystemsStore};
+use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleTransition};
+use crate::operating_systems::Architecture;
 use crate::plans::actions::BootTarget;
-use crate::plans::{Plan, PlanStatus, PlansStore};
-use crate::platforms::PlatformsStore;
-use crate::roles::RolesStore;
+use crate::plans::{Plan, PlanStatus};
 
 mod ipmi;
 pub(crate) mod store;
@@ -20,35 +14,19 @@ pub use common::device_attributes::NetworkInterface;
 pub use store::Device;
 pub use store::PendingDevice;
 
-#[derive(Clone)]
-pub struct Director {
-    store: DirectorStore,
-    plans_store: PlansStore,
-    lifecycle_store: LifecycleStore,
-    os_store: OperatingSystemsStore,
-    roles_store: RolesStore,
-    platforms_store: PlatformsStore,
-    dhcp_store: DhcpStore,
+/// Short-lived handle for executing device management operations against an open database
+/// connection.
+///
+/// `Director<'a>` borrows a `Connection` for its lifetime and uses it directly for all
+/// database access. It is constructed at the start of a request or packet handler and
+/// dropped at the end; it never opens a new connection itself.
+pub struct Director<'a> {
+    conn: &'a Connection,
 }
 
-impl Director {
-    pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
-        let store = DirectorStore::new(conn.clone());
-        let plans_store = PlansStore::new(conn.clone());
-        let lifecycle_store = LifecycleStore::new(conn.clone());
-        let os_store = OperatingSystemsStore::new(conn.clone());
-        let roles_store = RolesStore::new(conn.clone());
-        let platforms_store = PlatformsStore::new(conn.clone());
-        let dhcp_store = DhcpStore::new(conn);
-        Director {
-            store,
-            plans_store,
-            lifecycle_store,
-            os_store,
-            roles_store,
-            platforms_store,
-            dhcp_store,
-        }
+impl<'a> Director<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Director { conn }
     }
 
     pub async fn register_device(
@@ -57,10 +35,8 @@ impl Director {
         architecture: Architecture,
     ) -> anyhow::Result<()> {
         log::info!("Registering device {uuid}");
-        self.store.register_device(uuid, architecture).await?;
-        self.store
-            .set_hostname(uuid, &generate_hostname_from_uuid(uuid))
-            .await?;
+        store::register_device(self.conn, uuid, architecture).await?;
+        store::set_hostname(self.conn, uuid, &generate_hostname_from_uuid(uuid)).await?;
 
         // Set default BMC config to DHCP
         // Credentials will be auto-generated on first agent fetch
@@ -78,36 +54,34 @@ impl Director {
             "bmc_config".to_string(),
             serde_json::to_value(&default_bmc_config)?,
         );
-        self.store.update_attributes(uuid, attrs).await?;
+        store::update_attributes(self.conn, uuid, attrs).await?;
 
         Ok(())
     }
 
     pub async fn device_exists(&self, uuid: &Uuid) -> anyhow::Result<bool> {
-        let exists = self.store.device_exists(uuid).await?;
-        Ok(exists)
+        store::device_exists(self.conn, uuid).await
     }
 
     /// Get the boot target for this device.
     pub async fn next_boot_target(&self, uuid: &Uuid) -> anyhow::Result<BootTarget> {
         if self.device_exists(uuid).await? {
-            self.store
-                .update_device_last_seen(uuid)
+            store::update_device_last_seen(self.conn, uuid)
                 .await
                 .expect("update device last seen should not fail");
 
             // Check if there's an active plan for this device
-            if let Some(plan) = self.plans_store.get_active_plan_for_device(uuid).await?
+            if let Some(plan) =
+                crate::plans::store::get_active_plan_for_device(self.conn, uuid).await?
                 && let Some(current_action) = plan.get_current_action()
             {
                 // Get device for ActionContext
-                let device = self.get_device(uuid).await?;
+                let device = store::get_device(self.conn, uuid).await?;
 
                 // Create ActionContext for the action
                 let ctx = crate::plans::actions::ActionContext {
                     device: &device,
-                    os_store: &self.os_store,
-                    roles_store: &self.roles_store,
+                    conn: self.conn,
                     director: None, // Director not needed for boot target resolution
                 };
 
@@ -132,7 +106,7 @@ impl Director {
             || attributes.contains_key("network_interfaces");
 
         // Update the attributes
-        self.store.update_attributes(uuid, attributes).await?;
+        store::update_attributes(self.conn, uuid, attributes).await?;
 
         // Auto-detect platform after hardware discovery data is received
         if contains_hardware_info && let Err(e) = self.auto_detect_platform(uuid).await {
@@ -149,8 +123,9 @@ impl Director {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn create_plan(&self, plan: &Plan) -> anyhow::Result<i64> {
-        self.plans_store.create_plan(plan).await
+        crate::plans::store::create_plan(self.conn, plan).await
     }
 
     #[cfg(test)]
@@ -158,9 +133,7 @@ impl Director {
         &self,
         device_uuid: &Uuid,
     ) -> anyhow::Result<Option<Plan>> {
-        self.plans_store
-            .get_active_plan_for_device(device_uuid)
-            .await
+        crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await
     }
 
     /// Handle device boot event
@@ -170,18 +143,15 @@ impl Director {
     /// This is used for actions like RebootDevice that complete when the device boots.
     pub async fn on_boot(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
         // Get the current active plan
-        let mut plan = match self
-            .plans_store
-            .get_active_plan_for_device(device_uuid)
-            .await?
-        {
-            Some(plan) => plan,
-            None => {
-                // No active plan - this is normal for devices that have completed their lifecycle
-                log::debug!("No active plan for device {} on boot", device_uuid);
-                return Ok(());
-            }
-        };
+        let mut plan =
+            match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await? {
+                Some(plan) => plan,
+                None => {
+                    // No active plan - this is normal for devices that have completed their lifecycle
+                    log::debug!("No active plan for device {} on boot", device_uuid);
+                    return Ok(());
+                }
+            };
 
         // Start the plan if it's pending
         let plan_was_pending = plan.status == PlanStatus::Pending;
@@ -215,14 +185,14 @@ impl Director {
 
         // Update the plan in the database if it was started or advanced
         if plan_was_pending || should_advance {
-            self.plans_store
-                .update_plan_status(
-                    plan.id.unwrap(),
-                    plan.status.clone(),
-                    plan.current_step,
-                    plan.error_message.as_deref(),
-                )
-                .await?;
+            crate::plans::store::update_plan_status(
+                self.conn,
+                plan.id.unwrap(),
+                plan.status.clone(),
+                plan.current_step,
+                plan.error_message.as_deref(),
+            )
+            .await?;
 
             // Handle lifecycle transition if plan is complete
             if plan.status == PlanStatus::Success {
@@ -236,19 +206,16 @@ impl Director {
 
     pub async fn mark_action_success(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
         // Get the current active plan
-        let mut plan = match self
-            .plans_store
-            .get_active_plan_for_device(device_uuid)
-            .await?
-        {
-            Some(plan) => plan,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "No active plan found for device {}",
-                    device_uuid
-                ));
-            }
-        };
+        let mut plan =
+            match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await? {
+                Some(plan) => plan,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "No active plan found for device {}",
+                        device_uuid
+                    ));
+                }
+            };
 
         // Start the plan if it's pending
         if plan.status == PlanStatus::Pending {
@@ -259,14 +226,14 @@ impl Director {
         let _result = plan.mark_action_success();
 
         // Update the plan in the database
-        self.plans_store
-            .update_plan_status(
-                plan.id.unwrap(),
-                plan.status.clone(),
-                plan.current_step,
-                plan.error_message.as_deref(),
-            )
-            .await?;
+        crate::plans::store::update_plan_status(
+            self.conn,
+            plan.id.unwrap(),
+            plan.status.clone(),
+            plan.current_step,
+            plan.error_message.as_deref(),
+        )
+        .await?;
 
         // Handle lifecycle transition if plan is complete
         if plan.status == PlanStatus::Success {
@@ -283,32 +250,29 @@ impl Director {
         error_message: &str,
     ) -> anyhow::Result<()> {
         // Get the current active plan
-        let mut plan = match self
-            .plans_store
-            .get_active_plan_for_device(device_uuid)
-            .await?
-        {
-            Some(plan) => plan,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "No active plan found for device {}",
-                    device_uuid
-                ));
-            }
-        };
+        let mut plan =
+            match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await? {
+                Some(plan) => plan,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "No active plan found for device {}",
+                        device_uuid
+                    ));
+                }
+            };
 
         // Mark current action as failed
         let _result = plan.mark_action_failed(error_message.to_string());
 
         // Update the plan in the database
-        self.plans_store
-            .update_plan_status(
-                plan.id.unwrap(),
-                plan.status.clone(),
-                plan.current_step,
-                plan.error_message.as_deref(),
-            )
-            .await?;
+        crate::plans::store::update_plan_status(
+            self.conn,
+            plan.id.unwrap(),
+            plan.status.clone(),
+            plan.current_step,
+            plan.error_message.as_deref(),
+        )
+        .await?;
 
         // Handle lifecycle transition if plan failed
         self.handle_plan_completion_failure(plan.id.unwrap(), error_message)
@@ -325,12 +289,12 @@ impl Director {
         log::info!("Auto-detecting platform for device {}", device_uuid);
 
         // Get device attributes
-        let device = self.get_device(device_uuid).await?;
+        let device = store::get_device(self.conn, device_uuid).await?;
         let attrs = &device.attributes;
 
         // Perform platform detection
         let platform_id = crate::platforms::detect_or_create_platform(
-            &self.platforms_store,
+            self.conn,
             &attrs.disks,
             &attrs.network_interfaces,
             &attrs.cpus,
@@ -339,9 +303,7 @@ impl Director {
         .await?;
 
         // Assign platform to device
-        self.store
-            .assign_platform_to_device(device_uuid, platform_id)
-            .await?;
+        store::assign_platform_to_device(self.conn, device_uuid, platform_id).await?;
 
         log::info!(
             "Assigned platform {} to device {}",
@@ -360,7 +322,7 @@ impl Director {
         warning: &str,
     ) -> anyhow::Result<()> {
         // Get current device attributes
-        let device = self.store.get_device(device_uuid).await?;
+        let device = store::get_device(self.conn, device_uuid).await?;
 
         // Append new warning to existing warnings
         let mut warnings = device.attributes.warnings;
@@ -376,7 +338,7 @@ impl Director {
                     .collect(),
             ),
         );
-        self.store.update_attributes(device_uuid, attrs).await
+        store::update_attributes(self.conn, device_uuid, attrs).await
     }
 
     pub async fn start_lifecycle_transition(
@@ -385,11 +347,10 @@ impl Director {
         to_state: DeviceLifecycle,
     ) -> anyhow::Result<i64> {
         // Get current device lifecycle
-        let current_lifecycle = self
-            .lifecycle_store
-            .get_device_lifecycle(device_uuid)
-            .await?
-            .unwrap_or(DeviceLifecycle::New);
+        let current_lifecycle =
+            crate::lifecycle::store::get_device_lifecycle(self.conn, device_uuid)
+                .await?
+                .unwrap_or(DeviceLifecycle::New);
 
         // Check if transition is allowed
         if !LifecycleManager::is_transition_allowed(&current_lifecycle, &to_state) {
@@ -401,10 +362,9 @@ impl Director {
         }
 
         // Check if there's already an active transition
-        if let Some(_active_transition) = self
-            .lifecycle_store
-            .get_active_transition_for_device(device_uuid)
-            .await?
+        if let Some(_active_transition) =
+            crate::lifecycle::store::get_active_transition_for_device(self.conn, device_uuid)
+                .await?
         {
             return Err(anyhow::anyhow!(
                 "Device {} already has an active lifecycle transition",
@@ -419,28 +379,26 @@ impl Director {
         // Create plan for this transition
         let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
         let plan = Plan::new(*device_uuid, actions);
-        let plan_id = self.create_plan(&plan).await?;
+        let plan_id = crate::plans::store::create_plan(self.conn, &plan).await?;
 
         // Create lifecycle transition
         let transition =
             LifecycleTransition::new(*device_uuid, current_lifecycle, to_state, Some(plan_id));
 
-        let transition_id = self.lifecycle_store.create_transition(&transition).await?;
+        let transition_id =
+            crate::lifecycle::store::create_transition(self.conn, &transition).await?;
 
         // Get the newly created plan to access its current action
-        let plan = self
-            .plans_store
-            .get_active_plan_for_device(device_uuid)
+        let plan = crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
             .await?
             .expect("Plan should exist immediately after creation");
 
         // If there's a current action, run its start() hook
         if let Some(action) = plan.get_current_action() {
-            let device = self.get_device(device_uuid).await?;
+            let device = store::get_device(self.conn, device_uuid).await?;
             let ctx = crate::plans::actions::ActionContext {
                 device: &device,
-                os_store: &self.os_store,
-                roles_store: &self.roles_store,
+                conn: self.conn,
                 director: Some(self), // Provide director for actions that need it (e.g., RebootDevice)
             };
 
@@ -462,16 +420,14 @@ impl Director {
         &self,
         device_uuid: &Uuid,
     ) -> anyhow::Result<Option<DeviceLifecycle>> {
-        self.lifecycle_store.get_device_lifecycle(device_uuid).await
+        crate::lifecycle::store::get_device_lifecycle(self.conn, device_uuid).await
     }
 
     pub async fn get_active_transition_for_device(
         &self,
         device_uuid: &Uuid,
     ) -> anyhow::Result<Option<LifecycleTransition>> {
-        self.lifecycle_store
-            .get_active_transition_for_device(device_uuid)
-            .await
+        crate::lifecycle::store::get_active_transition_for_device(self.conn, device_uuid).await
     }
 
     pub async fn get_device_transitions(
@@ -479,27 +435,35 @@ impl Director {
         device_uuid: &Uuid,
         include_completed: bool,
     ) -> anyhow::Result<Vec<LifecycleTransition>> {
-        self.lifecycle_store
-            .get_transitions_for_device(device_uuid, include_completed)
-            .await
+        crate::lifecycle::store::get_transitions_for_device(
+            self.conn,
+            device_uuid,
+            include_completed,
+        )
+        .await
     }
 
     async fn handle_plan_completion_success(&self, plan_id: i64) -> anyhow::Result<()> {
         // Find the lifecycle transition associated with this plan
-        if let Some(transition) = self
-            .lifecycle_store
-            .get_transition_by_plan_id(plan_id)
-            .await?
+        if let Some(transition) =
+            crate::lifecycle::store::get_transition_by_plan_id(self.conn, plan_id).await?
         {
             // Update device lifecycle to the target state
-            self.lifecycle_store
-                .update_device_lifecycle(&transition.device_uuid, transition.to_state.clone())
-                .await?;
+            crate::lifecycle::store::update_device_lifecycle(
+                self.conn,
+                &transition.device_uuid,
+                transition.to_state.clone(),
+            )
+            .await?;
 
             // Complete the transition successfully
-            self.lifecycle_store
-                .complete_transition(transition.id.unwrap(), true, None)
-                .await?;
+            crate::lifecycle::store::complete_transition(
+                self.conn,
+                transition.id.unwrap(),
+                true,
+                None,
+            )
+            .await?;
         }
 
         Ok(())
@@ -511,39 +475,44 @@ impl Director {
         error_message: &str,
     ) -> anyhow::Result<()> {
         // Find the lifecycle transition associated with this plan
-        if let Some(transition) = self
-            .lifecycle_store
-            .get_transition_by_plan_id(plan_id)
-            .await?
+        if let Some(transition) =
+            crate::lifecycle::store::get_transition_by_plan_id(self.conn, plan_id).await?
         {
             // Move device to broken state on failure
-            self.lifecycle_store
-                .update_device_lifecycle(&transition.device_uuid, DeviceLifecycle::Broken)
-                .await?;
+            crate::lifecycle::store::update_device_lifecycle(
+                self.conn,
+                &transition.device_uuid,
+                DeviceLifecycle::Broken,
+            )
+            .await?;
 
             // Complete the transition with failure
-            self.lifecycle_store
-                .complete_transition(transition.id.unwrap(), false, Some(error_message))
-                .await?;
+            crate::lifecycle::store::complete_transition(
+                self.conn,
+                transition.id.unwrap(),
+                false,
+                Some(error_message),
+            )
+            .await?;
         }
 
         Ok(())
     }
 
     pub async fn get_device(&self, uuid: &Uuid) -> anyhow::Result<Device> {
-        self.store.get_device(uuid).await
+        store::get_device(self.conn, uuid).await
     }
 
     pub async fn get_all_devices(&self) -> anyhow::Result<Vec<Device>> {
-        self.store.get_all_devices().await
+        store::get_all_devices(self.conn).await
     }
 
     pub async fn find_device_by_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
-        self.store.find_device_by_mac(mac).await
+        store::find_device_by_mac(self.conn, mac).await
     }
 
     pub async fn set_device_mac_address(&self, uuid: &Uuid, mac: &str) -> anyhow::Result<()> {
-        self.store.set_mac_address(uuid, mac).await
+        store::set_mac_address(self.conn, uuid, mac).await
     }
 
     pub async fn set_device_ip_address(
@@ -552,14 +521,14 @@ impl Director {
         ip: &str,
         mac: &str,
     ) -> anyhow::Result<()> {
-        self.store.set_ip_address(uuid, ip, mac).await
+        store::set_ip_address(self.conn, uuid, ip, mac).await
     }
 
     pub async fn get_network_interfaces(
         &self,
         uuid: &Uuid,
     ) -> anyhow::Result<Vec<NetworkInterface>> {
-        self.store.get_network_interfaces(uuid).await
+        store::get_network_interfaces(self.conn, uuid).await
     }
 
     pub async fn set_network_interfaces(
@@ -567,18 +536,7 @@ impl Director {
         uuid: &Uuid,
         interfaces: &[NetworkInterface],
     ) -> anyhow::Result<()> {
-        self.store.set_network_interfaces(uuid, interfaces).await
-    }
-
-    pub async fn find_duplicate_macs_on_network(
-        &self,
-        mac: &str,
-        network_id: i64,
-        exclude_device: &Uuid,
-    ) -> anyhow::Result<Vec<(Uuid, String)>> {
-        self.store
-            .find_duplicate_macs_on_network(mac, network_id, exclude_device)
-            .await
+        store::set_network_interfaces(self.conn, uuid, interfaces).await
     }
 
     // Platform assignment methods
@@ -588,17 +546,16 @@ impl Director {
         device_uuid: &Uuid,
         platform_id: i64,
     ) -> anyhow::Result<()> {
-        self.store
-            .assign_platform_to_device(device_uuid, platform_id)
-            .await
+        store::assign_platform_to_device(self.conn, device_uuid, platform_id).await
     }
 
     pub async fn get_device_platform_id(&self, device_uuid: &Uuid) -> anyhow::Result<Option<i64>> {
-        self.store.get_device_platform_id(device_uuid).await
+        store::get_device_platform_id(self.conn, device_uuid).await
     }
 
+    #[cfg(test)]
     pub async fn list_devices_with_platform(&self, platform_id: i64) -> anyhow::Result<Vec<Uuid>> {
-        self.store.list_devices_with_platform(platform_id).await
+        store::list_devices_with_platform(self.conn, platform_id).await
     }
 
     // Role assignment methods
@@ -608,15 +565,11 @@ impl Director {
         device_uuid: &Uuid,
         role_id: i64,
     ) -> anyhow::Result<()> {
-        self.store.assign_role_to_device(device_uuid, role_id).await
+        store::assign_role_to_device(self.conn, device_uuid, role_id).await
     }
 
     pub async fn get_device_role_id(&self, device_uuid: &Uuid) -> anyhow::Result<Option<i64>> {
-        self.store.get_device_role_id(device_uuid).await
-    }
-
-    pub async fn list_devices_with_role(&self, role_id: i64) -> anyhow::Result<Vec<Uuid>> {
-        self.store.list_devices_with_role(role_id).await
+        store::get_device_role_id(self.conn, device_uuid).await
     }
 
     pub async fn create_pending_device(
@@ -624,16 +577,14 @@ impl Director {
         mac_address: &str,
         network_id: i64,
     ) -> anyhow::Result<i64> {
-        self.store
-            .create_pending_device(mac_address, network_id)
-            .await
+        store::create_pending_device(self.conn, mac_address, network_id).await
     }
 
     pub async fn find_pending_device_by_mac(
         &self,
         mac_address: &str,
     ) -> anyhow::Result<Option<i64>> {
-        self.store.find_pending_device_by_mac(mac_address).await
+        store::find_pending_device_by_mac(self.conn, mac_address).await
     }
 
     pub async fn complete_pending_device(
@@ -641,17 +592,15 @@ impl Director {
         mac_address: &str,
         device_uuid: &Uuid,
     ) -> anyhow::Result<()> {
-        self.store
-            .complete_pending_device(mac_address, device_uuid)
-            .await
+        store::complete_pending_device(self.conn, mac_address, device_uuid).await
     }
 
     pub async fn get_pending_devices(&self) -> anyhow::Result<Vec<PendingDevice>> {
-        self.store.get_pending_devices().await
+        store::get_pending_devices(self.conn).await
     }
 
     pub async fn delete_pending_device(&self, id: i64) -> anyhow::Result<()> {
-        self.store.delete_pending_device(id).await
+        store::delete_pending_device(self.conn, id).await
     }
 
     pub async fn delete_device(&self, uuid: &Uuid) -> anyhow::Result<()> {
@@ -659,15 +608,11 @@ impl Director {
         // (interfaces stored in device JSON, lost after deletion)
 
         // 1. Delete for all discovered interfaces
-        let interfaces = self
-            .store
-            .get_network_interfaces(uuid)
+        let interfaces = store::get_network_interfaces(self.conn, uuid)
             .await
             .unwrap_or_default();
         for nic in &interfaces {
-            match self
-                .dhcp_store
-                .delete_static_reservations_by_mac(&nic.mac_address)
+            match crate::dhcp::store::delete_static_reservations_by_mac(self.conn, &nic.mac_address)
                 .await
             {
                 Ok(count) if count > 0 => {
@@ -690,19 +635,19 @@ impl Director {
         }
 
         // 2. Check legacy mac_address field (backward compatibility)
-        if let Ok(device) = self.store.get_device(uuid).await
+        if let Ok(device) = store::get_device(self.conn, uuid).await
             && let Some(mac) = &device.attributes.mac_address
             && !interfaces.iter().any(|nic| &nic.mac_address == mac)
         {
-            let _ = self.dhcp_store.delete_static_reservations_by_mac(mac).await;
+            let _ = crate::dhcp::store::delete_static_reservations_by_mac(self.conn, mac).await;
         }
 
         // 3. Delete device (cascades to plans, transitions)
-        self.store.delete_device(uuid).await
+        store::delete_device(self.conn, uuid).await
     }
 
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
-        self.store.find_device_by_bmc_mac(mac).await
+        store::find_device_by_bmc_mac(self.conn, mac).await
     }
 
     /// Issue an IPMI power reset command to the device's BMC
@@ -754,13 +699,13 @@ impl Director {
 
     /// Get BMC IP address from device attributes
     async fn get_bmc_ip(&self, uuid: &Uuid) -> anyhow::Result<Option<String>> {
-        let device = self.store.get_device(uuid).await?;
+        let device = store::get_device(self.conn, uuid).await?;
         Ok(device.attributes.bmc.and_then(|bmc| bmc.ip_address))
     }
 
     /// Get BMC credentials from device attributes
     async fn get_bmc_credentials(&self, uuid: &Uuid) -> anyhow::Result<Option<(String, String)>> {
-        let device = self.store.get_device(uuid).await?;
+        let device = store::get_device(self.conn, uuid).await?;
         let bmc_config = device.attributes.bmc_config;
 
         match bmc_config {
@@ -776,22 +721,22 @@ impl Director {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{database, plans::PlanStatus};
-    use std::sync::Arc;
-    use tempfile::tempdir;
-    use tokio::sync::Mutex;
+    use crate::{
+        database, database::DatabaseConnectionFactory, plans::PlanStatus, test_connection_factory,
+    };
 
-    async fn setup_test_director() -> (Director, tempfile::TempDir) {
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = database::open(&db_path).unwrap();
-        let director = Director::new(Arc::new(Mutex::new(db)));
-        (director, temp_dir)
+    /// Sets up a test database and returns the connection.
+    ///
+    /// Each test constructs `Director::new(&conn)` locally so that the Director
+    /// borrows the connection for the duration of the test.
+    async fn setup_test_db(factory: DatabaseConnectionFactory) -> database::Connection {
+        database::run_migrations(&factory).await.unwrap()
     }
 
     #[tokio::test]
     async fn test_single_active_plan_constraint() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440006").unwrap();
 
         // Register device
@@ -843,7 +788,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_all_devices() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
 
         // Initially should return empty list
         let devices = director.get_all_devices().await.unwrap();
@@ -896,7 +842,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_discovery_transition() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440007").unwrap();
 
         // Register device - it should start in "new" state
@@ -996,7 +943,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_with_bmc_info() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
 
         // Register device
@@ -1035,7 +983,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_without_bmc_ip() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440021").unwrap();
 
         // Register device without BMC info
@@ -1051,7 +1000,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_without_bmc_credentials() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440022").unwrap();
 
         // Register device
@@ -1081,7 +1031,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_boot_advances_reboot_action() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440023").unwrap();
 
         // Register device
@@ -1124,7 +1075,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_boot_does_not_advance_other_actions() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440024").unwrap();
 
         // Register device
@@ -1162,7 +1114,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_boot_without_active_plan() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440025").unwrap();
 
         // Register device without a plan
@@ -1178,7 +1131,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_ip_with_valid_bmc() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440026").unwrap();
 
         // Register device
@@ -1208,7 +1162,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_ip_without_bmc() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440027").unwrap();
 
         // Register device without BMC
@@ -1224,7 +1179,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_credentials_with_valid_config() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440028").unwrap();
 
         // Register device
@@ -1258,7 +1214,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_credentials_without_credentials() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440029").unwrap();
 
         // Register device - will have default BMC config with no credentials
@@ -1274,7 +1231,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_device_sets_default_bmc_config() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440030").unwrap();
 
         // Register device
@@ -1304,7 +1262,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_bmc_config_does_not_override_existing() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440031").unwrap();
 
         // Register device (sets default config)
@@ -1345,7 +1304,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_bmc_config_preserves_other_attributes() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440032").unwrap();
 
         // Register device
@@ -1390,27 +1350,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_device_removes_static_reservations() {
-        let (director, temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440033").unwrap();
 
-        // Create a DHCP network first
-        let db_path = temp_dir.path().join("test.db");
-        let db = crate::database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(Mutex::new(db));
-        let dhcp_store = crate::dhcp::DhcpStore::new(db_tokio);
-
-        let network = dhcp_store
-            .create_network(
-                "Test Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
+        // Create a DHCP network using the shared connection
+        let network = crate::dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         // Register device
         director
@@ -1435,14 +1391,18 @@ mod tests {
             .unwrap();
 
         // Create static reservation
-        dhcp_store
-            .create_or_update_static_reservation(network.id, mac, "10.0.0.100", None)
-            .await
-            .unwrap();
+        crate::dhcp::store::create_or_update_static_reservation(
+            &conn,
+            network.id,
+            mac,
+            "10.0.0.100",
+            None,
+        )
+        .await
+        .unwrap();
 
         // Verify reservation exists
-        let reservation = dhcp_store
-            .get_static_reservation(network.id, mac)
+        let reservation = crate::dhcp::store::get_static_reservation(&conn, network.id, mac)
             .await
             .unwrap();
         assert!(reservation.is_some());
@@ -1451,8 +1411,7 @@ mod tests {
         director.delete_device(&test_uuid).await.unwrap();
 
         // Verify reservation was deleted
-        let reservation = dhcp_store
-            .get_static_reservation(network.id, mac)
+        let reservation = crate::dhcp::store::get_static_reservation(&conn, network.id, mac)
             .await
             .unwrap();
         assert!(reservation.is_none());
@@ -1460,27 +1419,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_device_removes_reservations_for_multiple_nics() {
-        let (director, temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440034").unwrap();
 
-        // Create DHCP network
-        let db_path = temp_dir.path().join("test.db");
-        let db = crate::database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(Mutex::new(db));
-        let dhcp_store = crate::dhcp::DhcpStore::new(db_tokio);
-
-        let network = dhcp_store
-            .create_network(
-                "Test Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                None,
-                false,
-            )
-            .await
-            .unwrap();
+        // Create DHCP network using the shared connection
+        let network = crate::dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         // Register device
         director
@@ -1517,26 +1472,34 @@ mod tests {
             .unwrap();
 
         // Create static reservations for both MACs
-        dhcp_store
-            .create_or_update_static_reservation(network.id, mac1, "10.0.0.101", None)
-            .await
-            .unwrap();
-        dhcp_store
-            .create_or_update_static_reservation(network.id, mac2, "10.0.0.102", None)
-            .await
-            .unwrap();
+        crate::dhcp::store::create_or_update_static_reservation(
+            &conn,
+            network.id,
+            mac1,
+            "10.0.0.101",
+            None,
+        )
+        .await
+        .unwrap();
+        crate::dhcp::store::create_or_update_static_reservation(
+            &conn,
+            network.id,
+            mac2,
+            "10.0.0.102",
+            None,
+        )
+        .await
+        .unwrap();
 
         // Verify both reservations exist
         assert!(
-            dhcp_store
-                .get_static_reservation(network.id, mac1)
+            crate::dhcp::store::get_static_reservation(&conn, network.id, mac1)
                 .await
                 .unwrap()
                 .is_some()
         );
         assert!(
-            dhcp_store
-                .get_static_reservation(network.id, mac2)
+            crate::dhcp::store::get_static_reservation(&conn, network.id, mac2)
                 .await
                 .unwrap()
                 .is_some()
@@ -1547,15 +1510,13 @@ mod tests {
 
         // Verify both reservations were deleted
         assert!(
-            dhcp_store
-                .get_static_reservation(network.id, mac1)
+            crate::dhcp::store::get_static_reservation(&conn, network.id, mac1)
                 .await
                 .unwrap()
                 .is_none()
         );
         assert!(
-            dhcp_store
-                .get_static_reservation(network.id, mac2)
+            crate::dhcp::store::get_static_reservation(&conn, network.id, mac2)
                 .await
                 .unwrap()
                 .is_none()
@@ -1566,7 +1527,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_success() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440050").unwrap();
 
         // Register device
@@ -1576,7 +1538,6 @@ mod tests {
             .unwrap();
 
         // Create a platform first
-        let platforms_store = &director.platforms_store;
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
                 path: "/dev/sda".to_string(),
@@ -1596,8 +1557,7 @@ mod tests {
             }],
             memory_gib: 32,
         };
-        platforms_store
-            .create("Test Platform", None, &platform_attrs)
+        crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
             .await
             .unwrap();
 
@@ -1648,7 +1608,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_failed() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440051").unwrap();
 
         // Register device
@@ -1704,7 +1665,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_manual() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440052").unwrap();
 
         // Register device
@@ -1714,17 +1676,16 @@ mod tests {
             .unwrap();
 
         // Create a platform
-        let platforms_store = &director.platforms_store;
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![],
             nics: vec![],
             cpus: vec![],
             memory_gib: 0,
         };
-        let platform = platforms_store
-            .create("Manual Platform", None, &platform_attrs)
-            .await
-            .unwrap();
+        let platform =
+            crate::platforms::store::create(&conn, "Manual Platform", None, &platform_attrs)
+                .await
+                .unwrap();
 
         // Manually assign platform
         director
@@ -1739,7 +1700,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_no_hardware_info() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440053").unwrap();
 
         // Register device
@@ -1764,7 +1726,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_creates_new_platform_on_no_match() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440056").unwrap();
 
         // Register device
@@ -1774,7 +1737,7 @@ mod tests {
             .unwrap();
 
         // Verify no platforms exist initially
-        let platforms = director.platforms_store.list().await.unwrap();
+        let platforms = crate::platforms::store::list(&conn).await.unwrap();
         assert_eq!(
             platforms.len(),
             0,
@@ -1826,7 +1789,7 @@ mod tests {
             .unwrap();
 
         // Verify a new platform was auto-created
-        let platforms = director.platforms_store.list().await.unwrap();
+        let platforms = crate::platforms::store::list(&conn).await.unwrap();
         assert_eq!(
             platforms.len(),
             1,
@@ -1845,9 +1808,7 @@ mod tests {
         );
 
         // Verify the created platform has the correct hardware attributes
-        let platform = director
-            .platforms_store
-            .get(device.platform_id.unwrap())
+        let platform = crate::platforms::store::get(&conn, device.platform_id.unwrap())
             .await
             .unwrap();
         assert_eq!(platform.attributes.disks.len(), 1);
@@ -1858,7 +1819,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_partial_hardware_info() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440054").unwrap();
 
         // Register device
@@ -1897,7 +1859,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_manual_overrides_auto() {
-        let (director, _temp_dir) = setup_test_director().await;
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440055").unwrap();
 
         // Register device
@@ -1932,17 +1895,16 @@ mod tests {
         let auto_platform_id = device.platform_id.unwrap();
 
         // Create a different platform and manually assign it
-        let platforms_store = &director.platforms_store;
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![],
             nics: vec![],
             cpus: vec![],
             memory_gib: 0,
         };
-        let manual_platform = platforms_store
-            .create("Manual Override", None, &platform_attrs)
-            .await
-            .unwrap();
+        let manual_platform =
+            crate::platforms::store::create(&conn, "Manual Override", None, &platform_attrs)
+                .await
+                .unwrap();
 
         director
             .assign_platform_to_device(&test_uuid, manual_platform.id.unwrap())

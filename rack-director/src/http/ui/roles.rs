@@ -24,19 +24,20 @@ async fn create_role(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<Role>), HttpError> {
-    // Verify the OS exists
-    state.os_store.get(req.os_id).await?;
+    let conn = state.connection_factory.open().await?;
 
-    let role = state
-        .roles_store
-        .create(
-            &req.name,
-            req.description.as_deref(),
-            req.os_id,
-            &req.disk_layout,
-            req.config_template.as_ref(),
-        )
-        .await?;
+    // Verify the OS exists
+    crate::operating_systems::store::get(&conn, req.os_id).await?;
+
+    let role = crate::roles::store::create(
+        &conn,
+        &req.name,
+        req.description.as_deref(),
+        req.os_id,
+        &req.disk_layout,
+        req.config_template.as_ref(),
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(role)))
 }
@@ -45,7 +46,8 @@ async fn create_role(
 async fn list_roles(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<RoleWithOs>>, HttpError> {
-    let roles = state.roles_store.list_with_os().await?;
+    let conn = state.connection_factory.open().await?;
+    let roles = crate::roles::store::list_with_os(&conn).await?;
     Ok(Json(roles))
 }
 
@@ -54,7 +56,8 @@ async fn get_role(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<RoleWithOs>, HttpError> {
-    let role = state.roles_store.get_with_os(id).await?;
+    let conn = state.connection_factory.open().await?;
+    let role = crate::roles::store::get_with_os(&conn, id).await?;
     Ok(Json(role))
 }
 
@@ -65,22 +68,23 @@ async fn update_role(
     Path(id): Path<i64>,
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<Role>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+
     // If updating OS, verify it exists
     if let Some(os_id) = req.os_id {
-        state.os_store.get(os_id).await?;
+        crate::operating_systems::store::get(&conn, os_id).await?;
     }
 
-    let role = state
-        .roles_store
-        .update(
-            id,
-            req.name.as_deref(),
-            req.description.as_deref(),
-            req.os_id,
-            req.disk_layout.as_ref(),
-            req.config_template.as_ref(),
-        )
-        .await?;
+    let role = crate::roles::store::update(
+        &conn,
+        id,
+        req.name.as_deref(),
+        req.description.as_deref(),
+        req.os_id,
+        req.disk_layout.as_ref(),
+        req.config_template.as_ref(),
+    )
+    .await?;
 
     Ok(Json(role))
 }
@@ -90,7 +94,8 @@ async fn delete_role(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, HttpError> {
-    state.roles_store.delete(id).await?;
+    let conn = state.connection_factory.open().await?;
+    crate::roles::store::delete(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -99,7 +104,8 @@ async fn list_role_devices(
     State(state): State<Arc<AppState>>,
     Path(role_id): Path<i64>,
 ) -> Result<Json<Vec<String>>, HttpError> {
-    let devices = state.director.list_devices_with_role(role_id).await?;
+    let conn = state.connection_factory.open().await?;
+    let devices = crate::director::store::list_devices_with_role(&conn, role_id).await?;
     let device_strs: Vec<String> = devices.iter().map(|u| u.to_string()).collect();
     Ok(Json(device_strs))
 }

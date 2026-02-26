@@ -8,7 +8,6 @@ pub mod actions;
 pub mod store;
 
 pub use actions::Action;
-pub use store::PlansStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PlanStatus {

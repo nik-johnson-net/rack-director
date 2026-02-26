@@ -1,6 +1,7 @@
+use crate::database::Connection;
 use crate::platforms::cpu_model::platform_name_processor_version;
 
-use super::{DiskType, PlatformAttributes, PlatformCpu, PlatformDisk, PlatformNic, PlatformsStore};
+use super::{DiskType, PlatformAttributes, PlatformCpu, PlatformDisk, PlatformNic};
 use anyhow::Result;
 use common::device_attributes::{CpuInfo, DiskInfo, MemoryInfo, NetworkInterface};
 
@@ -14,7 +15,7 @@ use common::device_attributes::{CpuInfo, DiskInfo, MemoryInfo, NetworkInterface}
 ///
 /// Returns the platform ID
 pub async fn detect_or_create_platform(
-    store: &PlatformsStore,
+    conn: &Connection,
     disks: &[DiskInfo],
     nics: &[NetworkInterface],
     cpus: &[CpuInfo],
@@ -28,7 +29,7 @@ pub async fn detect_or_create_platform(
     assign_nic_labels(&mut platform_attrs.nics);
 
     // Try to find existing matching platform
-    if let Some(platform_id) = find_matching_platform(store, &platform_attrs).await? {
+    if let Some(platform_id) = find_matching_platform(conn, &platform_attrs).await? {
         log::info!("Found matching platform ID: {}", platform_id);
         return Ok(platform_id);
     }
@@ -37,13 +38,13 @@ pub async fn detect_or_create_platform(
     let platform_name = generate_platform_name(&platform_attrs);
     log::info!("Creating new platform: {}", platform_name);
 
-    let platform = store
-        .create(
-            &platform_name,
-            Some("Auto-detected platform"),
-            &platform_attrs,
-        )
-        .await?;
+    let platform = super::store::create(
+        conn,
+        &platform_name,
+        Some("Auto-detected platform"),
+        &platform_attrs,
+    )
+    .await?;
 
     Ok(platform.id.unwrap())
 }
@@ -52,10 +53,10 @@ pub async fn detect_or_create_platform(
 /// Used for auto-detection during hardware discovery
 /// Returns platform ID if a match is found
 pub async fn find_matching_platform(
-    store: &PlatformsStore,
+    conn: &Connection,
     device_attrs: &PlatformAttributes,
 ) -> Result<Option<i64>> {
-    let platforms = store.list().await?;
+    let platforms = super::store::list(conn).await?;
 
     for platform in platforms {
         if is_platform_match(&platform.attributes, device_attrs) {
@@ -334,15 +335,12 @@ fn generate_platform_name(attrs: &PlatformAttributes) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database;
-    use rusqlite::Connection;
+    use crate::{database, test_database_path};
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
-    fn setup_db() -> Arc<Mutex<Connection>> {
-        let conn = Connection::open_in_memory().unwrap();
-        database::run_migrations(&conn).unwrap();
-        Arc::new(Mutex::new(conn))
+    async fn setup_db(path: String) -> Arc<crate::database::Connection> {
+        let factory = database::DatabaseConnectionFactory::new(std::path::PathBuf::from(path));
+        Arc::new(database::run_migrations(&factory).await.unwrap())
     }
 
     fn sample_platform_attributes() -> PlatformAttributes {
@@ -620,118 +618,125 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_matching_platform_exact_match() {
-        let db = setup_db();
-        let store = PlatformsStore::new(db);
+        let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = store.create("Test Platform", None, &attrs).await.unwrap();
+        let platform = crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+            .await
+            .unwrap();
 
         // Search with exact same attributes
         let device_attrs = sample_platform_attributes();
-        let found = find_matching_platform(&store, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
 
         assert_eq!(found, platform.id);
     }
 
     #[tokio::test]
     async fn test_find_matching_platform_with_size_tolerance() {
-        let db = setup_db();
-        let store = PlatformsStore::new(db);
+        let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = store.create("Test Platform", None, &attrs).await.unwrap();
+        let platform = crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+            .await
+            .unwrap();
 
         // Device with slightly different disk size (within 5% tolerance)
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks[0].size_gb = 475; // 480 - 5 = within 5%
         device_attrs.disks[1].size_gb = 2050; // 2000 + 50 = within 5%
 
-        let found = find_matching_platform(&store, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
 
         assert_eq!(found, platform.id);
     }
 
     #[tokio::test]
     async fn test_find_matching_platform_with_memory_tolerance() {
-        let db = setup_db();
-        let store = PlatformsStore::new(db);
+        let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = store.create("Test Platform", None, &attrs).await.unwrap();
+        let platform = crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+            .await
+            .unwrap();
 
         // Device with slightly different memory (within 1 GiB tolerance)
         let mut device_attrs = sample_platform_attributes();
         device_attrs.memory_gib = 33; // 32 + 1 = within tolerance
 
-        let found = find_matching_platform(&store, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
 
         assert_eq!(found, platform.id);
     }
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_disk_count() {
-        let db = setup_db();
-        let store = PlatformsStore::new(db);
+        let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        store.create("Test Platform", None, &attrs).await.unwrap();
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+            .await
+            .unwrap();
 
         // Device with different number of disks
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks.pop();
 
-        let found = find_matching_platform(&store, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
 
         assert!(found.is_none());
     }
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_disk_type() {
-        let db = setup_db();
-        let store = PlatformsStore::new(db);
+        let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        store.create("Test Platform", None, &attrs).await.unwrap();
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+            .await
+            .unwrap();
 
         // Device with different disk type
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks[0].disk_type = DiskType::Nvme;
 
-        let found = find_matching_platform(&store, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
 
         assert!(found.is_none());
     }
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_nic_count() {
-        let db = setup_db();
-        let store = PlatformsStore::new(db);
+        let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        store.create("Test Platform", None, &attrs).await.unwrap();
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+            .await
+            .unwrap();
 
         // Device with different number of NICs
         let mut device_attrs = sample_platform_attributes();
         device_attrs.nics.pop();
 
-        let found = find_matching_platform(&store, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
 
         assert!(found.is_none());
     }
 
     #[tokio::test]
     async fn test_find_matching_platform_no_match_cpu_config() {
-        let db = setup_db();
-        let store = PlatformsStore::new(db);
+        let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        store.create("Test Platform", None, &attrs).await.unwrap();
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+            .await
+            .unwrap();
 
         // Device with different CPU cores
         let mut device_attrs = sample_platform_attributes();
         device_attrs.cpus[0].cores = 8;
 
-        let found = find_matching_platform(&store, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
 
         assert!(found.is_none());
     }

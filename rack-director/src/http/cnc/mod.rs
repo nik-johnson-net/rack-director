@@ -22,10 +22,13 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
-use crate::{director::NetworkInterface, http::AppState};
-use common::device_attributes::{BmcConfig, DeviceAttributes};
-
 use crate::http::error::Error;
+use crate::{
+    dhcp,
+    director::{Director, NetworkInterface},
+    http::AppState,
+};
+use common::device_attributes::{BmcConfig, DeviceAttributes};
 
 use ipxe_scripts::{build_response, generate_uuid_redirect};
 
@@ -62,30 +65,32 @@ async fn ipxe_handler(
         None => return Ok(generate_uuid_redirect(&root_url)),
     };
 
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(Error::ServerInternalError)?;
+    let director = Director::new(&conn);
+
     // Resolve MAC address from parameter or DHCP lookup
     let mac_address =
-        device_registration::resolve_mac_address(&state, params.mac.as_ref(), addr).await;
+        device_registration::resolve_mac_address(&conn, params.mac.as_ref(), addr).await;
 
     // Discovery Support
     // For devices that don't exist, determine if the device should be created.
     // TODO: Please make this better.
-    if !state.director.device_exists(&uuid).await?
+    if !director.device_exists(&uuid).await?
         && let Some(mac) = &mac_address
     {
-        if state
-            .director
-            .find_pending_device_by_mac(mac)
-            .await?
-            .is_some()
-        {
+        if director.find_pending_device_by_mac(mac).await?.is_some() {
             info!("Found pending device {}. Starting discovery.", uuid);
-            device_registration::register_and_start_discovery(&state, &uuid, Some(mac)).await;
+            device_registration::register_and_start_discovery(&conn, &uuid, Some(mac)).await;
         } else {
             // Device is not pending. Check to see if the network has autodiscovery enabled.
-            let dhcp_lease = state.dhcp_store.get_lease_by_mac(mac).await?;
+            let dhcp_lease = dhcp::store::get_lease_by_mac(&conn, mac).await?;
             if let Some(lease) = dhcp_lease {
                 if let Some(netid) = lease.network_id {
-                    let dhcp_network = state.dhcp_store.get_network(netid).await?;
+                    let dhcp_network = dhcp::store::get_network(&conn, netid).await?;
 
                     // Register device if it doesn't exist and automatically start discovery
                     if dhcp_network.enable_autodiscovery {
@@ -93,7 +98,7 @@ async fn ipxe_handler(
                             "Found new device {} on network with autodiscovery enabled. Adopting and starting discovery.",
                             uuid
                         );
-                        device_registration::register_and_start_discovery(&state, &uuid, Some(mac))
+                        device_registration::register_and_start_discovery(&conn, &uuid, Some(mac))
                             .await;
                     }
                 } else {
@@ -109,13 +114,13 @@ async fn ipxe_handler(
 
     // Handle boot event - advance plan if current action supports it
     // This must happen before we check the boot target, because on_boot() might advance the plan
-    if let Err(e) = state.director.on_boot(&uuid).await {
+    if let Err(e) = director.on_boot(&uuid).await {
         log::warn!("Failed to handle boot event for {}: {:?}", uuid, e);
     }
 
     // Store network info from DHCP lease (reuse the MAC address lookup from above)
     if let Some(mac) = &mac_address {
-        if let Ok(Some(lease)) = state.dhcp_store.get_lease_by_mac(mac).await {
+        if let Ok(Some(lease)) = dhcp::store::get_lease_by_mac(&conn, mac).await {
             log::info!(
                 "Found DHCP lease for device {}: MAC {} IP {}",
                 uuid,
@@ -125,8 +130,7 @@ async fn ipxe_handler(
 
             // Update IP address for the interface with this MAC
             // This will also create the interface if it doesn't exist yet
-            if let Err(e) = state
-                .director
+            if let Err(e) = director
                 .set_device_ip_address(&uuid, &lease.ip_address, &lease.mac_address)
                 .await
             {
@@ -134,8 +138,7 @@ async fn ipxe_handler(
             }
 
             // Update legacy MAC address field for backward compatibility
-            if let Err(e) = state
-                .director
+            if let Err(e) = director
                 .set_device_mac_address(&uuid, &lease.mac_address)
                 .await
             {
@@ -147,7 +150,7 @@ async fn ipxe_handler(
     }
 
     // Non-fatal. If the boot target can't be found, redirect loop back here to try again
-    let boot_target = match state.director.next_boot_target(&uuid).await {
+    let boot_target = match director.next_boot_target(&uuid).await {
         Ok(x) => x,
         Err(e) => {
             warn!("Couldn't get boot target from director for {uuid}: {e}");
@@ -172,7 +175,13 @@ async fn install_script_handler(
         .uuid
         .ok_or_else(|| Error::BadRequest("Missing uuid parameter".to_string()))?;
 
-    install_script::render_for_device(&state, &uuid).await
+    let conn = state
+        .connection_factory
+        .open()
+        .await
+        .map_err(Error::ServerInternalError)?;
+
+    install_script::render_for_device(&conn, &state.image_store, &uuid).await
 }
 
 async fn agent_images_handler(
@@ -246,12 +255,14 @@ async fn update_attributes(
         }
     };
 
+    let conn = match state.connection_factory.open().await {
+        Ok(conn) => conn,
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let director = Director::new(&conn);
+
     // Store the attributes as provided by the agent
-    if let Err(e) = state
-        .director
-        .update_attributes(&uuid, attributes_json)
-        .await
-    {
+    if let Err(e) = director.update_attributes(&uuid, attributes_json).await {
         warn!("Couldn't update attributes for {uuid}: {e}");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -275,16 +286,15 @@ async fn update_attributes(
 
         // Enrich interfaces with DHCP lease information
         let mut enriched_interfaces =
-            network_processing::enrich_interfaces_with_dhcp_info(&state, interfaces).await;
+            network_processing::enrich_interfaces_with_dhcp_info(&conn, interfaces).await;
 
         // Detect and mark duplicate MACs on the same network
-        network_processing::detect_and_mark_duplicates(&state, &uuid, &mut enriched_interfaces)
+        network_processing::detect_and_mark_duplicates(&conn, &uuid, &mut enriched_interfaces)
             .await;
 
         // Update the device with IP-enriched network interfaces
         if !enriched_interfaces.is_empty()
-            && let Err(e) = state
-                .director
+            && let Err(e) = director
                 .set_network_interfaces(&uuid, &enriched_interfaces)
                 .await
         {
@@ -296,7 +306,7 @@ async fn update_attributes(
 
         // Complete any pending devices whose MACs match the device's interfaces
         network_processing::complete_pending_devices_for_interfaces(
-            &state,
+            &conn,
             &uuid,
             &enriched_interfaces,
         )
@@ -324,7 +334,13 @@ async fn action_success(
 ) -> Result<NoContent, StatusCode> {
     let uuid = payload.uuid;
 
-    match state.director.mark_action_success(&uuid).await {
+    let conn = match state.connection_factory.open().await {
+        Ok(conn) => conn,
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let director = Director::new(&conn);
+
+    match director.mark_action_success(&uuid).await {
         Ok(_) => Ok(NoContent),
         Err(e) => {
             warn!("Couldn't mark action success for {uuid}: {e}");
@@ -341,11 +357,13 @@ async fn action_failed(
     let uuid = payload.uuid;
     let error_message = payload.error_message;
 
-    match state
-        .director
-        .mark_action_failed(&uuid, &error_message)
-        .await
-    {
+    let conn = match state.connection_factory.open().await {
+        Ok(conn) => conn,
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let director = Director::new(&conn);
+
+    match director.mark_action_failed(&uuid, &error_message).await {
         Ok(_) => Ok(NoContent),
         Err(e) => {
             warn!("Couldn't mark action failed for {uuid}: {e}");
@@ -384,8 +402,14 @@ async fn get_bmc_config(
     State(state): State<Arc<AppState>>,
     extract::Path(uuid): extract::Path<Uuid>,
 ) -> Result<extract::Json<BmcConfig>, StatusCode> {
+    let conn = match state.connection_factory.open().await {
+        Ok(conn) => conn,
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let director = Director::new(&conn);
+
     // Get device
-    let mut device = match state.director.get_device(&uuid).await {
+    let mut device = match director.get_device(&uuid).await {
         Ok(device) => device,
         Err(e) => {
             warn!("Failed to get device {}: {}", uuid, e);
@@ -433,11 +457,7 @@ async fn get_bmc_config(
             }
         };
 
-        if let Err(e) = state
-            .director
-            .update_attributes(&uuid, attributes_json)
-            .await
-        {
+        if let Err(e) = director.update_attributes(&uuid, attributes_json).await {
             warn!("Failed to save BMC config for device {}: {}", uuid, e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
@@ -463,7 +483,7 @@ async fn get_bmc_config(
 
 #[cfg(test)]
 mod tests {
-    use crate::{database, director::Director, storage::ImageStore};
+    use crate::{director::Director, storage::ImageStore};
 
     use super::*;
     use axum::{
@@ -497,13 +517,10 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        let db = database::open(&db_path).unwrap();
-        let db_tokio = Arc::new(tokio::sync::Mutex::new(db));
 
         // Note: No default network is created. Tests that need networks should create them explicitly.
 
         // Create image store for testing
-        let _storage_path = temp_dir.path().join("images");
         let image_store = ImageStore::memory("http://localhost:8080");
 
         // Create agent-image directory with mock files for testing
@@ -529,38 +546,47 @@ mod tests {
         let boot_file_provider =
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
+        let conn: Arc<dyn crate::database::ConnectionFactory> = Arc::new(
+            crate::database::DatabaseConnectionFactory::new(db_path.clone()),
+        );
+        // Run migrations; drop the returned connection (file-backed DB persists)
+        let _ = crate::database::run_migrations(conn.as_ref())
+            .await
+            .unwrap();
+
         let state = Arc::new(AppState {
-            director: Director::new(db_tokio.clone()),
-            dhcp_store: crate::dhcp::DhcpStore::new(db_tokio.clone()),
+            connection_factory: conn,
             image_store: Arc::new(image_store),
-            os_store: crate::operating_systems::OperatingSystemsStore::new(db_tokio.clone()),
-            roles_store: crate::roles::RolesStore::new(db_tokio.clone()),
-            platforms_store: crate::platforms::PlatformsStore::new(db_tokio),
             agent_images_path,
             boot_file_provider,
         });
         (state, temp_dir)
     }
 
+    /// Open a database connection for test assertions.
+    ///
+    /// Usage: `let db = test_db(&state).await; let director = Director::new(&db);`
+    async fn test_db(state: &AppState) -> crate::database::Connection {
+        state.connection_factory.open().await.unwrap()
+    }
+
     /// Helper to create a test network for tests that need DHCP functionality
     async fn create_test_network(state: &AppState, autodiscovery: bool) -> i64 {
-        let network = state
-            .dhcp_store
-            .create_network(
-                "Test Network",
-                "10.0.0.0/24",
-                "10.0.0.1",
-                &["8.8.8.8".to_string()],
-                86400,
-                None,
-                autodiscovery,
-            )
-            .await
-            .unwrap();
+        let conn = Arc::new(state.connection_factory.open().await.unwrap());
+        let network = crate::dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "10.0.0.0/24",
+            "10.0.0.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            autodiscovery,
+        )
+        .await
+        .unwrap();
 
-        state
-            .dhcp_store
-            .create_pool(network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
+        crate::dhcp::store::create_pool(&conn, network.id, "Test Pool", "10.0.0.100", "10.0.0.200")
             .await
             .unwrap();
 
@@ -600,8 +626,8 @@ mod tests {
         let uuid = test_uuid(1);
 
         {
-            state
-                .director
+            let conn = test_db(&state).await;
+            Director::new(&conn)
                 .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -676,18 +702,22 @@ mod tests {
         let test_mac = &test_mac(0x00);
 
         // Create a pending device for this MAC
-        state
-            .director
-            .create_pending_device(test_mac, network_id)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .create_pending_device(test_mac, network_id)
+                .await
+                .unwrap();
+        }
 
         // Verify pending device exists
-        let pending_id = state
-            .director
-            .find_pending_device_by_mac(test_mac)
-            .await
-            .unwrap();
+        let pending_id = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .find_pending_device_by_mac(test_mac)
+                .await
+                .unwrap()
+        };
         assert!(pending_id.is_some());
 
         let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
@@ -705,14 +735,22 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Device should be registered
-        assert!(state.director.device_exists(&test_uuid).await.unwrap());
+        assert!({
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .device_exists(&test_uuid)
+                .await
+                .unwrap()
+        });
 
         // Pending device should be completed (removed from pending_devices table)
-        let pending_id = state
-            .director
-            .find_pending_device_by_mac(test_mac)
-            .await
-            .unwrap();
+        let pending_id = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .find_pending_device_by_mac(test_mac)
+                .await
+                .unwrap()
+        };
         assert!(pending_id.is_none(), "Pending device should be completed");
     }
 
@@ -726,12 +764,15 @@ mod tests {
         let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
-        state.director.create_plan(&plan).await.unwrap();
+        {
+            let conn = test_db(&state).await;
+            let director = Director::new(&conn);
+            director
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+            director.create_plan(&plan).await.unwrap();
+        }
 
         let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
@@ -760,12 +801,15 @@ mod tests {
         let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
-        state.director.create_plan(&plan).await.unwrap();
+        {
+            let conn = test_db(&state).await;
+            let director = Director::new(&conn);
+            director
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+            director.create_plan(&plan).await.unwrap();
+        }
 
         let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
@@ -793,11 +837,13 @@ mod tests {
         let test_uuid = test_uuid(0x05);
 
         // Register device but don't create a plan
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
@@ -822,9 +868,10 @@ mod tests {
         let network_id = create_test_network(&state, true).await;
         let test_uuid = test_uuid(0x99);
         let test_mac = test_mac(0x00);
-        state
-            .dhcp_store
-            .create_or_update_lease_with_network(
+        {
+            let conn = Arc::new(state.connection_factory.open().await.unwrap());
+            crate::dhcp::store::create_or_update_lease_with_network(
+                &conn,
                 &test_mac,
                 &Ipv4Addr::UNSPECIFIED,
                 None,
@@ -834,9 +881,16 @@ mod tests {
             )
             .await
             .unwrap();
+        }
 
         // Verify device doesn't exist yet
-        assert!(!state.director.device_exists(&test_uuid).await.unwrap());
+        assert!({
+            let conn = test_db(&state).await;
+            !Director::new(&conn)
+                .device_exists(&test_uuid)
+                .await
+                .unwrap()
+        });
 
         let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
@@ -853,22 +907,32 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Device should now exist
-        assert!(state.director.device_exists(&test_uuid).await.unwrap());
+        assert!({
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .device_exists(&test_uuid)
+                .await
+                .unwrap()
+        });
 
         // Device should be in "new" state
-        let lifecycle = state
-            .director
-            .get_device_lifecycle(&test_uuid)
-            .await
-            .unwrap();
+        let lifecycle = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .get_device_lifecycle(&test_uuid)
+                .await
+                .unwrap()
+        };
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
 
         // Device should have an active discovery plan with 2 actions
-        let active_plan = state
-            .director
-            .get_active_plan_for_device(&test_uuid)
-            .await
-            .unwrap();
+        let active_plan = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .get_active_plan_for_device(&test_uuid)
+                .await
+                .unwrap()
+        };
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
         assert_eq!(plan.actions.len(), 2);
@@ -905,20 +969,21 @@ mod tests {
         let test_uuid = test_uuid(0x98);
 
         // Register device and start discovery transition
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
-
-        state
-            .director
-            .start_lifecycle_transition(
-                &test_uuid,
-                crate::lifecycle::DeviceLifecycle::Unprovisioned,
-            )
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            let director = Director::new(&conn);
+            director
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+            director
+                .start_lifecycle_transition(
+                    &test_uuid,
+                    crate::lifecycle::DeviceLifecycle::Unprovisioned,
+                )
+                .await
+                .unwrap();
+        }
 
         // Simulate agent updating attributes
         let update_payload = UpdateAttributesQuery {
@@ -945,7 +1010,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify attributes were updated
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         assert_eq!(
             device.attributes.manufacturer.as_ref().unwrap(),
             "Dell Inc."
@@ -969,11 +1037,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify device is still in New state (configure_bmc action still pending)
-        let lifecycle = state
-            .director
-            .get_device_lifecycle(&test_uuid)
-            .await
-            .unwrap();
+        let lifecycle = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .get_device_lifecycle(&test_uuid)
+                .await
+                .unwrap()
+        };
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
 
         // Simulate agent reporting success for second action (configure_bmc)
@@ -988,22 +1058,26 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // Verify device transitioned to Unprovisioned after both actions complete
-        let lifecycle = state
-            .director
-            .get_device_lifecycle(&test_uuid)
-            .await
-            .unwrap();
+        let lifecycle = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .get_device_lifecycle(&test_uuid)
+                .await
+                .unwrap()
+        };
         assert_eq!(
             lifecycle,
             Some(crate::lifecycle::DeviceLifecycle::Unprovisioned)
         );
 
         // Verify no active plan
-        let active_plan = state
-            .director
-            .get_active_plan_for_device(&test_uuid)
-            .await
-            .unwrap();
+        let active_plan = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .get_active_plan_for_device(&test_uuid)
+                .await
+                .unwrap()
+        };
         assert!(active_plan.is_none());
     }
 
@@ -1104,26 +1178,28 @@ mod tests {
         let test_uuid = test_uuid(0x60);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            let director = Director::new(&conn);
+            director
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
 
-        // Set BMC config without credentials
-        let mut attributes = serde_json::Map::new();
-        attributes.insert(
-            "bmc_config".to_string(),
-            serde_json::json!({
-                "ip_address_source": "dhcp"
-            }),
-        );
+            // Set BMC config without credentials
+            let mut attributes = serde_json::Map::new();
+            attributes.insert(
+                "bmc_config".to_string(),
+                serde_json::json!({
+                    "ip_address_source": "dhcp"
+                }),
+            );
 
-        state
-            .director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
+            director
+                .update_attributes(&test_uuid, attributes)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1149,7 +1225,10 @@ mod tests {
         assert_eq!(bmc_config.password.unwrap().len(), 16);
 
         // Verify credentials were saved to device
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         assert_eq!(
             device.attributes.bmc_config.as_ref().unwrap().username,
             Some("RACKDIRECTOR".to_string())
@@ -1171,31 +1250,33 @@ mod tests {
         let test_uuid = test_uuid(0x61);
 
         // Register device
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            let director = Director::new(&conn);
+            director
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
 
-        // Set BMC config with existing credentials
-        let mut attributes = serde_json::Map::new();
-        attributes.insert(
-            "bmc_config".to_string(),
-            serde_json::json!({
-                "ip_address_source": "static",
-                "ip_address": "10.0.1.100",
-                "netmask": "255.255.255.0",
-                "gateway": "10.0.1.1",
-                "username": "existing_user",
-                "password": "existing_pass"
-            }),
-        );
+            // Set BMC config with existing credentials
+            let mut attributes = serde_json::Map::new();
+            attributes.insert(
+                "bmc_config".to_string(),
+                serde_json::json!({
+                    "ip_address_source": "static",
+                    "ip_address": "10.0.1.100",
+                    "netmask": "255.255.255.0",
+                    "gateway": "10.0.1.1",
+                    "username": "existing_user",
+                    "password": "existing_pass"
+                }),
+            );
 
-        state
-            .director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
+            director
+                .update_attributes(&test_uuid, attributes)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1226,11 +1307,13 @@ mod tests {
         let test_uuid = test_uuid(0x62);
 
         // Register device without BMC config
-        state
-            .director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
-            .await
-            .unwrap();
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
 
         let app = routes(state.clone());
 
@@ -1256,7 +1339,10 @@ mod tests {
         assert!(bmc_config.password.is_some());
 
         // Verify config was saved to device
-        let device = state.director.get_device(&test_uuid).await.unwrap();
+        let device = {
+            let conn = test_db(&state).await;
+            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+        };
         assert!(device.attributes.bmc_config.is_some());
     }
 }

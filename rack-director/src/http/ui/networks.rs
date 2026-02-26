@@ -1,6 +1,6 @@
 use super::super::{AppState, error::Error as HttpError};
 use super::validation::{validate_create_network_request, validate_update_network_request};
-use crate::dhcp::{DhcpNetwork, DhcpPool, Lease, StaticReservation};
+use crate::dhcp::{self, DhcpNetwork, DhcpPool, Lease, StaticReservation};
 use crate::director::Device;
 use axum::{
     Json, Router,
@@ -103,7 +103,8 @@ pub struct MakeStaticRequest {
 async fn list_networks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<DhcpNetwork>>, HttpError> {
-    let networks = state.dhcp_store.list_networks().await?;
+    let conn = state.connection_factory.open().await?;
+    let networks = crate::dhcp::store::list_networks(&conn).await?;
     Ok(Json(networks))
 }
 
@@ -112,7 +113,8 @@ async fn get_network(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<DhcpNetwork>, HttpError> {
-    let network = state.dhcp_store.get_network(id).await?;
+    let conn = state.connection_factory.open().await?;
+    let network = crate::dhcp::store::get_network(&conn, id).await?;
     Ok(Json(network))
 }
 
@@ -122,23 +124,26 @@ async fn create_network(
     Json(req): Json<CreateNetworkRequest>,
 ) -> Result<(StatusCode, Json<DhcpNetwork>), HttpError> {
     log::debug!("create network request: {:?}", req);
+
+    // Open a connection for raw store calls; DhcpStore uses the factory for its own connections
+    let conn: crate::database::Connection = state.connection_factory.open().await?;
+
     // Validate request
-    if let Err(errors) = validate_create_network_request(&req, &state.dhcp_store).await {
+    if let Err(errors) = validate_create_network_request(&conn, &req).await {
         return Err(HttpError::ValidationError(errors));
     }
 
-    let network = state
-        .dhcp_store
-        .create_network(
-            &req.name,
-            &req.subnet,
-            &req.gateway,
-            &req.dns_servers,
-            req.lease_duration,
-            req.relay_agent_address.as_deref(),
-            req.enable_autodiscovery,
-        )
-        .await?;
+    let network = dhcp::store::create_network(
+        &conn,
+        &req.name,
+        &req.subnet,
+        &req.gateway,
+        &req.dns_servers,
+        req.lease_duration,
+        req.relay_agent_address.as_deref(),
+        req.enable_autodiscovery,
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(network)))
 }
@@ -150,26 +155,29 @@ async fn update_network(
     Json(req): Json<UpdateNetworkRequest>,
 ) -> Result<Json<DhcpNetwork>, HttpError> {
     log::debug!("update network request: {:?}", req);
+
+    // Open a connection for raw store calls; DhcpStore uses the factory for its own connections
+    let mut conn = state.connection_factory.open().await?;
+
     // Validate request
-    if let Err(errors) = validate_update_network_request(id, &req, &state.dhcp_store).await {
+    if let Err(errors) = validate_update_network_request(&conn, id, &req).await {
         return Err(HttpError::ValidationError(errors));
     }
 
-    let network = state
-        .dhcp_store
-        .update_network(
-            id,
-            req.name.as_deref(),
-            req.subnet.as_deref(),
-            req.gateway.as_deref(),
-            req.dns_servers.as_deref(),
-            req.lease_duration,
-            req.relay_agent_address
-                .as_deref()
-                .map(|opt| if opt.is_empty() { None } else { Some(opt) }),
-            req.enable_autodiscovery,
-        )
-        .await?;
+    let network = crate::dhcp::store::update_network(
+        &mut conn,
+        id,
+        req.name.as_deref(),
+        req.subnet.as_deref(),
+        req.gateway.as_deref(),
+        req.dns_servers.as_deref(),
+        req.lease_duration,
+        req.relay_agent_address
+            .as_deref()
+            .map(|opt| if opt.is_empty() { None } else { Some(opt) }),
+        req.enable_autodiscovery,
+    )
+    .await?;
 
     Ok(Json(network))
 }
@@ -179,7 +187,8 @@ async fn delete_network(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, HttpError> {
-    state.dhcp_store.delete_network(id).await?;
+    let conn = state.connection_factory.open().await?;
+    crate::dhcp::store::delete_network(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -190,7 +199,8 @@ async fn list_pools(
     State(state): State<Arc<AppState>>,
     Path(network_id): Path<i64>,
 ) -> Result<Json<Vec<DhcpPool>>, HttpError> {
-    let pools = state.dhcp_store.list_pools_for_network(network_id).await?;
+    let conn = state.connection_factory.open().await?;
+    let pools = crate::dhcp::store::list_pools_for_network(&conn, network_id).await?;
     Ok(Json(pools))
 }
 
@@ -200,10 +210,15 @@ async fn create_pool(
     Path(network_id): Path<i64>,
     Json(req): Json<CreatePoolRequest>,
 ) -> Result<(StatusCode, Json<DhcpPool>), HttpError> {
-    let pool = state
-        .dhcp_store
-        .create_pool(network_id, &req.name, &req.range_start, &req.range_end)
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let pool = crate::dhcp::store::create_pool(
+        &conn,
+        network_id,
+        &req.name,
+        &req.range_start,
+        &req.range_end,
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(pool)))
 }
@@ -214,15 +229,15 @@ async fn update_pool(
     Path(id): Path<i64>,
     Json(req): Json<UpdatePoolRequest>,
 ) -> Result<Json<DhcpPool>, HttpError> {
-    let pool = state
-        .dhcp_store
-        .update_pool(
-            id,
-            req.name.as_deref(),
-            req.range_start.as_deref(),
-            req.range_end.as_deref(),
-        )
-        .await?;
+    let mut conn = state.connection_factory.open().await?;
+    let pool = crate::dhcp::store::update_pool(
+        &mut conn,
+        id,
+        req.name.as_deref(),
+        req.range_start.as_deref(),
+        req.range_end.as_deref(),
+    )
+    .await?;
 
     Ok(Json(pool))
 }
@@ -232,7 +247,8 @@ async fn delete_pool(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, HttpError> {
-    state.dhcp_store.delete_pool(id).await?;
+    let conn = state.connection_factory.open().await?;
+    crate::dhcp::store::delete_pool(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -243,10 +259,8 @@ async fn list_static_reservations(
     State(state): State<Arc<AppState>>,
     Path(network_id): Path<i64>,
 ) -> Result<Json<Vec<StaticReservation>>, HttpError> {
-    let reservations = state
-        .dhcp_store
-        .list_static_reservations(network_id)
-        .await?;
+    let conn = state.connection_factory.open().await?;
+    let reservations = crate::dhcp::store::list_static_reservations(&conn, network_id).await?;
     Ok(Json(reservations))
 }
 
@@ -256,8 +270,10 @@ async fn create_static_reservation(
     Path(network_id): Path<i64>,
     Json(req): Json<CreateStaticReservationRequest>,
 ) -> Result<(StatusCode, Json<StaticReservation>), HttpError> {
+    let conn = state.connection_factory.open().await?;
+
     // Fetch the network to get the subnet
-    let network = state.dhcp_store.get_network(network_id).await?;
+    let network = crate::dhcp::store::get_network(&conn, network_id).await?;
 
     // Validate the IP is within the subnet
     let subnet: Ipv4Subnet = network.subnet.parse()?;
@@ -267,15 +283,14 @@ async fn create_static_reservation(
         ));
     }
 
-    let reservation = state
-        .dhcp_store
-        .create_static_reservation(
-            network_id,
-            &req.mac_address,
-            &req.ip_address,
-            req.hostname.as_deref(),
-        )
-        .await?;
+    let reservation = crate::dhcp::store::create_static_reservation(
+        &conn,
+        network_id,
+        &req.mac_address,
+        &req.ip_address,
+        req.hostname.as_deref(),
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(reservation)))
 }
@@ -285,7 +300,8 @@ async fn delete_static_reservation(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, HttpError> {
-    state.dhcp_store.delete_static_reservation(id).await?;
+    let conn = state.connection_factory.open().await?;
+    crate::dhcp::store::delete_static_reservation(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -299,11 +315,13 @@ async fn list_leases_by_network(
     State(state): State<Arc<AppState>>,
     Path(network_id): Path<i64>,
 ) -> Result<Json<Vec<Lease>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+
     // Fetch leases for the network
-    let mut leases = state.dhcp_store.get_leases_by_network(network_id).await?;
+    let mut leases = crate::dhcp::store::get_leases_by_network(&conn, network_id).await?;
 
     // Fetch all devices for MAC lookup
-    let devices = state.director.get_all_devices().await?;
+    let devices = crate::director::store::get_all_devices(&conn).await?;
 
     // For each lease without a device_uuid, try to find it by MAC address
     for lease in &mut leases {
@@ -324,10 +342,10 @@ async fn make_lease_static(
     Path(lease_id): Path<i64>,
     Json(req): Json<MakeStaticRequest>,
 ) -> Result<(StatusCode, Json<StaticReservation>), HttpError> {
+    let conn = state.connection_factory.open().await?;
+
     // Get the lease by ID
-    let lease = state
-        .dhcp_store
-        .get_lease_by_id(lease_id)
+    let lease = crate::dhcp::store::get_lease_by_id(&conn, lease_id)
         .await?
         .ok_or_else(|| HttpError::NotFound(format!("Lease {} not found", lease_id)))?;
 
@@ -337,7 +355,7 @@ async fn make_lease_static(
         .ok_or_else(|| HttpError::BadRequest("Lease has no associated network".to_string()))?;
 
     // Fetch the network to get the subnet
-    let network = state.dhcp_store.get_network(network_id).await?;
+    let network = crate::dhcp::store::get_network(&conn, network_id).await?;
 
     // Determine the IP address to use (from request or lease)
     let ip_address = req.ip_address.as_deref().unwrap_or(&lease.ip_address);
@@ -354,15 +372,14 @@ async fn make_lease_static(
     let hostname = req.hostname.or(lease.hostname);
 
     // Create static reservation
-    let reservation = state
-        .dhcp_store
-        .create_static_reservation(
-            network_id,
-            &lease.mac_address,
-            ip_address,
-            hostname.as_deref(),
-        )
-        .await?;
+    let reservation = crate::dhcp::store::create_static_reservation(
+        &conn,
+        network_id,
+        &lease.mac_address,
+        ip_address,
+        hostname.as_deref(),
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(reservation)))
 }

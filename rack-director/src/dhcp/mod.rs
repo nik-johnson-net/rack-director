@@ -5,21 +5,18 @@ mod handler;
 mod ip_discovery;
 pub mod message_builder;
 mod request;
-mod store;
+pub mod store;
 
 use anyhow::Result;
-use rusqlite::Connection;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
-use crate::director::Director;
+use crate::database::ConnectionFactory;
 
 pub use ip_discovery::discover_server_identifier;
-pub use store::{DhcpNetwork, DhcpPool, DhcpStore, Lease, LeaseState, StaticReservation};
+pub use store::{DhcpNetwork, DhcpPool, Lease, LeaseState, StaticReservation};
 
-use allocator::IpAllocator;
 use boot_config::BootConfigProvider;
 use device_resolution::DirectorDeviceResolver;
 use handler::DhcpHandler;
@@ -38,23 +35,21 @@ pub struct StartResult {
 
 impl DhcpServer {
     pub async fn new(
-        db: Arc<Mutex<Connection>>,
-        director: Director,
+        conn: Arc<dyn ConnectionFactory>,
         tftp_server: String,
         http_server: String,
         boot_file_provider: Arc<dyn BootFileProvider>,
         server_identifier: Ipv4Addr,
         address: Option<SocketAddr>,
     ) -> Result<Self> {
-        let store = DhcpStore::new(db);
-
         log::info!("DHCP server configuration:");
         log::info!("  TFTP Server: {}", tftp_server);
         log::info!("  HTTP Server: {}", http_server);
         log::info!("  Server Identifier: {}", server_identifier);
 
         // List networks at startup for diagnostic purposes
-        let networks = store.list_networks().await?;
+        let startup_db = conn.open().await?;
+        let networks = store::list_networks(&startup_db).await?;
         log::info!("  Configured networks: {}", networks.len());
         for network in &networks {
             log::info!(
@@ -66,16 +61,9 @@ impl DhcpServer {
             );
         }
 
-        let allocator = IpAllocator::new(store.clone());
         let boot_config = BootConfigProvider::new(tftp_server, http_server, boot_file_provider);
-        let device_resolver = Arc::new(DirectorDeviceResolver::new(director));
-        let handler = DhcpHandler::new(
-            store,
-            device_resolver,
-            allocator,
-            boot_config,
-            server_identifier,
-        );
+        let device_resolver = Arc::new(DirectorDeviceResolver::new());
+        let handler = DhcpHandler::new(conn, device_resolver, boot_config, server_identifier);
 
         Ok(Self {
             handler,
@@ -124,12 +112,16 @@ impl DhcpServer {
 }
 
 /// Spawn a background task that periodically deletes expired DHCP leases.
-pub fn spawn_lease_cleanup_task(store: DhcpStore) -> JoinHandle<()> {
+pub fn spawn_lease_cleanup_task(connection_factory: Arc<dyn ConnectionFactory>) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let conn = connection_factory
+            .open()
+            .await
+            .expect("Failed to open database");
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            match store.delete_expired_leases().await {
+            match store::delete_expired_leases(&conn).await {
                 Ok(count) if count > 0 => log::info!("Cleaned up {} expired DHCP lease(s)", count),
                 Ok(_) => {}
                 Err(e) => log::error!("Failed to clean up expired DHCP leases: {}", e),
@@ -142,19 +134,20 @@ pub fn spawn_lease_cleanup_task(store: DhcpStore) -> JoinHandle<()> {
 mod tests {
 
     use super::*;
-    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_dhcp_server_creation() {
         use crate::boot_files::FilesystemBootFileProvider;
+        use tempfile::tempdir;
 
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let conn = crate::database::open(db_path).unwrap();
-        let db = Arc::new(Mutex::new(conn));
-        let director = Director::new(db.clone());
+        let conn: Arc<dyn ConnectionFactory> = Arc::new(crate::test_connection_factory!());
+        // Run migrations and keep the connection alive so the in-memory DB persists
+        let _migration_conn = crate::database::run_migrations(conn.as_ref())
+            .await
+            .unwrap();
 
         // Create a temporary boot files directory for testing
+        let temp_dir = tempdir().unwrap();
         let boot_files_dir = temp_dir.path().join("boot_files");
         std::fs::create_dir_all(&boot_files_dir).unwrap();
         let boot_file_provider =
@@ -162,8 +155,7 @@ mod tests {
 
         let server_identifier = "10.0.0.1".parse().unwrap();
         let server = DhcpServer::new(
-            db,
-            director,
+            conn,
             "10.0.0.1:69".to_string(),
             "http://10.0.0.1:3000".to_string(),
             boot_file_provider,
