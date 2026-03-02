@@ -402,6 +402,20 @@ pub async fn list_networks(conn: &Connection) -> Result<Vec<DhcpNetwork>> {
     Ok(networks)
 }
 
+/// Returns all DHCP networks configured for L2 (relay_agent_address IS NULL).
+pub async fn get_l2_networks(conn: &Connection) -> Result<Vec<DhcpNetwork>> {
+    let networks = conn
+        .query(
+            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, \
+             relay_agent_address, enable_autodiscovery, created_at, updated_at \
+             FROM dhcp_networks WHERE relay_agent_address IS NULL",
+            (),
+            DhcpNetwork::from_row,
+        )
+        .await?;
+    Ok(networks)
+}
+
 /// Create a new network.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_network(
@@ -813,6 +827,31 @@ mod tests {
         assert_eq!(network.name, "Test Network");
         assert_eq!(network.subnet, "10.0.0.0/24");
         assert_eq!(network.gateway, "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_get_l2_networks() {
+        let (db, _) = setup_db_with_network(test_database_path!()).await;
+
+        // Create a relay network (relay_agent_address IS NOT NULL)
+        create_network(
+            &db,
+            "Relay Network",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let l2 = get_l2_networks(&db).await.unwrap();
+        // Only the L2 network (no relay_agent_address) should be returned
+        assert_eq!(l2.len(), 1);
+        assert_eq!(l2[0].name, "Test Network");
+        assert!(l2[0].relay_agent_address.is_none());
     }
 
     #[tokio::test]

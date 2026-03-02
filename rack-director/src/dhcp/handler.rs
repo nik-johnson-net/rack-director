@@ -8,15 +8,30 @@ use dhcproto::{
 use log::{debug, info, trace, warn};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::net::UdpSocket;
+use tokio_recvmsg::PktInfo;
 
 use super::allocator;
 use super::boot_config::BootConfigProvider;
 use super::device_resolution::{DeviceContext, DeviceResolver};
+use super::interface;
 use super::message_builder;
 use super::request::{RequestContext, extract_server_identifier};
 use super::store::{self, DhcpNetwork, LeaseState, format_mac};
 use crate::database::{Connection, ConnectionFactory};
+
+/// Reply to send after processing a DHCP packet.
+pub enum DhcpReply {
+    /// L2 client response. `local_ip` selects which per-network socket to send from.
+    /// `peer_addr` is the source address of the received packet — used to decide
+    /// whether to broadcast (peer IP is unspecified) or unicast (peer IP is set, e.g. test/renewal).
+    L2 {
+        data: Vec<u8>,
+        local_ip: Ipv4Addr,
+        peer_addr: SocketAddr,
+    },
+    /// Relay agent response — unicast to the relay agent on port 67.
+    Relay { data: Vec<u8>, dest: SocketAddr },
+}
 
 /// Determines the appropriate vendor class identifier (Option 60) based on client architecture.
 ///
@@ -76,101 +91,154 @@ impl DhcpHandler {
         }
     }
 
+    /// Handle a DHCP packet received on the wildcard broadcast socket.
+    ///
+    /// Uses the `PktInfo` (interface index and destination address) from recvmsg to identify
+    /// which L2 network the packet belongs to. For relay-agent packets (giaddr != 0), falls
+    /// back to relay-based network selection.
     pub async fn handle_packet(
         &self,
         data: &[u8],
-        peer_addr: SocketAddr,
-        socket: Arc<UdpSocket>,
-    ) -> Result<()> {
-        // Decode DHCP message using dhcproto
+        pkt_info: &PktInfo,
+    ) -> Result<Option<DhcpReply>> {
         let msg = match Message::decode(&mut Decoder::new(data)) {
             Ok(msg) => msg,
             Err(e) => {
                 log::warn!("Failed to decode DHCP message: {}", e);
-                return Ok(());
+                return Ok(None);
             }
         };
 
         trace!("DHCP: Received packet {:?}", msg);
-
-        // Open one connection per packet to avoid shared-connection contention
         let conn = self.db.open().await?;
 
-        // Extract relay agent address (giaddr)
-        let relay_agent = if msg.giaddr() != Ipv4Addr::UNSPECIFIED {
-            Some(msg.giaddr())
-        } else {
-            None
-        };
+        // If relay agent (giaddr != 0), use relay-based network selection
+        if msg.giaddr() != Ipv4Addr::UNSPECIFIED {
+            let relay_agent = msg.giaddr();
+            let network = match store::get_network_by_relay(&conn, Some(relay_agent)).await? {
+                Some(n) => n,
+                None => {
+                    log::warn!("No network found for relay agent {}", relay_agent);
+                    return Ok(None);
+                }
+            };
+            debug!(
+                "Using network '{}' (id={}) for relay {}",
+                network.name, network.id, relay_agent
+            );
+            let dest = SocketAddr::new(relay_agent.into(), 67);
+            return self
+                .process_and_reply(&conn, &msg, &network, self.server_identifier, move |data| {
+                    DhcpReply::Relay { data, dest }
+                })
+                .await;
+        }
 
-        // Match to network based on relay agent
-        let network = match store::get_network_by_relay(&conn, relay_agent).await? {
-            Some(network) => network,
-            None => {
-                log::warn!("No network found for relay agent {:?}", relay_agent);
-                return Ok(());
+        // L2 path: use interface index to find matching network
+        let l2_networks = store::get_l2_networks(&conn).await?;
+        let Some((network, local_ip)) =
+            interface::find_matching_l2_network(pkt_info.if_index, &l2_networks)?
+        else {
+            debug!(
+                "No L2 network matches interface {}, dropping",
+                pkt_info.if_index
+            );
+            return Ok(None);
+        };
+        debug!(
+            "Using network '{}' (id={}) for interface index {} (local_ip={})",
+            network.name, network.id, pkt_info.if_index, local_ip
+        );
+        let peer_addr = pkt_info.addr_src;
+        self.process_and_reply(&conn, &msg, network, local_ip, move |data| DhcpReply::L2 {
+            data,
+            local_ip,
+            peer_addr,
+        })
+        .await
+    }
+
+    /// Handle a DHCP packet received on a per-network socket (unicast renewals).
+    ///
+    /// The `local_ip` is the address the per-network socket is bound to, which identifies
+    /// which L2 network this packet belongs to.
+    pub async fn handle_l2_unicast_packet(
+        &self,
+        data: &[u8],
+        peer_addr: SocketAddr,
+        local_ip: Ipv4Addr,
+    ) -> Result<Option<DhcpReply>> {
+        let msg = match Message::decode(&mut Decoder::new(data)) {
+            Ok(msg) => msg,
+            Err(e) => {
+                log::warn!("Failed to decode DHCP message: {}", e);
+                return Ok(None);
             }
         };
 
-        debug!(
-            "Using network '{}' (id={}) for relay {:?}",
-            network.name, network.id, relay_agent
-        );
+        trace!("DHCP unicast: Received packet {:?}", msg);
+        let conn = self.db.open().await?;
 
+        let l2_networks = store::get_l2_networks(&conn).await?;
+        let Some(network) = interface::find_l2_network_for_ip(local_ip, &l2_networks)? else {
+            debug!("No L2 network matches local IP {}, dropping", local_ip);
+            return Ok(None);
+        };
+        debug!(
+            "Unicast: Using network '{}' (id={}) for local_ip={}",
+            network.name, network.id, local_ip
+        );
+        self.process_and_reply(&conn, &msg, network, local_ip, move |data| DhcpReply::L2 {
+            data,
+            local_ip,
+            peer_addr,
+        })
+        .await
+    }
+
+    /// Shared logic for processing a DHCP message against a selected network and producing a reply.
+    async fn process_and_reply<F>(
+        &self,
+        conn: &Connection,
+        msg: &Message,
+        network: &DhcpNetwork,
+        server_identifier: Ipv4Addr,
+        make_reply: F,
+    ) -> Result<Option<DhcpReply>>
+    where
+        F: FnOnce(Vec<u8>) -> DhcpReply,
+    {
         let response = match msg.opts().msg_type() {
-            Some(MessageType::Discover) => self.handle_discover(&conn, &msg, &network).await?,
-            Some(MessageType::Request) => self.handle_request(&conn, &msg, &network).await?,
+            Some(MessageType::Discover) => {
+                self.handle_discover(conn, msg, network, server_identifier)
+                    .await?
+            }
+            Some(MessageType::Request) => {
+                self.handle_request(conn, msg, network, server_identifier)
+                    .await?
+            }
             Some(MessageType::Release) => {
-                self.handle_release(&conn, &msg).await?;
+                self.handle_release(conn, msg).await?;
                 None
             }
             Some(MessageType::Decline) => {
-                self.handle_decline(&conn, &msg).await?;
+                self.handle_decline(conn, msg).await?;
                 None
             }
             _ => {
                 log::debug!("Ignoring unsupported DHCP message type");
-                return Ok(());
+                return Ok(None);
             }
         };
 
         if let Some(resp) = response {
             trace!("DHCP: Sending response {:?}", resp);
-            self.send_response(resp, &msg, peer_addr, socket).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Send DHCP response following RFC 3046 relay agent rules
-    async fn send_response(
-        &self,
-        resp: Message,
-        req: &Message,
-        peer_addr: SocketAddr,
-        socket: Arc<UdpSocket>,
-    ) -> Result<()> {
-        let mut buf = Vec::new();
-        resp.encode(&mut Encoder::new(&mut buf))?;
-
-        // RFC 3046: If giaddr is set, send to relay agent on port 67
-        // Otherwise, send to peer (broadcast or unicast)
-        let dest = if req.giaddr() != Ipv4Addr::UNSPECIFIED {
-            SocketAddr::new(req.giaddr().into(), 67)
+            let mut buf = Vec::new();
+            resp.encode(&mut Encoder::new(&mut buf))?;
+            Ok(Some(make_reply(buf)))
         } else {
-            // For localhost testing, we send unicast to the peer address
-            // In production, this would be broadcast to 255.255.255.255:68
-            if peer_addr.ip().is_unspecified() {
-                SocketAddr::new(Ipv4Addr::BROADCAST.into(), 68)
-            } else {
-                peer_addr
-            }
-        };
-
-        debug!("Sending DHCP response to {}", dest);
-        socket.send_to(&buf, dest).await?;
-
-        Ok(())
+            Ok(None)
+        }
     }
 
     async fn handle_discover(
@@ -178,6 +246,7 @@ impl DhcpHandler {
         conn: &Connection,
         msg: &Message,
         network: &DhcpNetwork,
+        server_identifier: Ipv4Addr,
     ) -> Result<Option<Message>> {
         let req_ctx = RequestContext::from_message(msg);
 
@@ -203,7 +272,7 @@ impl DhcpHandler {
                 dev_ctx
                     .device_uuid
                     .as_ref()
-                    .map(|u| u.to_string())
+                    .map(|u: &uuid::Uuid| u.to_string())
                     .unwrap_or_default(),
                 dev_ctx.disable_reason.as_deref().unwrap_or("unknown")
             );
@@ -235,7 +304,7 @@ impl DhcpHandler {
         .await?;
 
         let offer = self
-            .build_offer(msg, ip, network, &req_ctx, &dev_ctx)
+            .build_offer(msg, ip, network, &req_ctx, &dev_ctx, server_identifier)
             .await?;
         info!(
             "DHCP OFFER {} to MAC {} on network '{}'",
@@ -250,18 +319,19 @@ impl DhcpHandler {
         conn: &Connection,
         msg: &Message,
         network: &DhcpNetwork,
+        server_identifier: Ipv4Addr,
     ) -> Result<Option<Message>> {
         let req_ctx = RequestContext::from_message(msg);
 
         // Check Server Identifier option (Option 54) per RFC 2131 Section 4.3.2
         // If present, only respond if it matches our server identifier
         if let Some(server_id) = extract_server_identifier(msg)
-            && server_id != self.server_identifier
+            && server_id != server_identifier
         {
             // This request is for a different DHCP server - ignore it
             debug!(
                 "Ignoring DHCPREQUEST from {} - server identifier {} doesn't match ours {}",
-                req_ctx.mac, server_id, self.server_identifier
+                req_ctx.mac, server_id, server_identifier
             );
             return Ok(None);
         }
@@ -290,7 +360,7 @@ impl DhcpHandler {
                 dev_ctx
                     .device_uuid
                     .as_ref()
-                    .map(|u| u.to_string())
+                    .map(|u: &uuid::Uuid| u.to_string())
                     .unwrap_or_default(),
                 dev_ctx.disable_reason.as_deref().unwrap_or("unknown")
             );
@@ -304,7 +374,7 @@ impl DhcpHandler {
             req_ctx.ciaddr
         } else {
             warn!("DHCP REQUEST without requested IP or ciaddr");
-            return Ok(Some(self.build_nak(msg)?));
+            return Ok(Some(self.build_nak(msg, server_identifier)?));
         };
 
         debug!("Requested IP: {}", requested_ip);
@@ -322,7 +392,7 @@ impl DhcpHandler {
                     "NAKing DHCPREQUEST from {} - requested {} but static reservation is {}",
                     req_ctx.mac, requested_ip, reserved_ip
                 );
-                return Ok(Some(self.build_nak(msg)?));
+                return Ok(Some(self.build_nak(msg, server_identifier)?));
             }
 
             // Static reservation matches requested IP - update or create lease
@@ -344,7 +414,14 @@ impl DhcpHandler {
             }
 
             let ack = self
-                .build_ack(msg, reserved_ip, network, &req_ctx, &dev_ctx)
+                .build_ack(
+                    msg,
+                    reserved_ip,
+                    network,
+                    &req_ctx,
+                    &dev_ctx,
+                    server_identifier,
+                )
                 .await?;
             info!(
                 "DHCP ACK {} to MAC {} on network '{}' (static reservation)",
@@ -363,7 +440,7 @@ impl DhcpHandler {
                     "DHCP REQUEST IP mismatch: requested {}, expected {}",
                     requested_ip, lease_ip
                 );
-                return Ok(Some(self.build_nak(msg)?));
+                return Ok(Some(self.build_nak(msg, server_identifier)?));
             }
 
             // Update lease to 'active'
@@ -375,7 +452,14 @@ impl DhcpHandler {
             }
 
             let ack = self
-                .build_ack(msg, lease_ip, network, &req_ctx, &dev_ctx)
+                .build_ack(
+                    msg,
+                    lease_ip,
+                    network,
+                    &req_ctx,
+                    &dev_ctx,
+                    server_identifier,
+                )
                 .await?;
             info!(
                 "DHCP ACK {} to MAC {} on network '{}'",
@@ -385,7 +469,7 @@ impl DhcpHandler {
             Ok(Some(ack))
         } else {
             warn!("No lease found for MAC {}", req_ctx.mac);
-            Ok(Some(self.build_nak(msg)?))
+            Ok(Some(self.build_nak(msg, server_identifier)?))
         }
     }
 
@@ -419,14 +503,15 @@ impl DhcpHandler {
         network: &DhcpNetwork,
         req_ctx: &RequestContext,
         _dev_ctx: &DeviceContext,
+        server_identifier: Ipv4Addr,
     ) -> Result<Message> {
-        let mut msg = message_builder::create_base_reply(req, &self.server_identifier);
+        let mut msg = message_builder::create_base_reply(req, &server_identifier);
         msg.set_yiaddr(ip);
 
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Offer));
         msg.opts_mut()
-            .insert(v4::DhcpOption::ServerIdentifier(self.server_identifier));
+            .insert(v4::DhcpOption::ServerIdentifier(server_identifier));
         msg.opts_mut()
             .insert(v4::DhcpOption::AddressLeaseTime(network.lease_duration));
 
@@ -451,16 +536,19 @@ impl DhcpHandler {
         network: &DhcpNetwork,
         req_ctx: &RequestContext,
         dev_ctx: &DeviceContext,
+        server_identifier: Ipv4Addr,
     ) -> Result<Message> {
-        let mut msg = self.build_offer(req, ip, network, req_ctx, dev_ctx).await?;
+        let mut msg = self
+            .build_offer(req, ip, network, req_ctx, dev_ctx, server_identifier)
+            .await?;
         msg.opts_mut()
             .insert(v4::DhcpOption::MessageType(MessageType::Ack));
 
         Ok(msg)
     }
 
-    fn build_nak(&self, req: &Message) -> Result<Message> {
-        Ok(message_builder::build_nak(req, self.server_identifier))
+    fn build_nak(&self, req: &Message, server_identifier: Ipv4Addr) -> Result<Message> {
+        Ok(message_builder::build_nak(req, server_identifier))
     }
 }
 
@@ -505,6 +593,7 @@ mod tests {
                 &network,
                 &req_ctx,
                 &dev_ctx,
+                handler.server_identifier,
             )
             .await
             .unwrap();
@@ -542,7 +631,9 @@ mod tests {
             .insert(v4::DhcpOption::MessageType(MessageType::Request));
 
         // Build a NAK response
-        let nak = handler.build_nak(&request).unwrap();
+        let nak = handler
+            .build_nak(&request, handler.server_identifier)
+            .unwrap();
 
         // Verify the server identifier matches the handler's configured value
         let server_id = nak
@@ -649,6 +740,7 @@ mod tests {
                 &network,
                 &req_ctx,
                 &dev_ctx,
+                custom_server_id,
             )
             .await
             .unwrap();
@@ -774,6 +866,7 @@ mod tests {
                 &network,
                 &req_context,
                 &device_context,
+                handler.server_identifier,
             )
             .await
             .unwrap();
@@ -906,6 +999,7 @@ mod tests {
                 &network,
                 &req_ctx,
                 &dev_ctx,
+                handler.server_identifier,
             )
             .await
             .unwrap();
@@ -967,6 +1061,7 @@ mod tests {
                 &network,
                 &req_ctx,
                 &dev_ctx,
+                handler.server_identifier,
             )
             .await
             .unwrap();
@@ -1028,6 +1123,7 @@ mod tests {
                 &network,
                 &req_ctx,
                 &dev_ctx,
+                handler.server_identifier,
             )
             .await
             .unwrap();
@@ -1093,7 +1189,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1165,7 +1261,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1214,7 +1310,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1279,7 +1375,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1339,7 +1435,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1392,7 +1488,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1446,7 +1542,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1519,7 +1615,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network)
+            .handle_request(&conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1585,7 +1681,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &renew_request, &network)
+            .handle_request(&conn, &renew_request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1610,7 +1706,7 @@ mod tests {
             .insert(v4::DhcpOption::RequestedIpAddress(reserved_ip));
 
         let response = handler
-            .handle_request(&conn, &new_request, &network)
+            .handle_request(&conn, &new_request, &network, handler.server_identifier)
             .await
             .unwrap();
 
