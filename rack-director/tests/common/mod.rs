@@ -47,8 +47,8 @@ pub async fn create_test_network(http_port: u16) -> Result<u64, anyhow::Error> {
         .post(format!("http://127.0.0.1:{}/ui/dhcp/networks", http_port))
         .json(&json!({
             "name": "Test",
-            "subnet": "10.0.0.0/24",
-            "gateway": "10.0.0.1",
+            "subnet": "127.0.0.0/8",
+            "gateway": "127.0.0.1",
             "dns_servers": ["8.8.8.8"],
             "lease_duration": 3600,
             "enable_autodiscovery": false
@@ -70,8 +70,8 @@ pub async fn create_test_pool(http_port: u16, network_id: u64) -> Result<(), any
         ))
         .json(&json!({
             "name": "Test Pool",
-            "range_start": "10.0.0.100",
-            "range_end": "10.0.0.200"
+            "range_start": "127.0.0.100",
+            "range_end": "127.0.0.200"
         }))
         .send()
         .await?
@@ -103,7 +103,7 @@ pub async fn start_rack_director() -> Result<TestRackDirectorHandle, anyhow::Err
         &format!("--db-path={}", db_path),
         &format!("--tftp-path={}", tftp_path.display()),
         &format!("--storage-path={}", storage_path),
-        "--dhcp-address=127.0.0.1:0",
+        "--dhcp-address=0.0.0.0:0",
         "--http-address=127.0.0.1:0",
         "--tftp-address=127.0.0.1:0",
         "--tftp-public-address=10.0.0.1",
