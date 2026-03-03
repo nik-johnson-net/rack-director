@@ -810,6 +810,7 @@ mod tests {
             image_store: store.into(),
             agent_images_path,
             boot_file_provider,
+            dhcp: crate::dhcp::DhcpControl::noop(),
         });
         (state, temp_dir, migration_conn)
     }

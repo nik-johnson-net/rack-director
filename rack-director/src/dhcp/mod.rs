@@ -6,40 +6,95 @@ mod interface;
 mod ip_discovery;
 pub mod message_builder;
 mod request;
+pub mod socket_manager;
 pub mod store;
 
 use anyhow::Result;
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use tokio::{net::UdpSocket, task::JoinHandle};
+use tokio::{net::UdpSocket, sync::mpsc, sync::oneshot, sync::watch, task::JoinHandle};
 use tokio_recvmsg::UdpSocketRecvMsg;
 
 use crate::database::ConnectionFactory;
 
 pub use ip_discovery::discover_server_identifier;
+pub use socket_manager::SocketCmd;
 pub use store::{DhcpNetwork, DhcpPool, Lease, LeaseState, StaticReservation};
 
 use boot_config::BootConfigProvider;
 use device_resolution::DirectorDeviceResolver;
-use handler::{DhcpHandler, DhcpReply};
-
-use crate::boot_files::BootFileProvider;
-
-/// A UDP socket bound to a specific local IP for one L2 network.
-struct L2Socket {
-    local_ip: Ipv4Addr,
-    socket: Arc<UdpSocket>,
-}
+use handler::DhcpHandler;
+use socket_manager::{DhcpSocketManager, SocketTable};
 
 pub struct DhcpServer {
     handler: DhcpHandler,
     address: SocketAddr,
     conn: Arc<dyn ConnectionFactory>,
+    server_identifier: Ipv4Addr,
 }
 
 pub struct StartResult {
-    pub join_handle: JoinHandle<Result<()>>,
+    pub join_handle: JoinHandle<()>,
     pub port: u16,
+    pub control: DhcpControl,
+}
+
+/// A cheaply-clonable handle for notifying the DHCP socket manager of
+/// network lifecycle events. Obtained from `StartResult::control`.
+#[derive(Clone)]
+pub struct DhcpControl {
+    cmd_tx: mpsc::Sender<SocketCmd>,
+}
+
+impl DhcpControl {
+    /// Create a no-op control handle whose commands are immediately discarded.
+    ///
+    /// Useful in unit tests that construct `AppState` directly but do not
+    /// exercise DHCP socket management.
+    #[cfg(test)]
+    pub fn noop() -> Self {
+        // Capacity 1; the receiver is immediately dropped so the manager never
+        // runs. Commands sent via DhcpControl are silently discarded.
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        Self { cmd_tx }
+    }
+
+    /// Notify the socket manager that a new DHCP network was created.
+    ///
+    /// Returns once the manager has processed the command (socket bound or
+    /// warning logged if no matching interface was found).
+    pub async fn network_created(&self, id: i64, subnet: String) {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SocketCmd::AddNetwork {
+                id,
+                subnet,
+                resp: resp_tx,
+            })
+            .await
+            .is_ok()
+        {
+            resp_rx.await.ok();
+        }
+    }
+
+    /// Notify the socket manager that a DHCP network was deleted.
+    ///
+    /// Returns once the manager has processed the command (socket closed if
+    /// one was bound for this network).
+    pub async fn network_deleted(&self, id: i64) {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SocketCmd::RemoveNetwork { id, resp: resp_tx })
+            .await
+            .is_ok()
+        {
+            resp_rx.await.ok();
+        }
+    }
 }
 
 impl DhcpServer {
@@ -47,7 +102,7 @@ impl DhcpServer {
         conn: Arc<dyn ConnectionFactory>,
         tftp_server: String,
         http_server: String,
-        boot_file_provider: Arc<dyn BootFileProvider>,
+        boot_file_provider: Arc<dyn crate::boot_files::BootFileProvider>,
         server_identifier: Ipv4Addr,
         address: Option<SocketAddr>,
     ) -> Result<Self> {
@@ -82,47 +137,221 @@ impl DhcpServer {
             handler,
             address: address.unwrap_or_else(|| SocketAddr::new(server_identifier.into(), 67)),
             conn,
+            server_identifier,
         })
     }
 
-    /// Start the DHCP server (long-running task).
-    pub async fn serve(self) -> Result<StartResult> {
-        // Bind wildcard socket first to obtain the ephemeral port, then bind
-        // per-network sockets to the SAME port on specific IPs. All sockets use
-        // SO_REUSEADDR so they can coexist on the same port.
-        let wildcard = make_wildcard_socket(&self.address).await?;
-        wildcard.set_broadcast(true)?;
-        wildcard.enable_pktinfo()?;
+    /// Start the DHCP server.
+    ///
+    /// When `no_broadcast` is `true` (used in tests), no wildcard socket is
+    /// created. The server-id socket binds to `server_identifier:port` and is
+    /// the only receive path. This avoids privilege issues and port conflicts
+    /// during testing.
+    ///
+    /// When `no_broadcast` is `false` (production), a wildcard socket binds
+    /// `0.0.0.0:PORT` first to obtain the OS-assigned port, and all subsequent
+    /// sockets reuse that same port via `SO_REUSEADDR`.
+    pub async fn serve(self, no_broadcast: bool) -> Result<StartResult> {
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
-        let local_addr = wildcard.local_addr()?;
-        log::info!("DHCP server listening on {}", local_addr);
-        let port = local_addr.port();
+        let (port, table_rx, join_handle) = if no_broadcast {
+            start_no_broadcast(
+                self.server_identifier,
+                self.address.port(),
+                cmd_rx,
+                self.handler.clone(),
+            )
+            .await?
+        } else {
+            start_with_broadcast(
+                self.server_identifier,
+                &self.address,
+                cmd_rx,
+                self.handler.clone(),
+            )
+            .await?
+        };
 
-        let startup_conn = self.conn.open().await?;
-        let l2_sockets: Arc<Vec<L2Socket>> = Arc::new(build_l2_sockets(&startup_conn, port).await?);
-        drop(startup_conn);
+        // Bind sockets for networks that already existed at startup.
+        bootstrap_existing_networks(&self.conn, &cmd_tx, &table_rx).await;
 
-        // Spawn per-network unicast receive loops.
-        for l2 in l2_sockets.iter() {
-            let sock = l2.socket.clone();
-            let local_ip = l2.local_ip;
-            let handler = self.handler.clone();
-            let l2_ref = l2_sockets.clone();
-            tokio::spawn(async move {
-                per_network_recv_loop(sock, local_ip, handler, l2_ref).await;
-            });
-        }
+        log::info!(
+            "DHCP server started on port {} (no_broadcast={})",
+            port,
+            no_broadcast
+        );
 
-        // Spawn wildcard broadcast receive loop
-        let join_handle = tokio::spawn(wildcard_recv_loop(wildcard, self.handler, l2_sockets));
-
-        Ok(StartResult { join_handle, port })
+        Ok(StartResult {
+            join_handle,
+            port,
+            control: DhcpControl { cmd_tx },
+        })
     }
 }
 
-/// Build the wildcard 0.0.0.0 socket with SO_REUSEADDR so per-network sockets can
-/// coexist on the same port. tokio's `UdpSocket::bind` does not expose SO_REUSEADDR
-/// before binding, so socket2 is used directly.
+// ---------------------------------------------------------------------------
+// Start helpers
+// ---------------------------------------------------------------------------
+
+/// Start in no-broadcast mode: server-id socket only, no wildcard socket.
+///
+/// Returns `(port, table_rx, join_handle)` where `join_handle` is the socket
+/// manager's run loop.
+async fn start_no_broadcast(
+    server_identifier: Ipv4Addr,
+    requested_port: u16,
+    cmd_rx: mpsc::Receiver<SocketCmd>,
+    handler: DhcpHandler,
+) -> Result<(u16, watch::Receiver<Arc<SocketTable>>, JoinHandle<()>)> {
+    // Bind server-id socket; port 0 yields an ephemeral port.
+    let server_id_socket =
+        Arc::new(make_server_id_socket(server_identifier, requested_port).await?);
+    let port = server_id_socket.local_addr()?.port();
+
+    log::info!(
+        "DHCP server (no-broadcast) listening on {}:{}",
+        server_identifier,
+        port
+    );
+
+    let initial_table = Arc::new(SocketTable {
+        server_id_socket: server_id_socket.clone(),
+        network_sockets: HashMap::new(),
+    });
+    let (table_tx, table_rx) = watch::channel(initial_table);
+
+    // Spawn the server-id receive loop.
+    let recv_handle = tokio::spawn(socket_manager::server_id_recv_loop(
+        server_id_socket.clone(),
+        handler.clone(),
+        table_rx.clone(),
+    ));
+    let recv_abort = recv_handle.abort_handle();
+
+    let manager = DhcpSocketManager::new(
+        port,
+        server_identifier,
+        server_id_socket.clone(),
+        recv_abort,
+        table_tx.clone(),
+        cmd_rx,
+        handler,
+    );
+    let join_handle = tokio::spawn(manager.run());
+
+    Ok((port, table_rx, join_handle))
+}
+
+/// Start in broadcast mode: wildcard socket + server-id socket.
+///
+/// Returns `(port, table_rx, join_handle)` where `join_handle` is the socket
+/// manager's run loop.
+async fn start_with_broadcast(
+    server_identifier: Ipv4Addr,
+    address: &SocketAddr,
+    cmd_rx: mpsc::Receiver<SocketCmd>,
+    handler: DhcpHandler,
+) -> Result<(u16, watch::Receiver<Arc<SocketTable>>, JoinHandle<()>)> {
+    // Bind the wildcard socket first so the OS assigns the port.
+    let wildcard = make_wildcard_socket(address).await?;
+    wildcard.enable_pktinfo()?;
+    let port = wildcard.local_addr()?.port();
+
+    log::info!("DHCP server listening on 0.0.0.0:{}", port);
+
+    // Bind server-id socket to the same port with SO_REUSEADDR.
+    let server_id_socket = Arc::new(make_server_id_socket(server_identifier, port).await?);
+
+    let initial_table = Arc::new(SocketTable {
+        server_id_socket: server_id_socket.clone(),
+        network_sockets: HashMap::new(),
+    });
+    let (table_tx, table_rx) = watch::channel(initial_table);
+
+    // Spawn server-id receive loop (detached — managed by socket manager).
+    let recv_handle = tokio::spawn(socket_manager::server_id_recv_loop(
+        server_id_socket.clone(),
+        handler.clone(),
+        table_rx.clone(),
+    ));
+    let recv_abort = recv_handle.abort_handle();
+
+    // Spawn wildcard receive loop (detached — runs for the server's lifetime).
+    tokio::spawn(socket_manager::wildcard_recv_loop(
+        wildcard,
+        handler.clone(),
+        table_rx.clone(),
+    ));
+
+    let manager = DhcpSocketManager::new(
+        port,
+        server_identifier,
+        server_id_socket.clone(),
+        recv_abort,
+        table_tx.clone(),
+        cmd_rx,
+        handler,
+    );
+    let join_handle = tokio::spawn(manager.run());
+
+    Ok((port, table_rx, join_handle))
+}
+
+/// Replay all pre-existing networks through the socket manager so that
+/// sockets are bound for networks created before this server started.
+///
+/// This mirrors the behaviour of the old `build_l2_sockets` function but
+/// goes through the same `SocketCmd` path as the live API, ensuring the
+/// socket table is always the authoritative source.
+async fn bootstrap_existing_networks(
+    conn: &Arc<dyn ConnectionFactory>,
+    cmd_tx: &mpsc::Sender<SocketCmd>,
+    table_rx: &watch::Receiver<Arc<SocketTable>>,
+) {
+    let startup_conn = match conn.open().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("DHCP bootstrap: failed to open DB connection: {}", e);
+            return;
+        }
+    };
+
+    let networks = match store::get_l2_networks(&startup_conn).await {
+        Ok(n) => n,
+        Err(e) => {
+            log::error!("DHCP bootstrap: failed to list networks: {}", e);
+            return;
+        }
+    };
+
+    for network in networks {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if cmd_tx
+            .send(SocketCmd::AddNetwork {
+                id: network.id,
+                subnet: network.subnet.clone(),
+                resp: resp_tx,
+            })
+            .await
+            .is_ok()
+        {
+            resp_rx.await.ok();
+        }
+    }
+
+    log::debug!(
+        "DHCP bootstrap: socket table has {} network socket(s)",
+        table_rx.borrow().network_sockets.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Socket constructors
+// ---------------------------------------------------------------------------
+
+/// Build a wildcard 0.0.0.0 socket with SO_REUSEADDR and SO_BROADCAST so
+/// per-network sockets can coexist on the same port. `tokio`'s `UdpSocket::bind`
+/// does not expose SO_REUSEADDR before binding, so `socket2` is used directly.
 async fn make_wildcard_socket(address: &SocketAddr) -> anyhow::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -133,179 +362,25 @@ async fn make_wildcard_socket(address: &SocketAddr) -> anyhow::Result<UdpSocket>
     Ok(UdpSocket::from_std(sock.into())?)
 }
 
-/// Build a UDP socket bound to `local_ip:port` with SO_REUSEADDR and SO_BROADCAST.
+/// Build a socket bound to `local_ip:port` with SO_REUSEADDR, SO_BROADCAST,
+/// and IP_PKTINFO enabled.
 ///
-/// The port must match the wildcard socket's port so all sockets share the same
-/// source port (required by dhclient's BPF filter: `udp src port 67 and dst port 68`).
-async fn make_l2_socket(local_ip: Ipv4Addr, port: u16) -> anyhow::Result<UdpSocket> {
+/// This socket serves as the server-identifier socket. Pktinfo is required
+/// because the server-id receive loop calls `handle_packet` which uses the
+/// destination IP from pktinfo to identify the DHCP network.
+pub(crate) async fn make_server_id_socket(
+    local_ip: Ipv4Addr,
+    port: u16,
+) -> anyhow::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
     sock.set_broadcast(true)?;
     sock.bind(&SocketAddrV4::new(local_ip, port).into())?;
     sock.set_nonblocking(true)?;
-    Ok(UdpSocket::from_std(sock.into())?)
-}
-
-/// Enumerate all local interfaces and create one L2Socket per L2 network that has
-/// a matching local interface IP. All sockets bind to `local_ip:port` where `port`
-/// matches the wildcard socket so replies egress with the correct source port.
-async fn build_l2_sockets(
-    conn: &crate::database::Connection,
-    port: u16,
-) -> anyhow::Result<Vec<L2Socket>> {
-    use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
-
-    let networks = store::get_l2_networks(conn).await?;
-    let all_ifaces = NetworkInterface::show()?;
-    let mut sockets = Vec::new();
-
-    for network in &networks {
-        let subnet: common::Ipv4Subnet = network
-            .subnet
-            .parse()
-            .map_err(|e: common::Ipv4SubnetError| anyhow::anyhow!("{}", e))?;
-
-        let local_ip = all_ifaces
-            .iter()
-            .flat_map(|iface| &iface.addr)
-            .filter_map(|addr| match addr {
-                Addr::V4(v4) => Some(v4.ip),
-                _ => None,
-            })
-            .find(|&ip| subnet.ip_in_range(ip));
-
-        let Some(local_ip) = local_ip else {
-            log::warn!(
-                "No local interface found for L2 network '{}' ({}), skipping socket",
-                network.name,
-                network.subnet
-            );
-            continue;
-        };
-
-        match make_l2_socket(local_ip, port).await {
-            Ok(sock) => {
-                log::info!(
-                    "L2 socket bound to {}:{} for network '{}'",
-                    local_ip,
-                    port,
-                    network.name
-                );
-                sockets.push(L2Socket {
-                    local_ip,
-                    socket: Arc::new(sock),
-                });
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to bind L2 socket for network '{}' ({}): {}",
-                    network.name,
-                    local_ip,
-                    e
-                );
-            }
-        }
-    }
-
-    Ok(sockets)
-}
-
-/// Receive loop for the wildcard 0.0.0.0:67 socket. Uses recvmsg to capture
-/// the incoming interface index so we can select the correct L2 network.
-async fn wildcard_recv_loop(
-    socket: UdpSocket,
-    handler: DhcpHandler,
-    l2_sockets: Arc<Vec<L2Socket>>,
-) -> Result<()> {
-    let mut buf = vec![0u8; 1500];
-    loop {
-        match socket.recv_msg(&mut buf).await {
-            Ok((len, pkt_info)) => {
-                let data = buf[..len].to_vec();
-                let h = handler.clone();
-                let l2 = l2_sockets.clone();
-                tokio::spawn(async move {
-                    match h.handle_packet(&data, &pkt_info).await {
-                        Ok(Some(reply)) => dispatch_reply(reply, &l2).await,
-                        Ok(None) => {}
-                        Err(e) => log::error!("DHCP handler error: {}", e),
-                    }
-                });
-            }
-            Err(e) => log::error!("DHCP wildcard socket error: {}", e),
-        }
-    }
-}
-
-/// Receive loop for a per-network socket bound to `local_ip:67`. Handles unicast
-/// DHCP renewals and rebinding from clients that already have a lease.
-async fn per_network_recv_loop(
-    socket: Arc<UdpSocket>,
-    local_ip: Ipv4Addr,
-    handler: DhcpHandler,
-    l2_sockets: Arc<Vec<L2Socket>>,
-) {
-    let mut buf = vec![0u8; 1500];
-    loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, peer_addr)) => {
-                let data = buf[..len].to_vec();
-                let h = handler.clone();
-                let l2 = l2_sockets.clone();
-                tokio::spawn(async move {
-                    match h.handle_l2_unicast_packet(&data, peer_addr, local_ip).await {
-                        Ok(Some(reply)) => dispatch_reply(reply, &l2).await,
-                        Ok(None) => {}
-                        Err(e) => log::error!("DHCP unicast handler error: {}", e),
-                    }
-                });
-            }
-            Err(e) => log::error!("DHCP per-network socket error: {}", e),
-        }
-    }
-}
-
-/// Send a DHCP reply using the appropriate socket.
-///
-/// For L2 replies: use the per-network socket bound to `local_ip:port` so that
-/// replies egress on the correct interface and carry the same source port as the
-/// server (required by `dhclient`'s BPF filter).
-async fn dispatch_reply(reply: DhcpReply, l2_sockets: &[L2Socket]) {
-    match reply {
-        DhcpReply::L2 {
-            data,
-            local_ip,
-            peer_addr,
-        } => {
-            // RFC 2131: if the client has no IP yet (INIT/SELECTING), broadcast the reply.
-            // Otherwise (RENEWING/REBINDING), reply directly to peer_addr.
-            let dest: SocketAddr = if peer_addr.ip().is_unspecified() {
-                SocketAddr::new(Ipv4Addr::BROADCAST.into(), 68)
-            } else {
-                peer_addr
-            };
-
-            if let Some(l2) = l2_sockets.iter().find(|s| s.local_ip == local_ip) {
-                if let Err(e) = l2.socket.send_to(&data, dest).await {
-                    log::error!("DHCP L2 send error to {}: {}", dest, e);
-                }
-            } else {
-                log::error!("No L2 socket for {} — dropping reply to {}", local_ip, dest);
-            }
-        }
-        DhcpReply::Relay { data, dest } => {
-            // Relay reply — source IP doesn't matter, bind ephemerally
-            match UdpSocket::bind("0.0.0.0:0").await {
-                Ok(s) => {
-                    if let Err(e) = s.send_to(&data, dest).await {
-                        log::error!("DHCP relay send error: {}", e);
-                    }
-                }
-                Err(e) => log::error!("DHCP relay socket bind error: {}", e),
-            }
-        }
-    }
+    let udp = UdpSocket::from_std(sock.into())?;
+    udp.enable_pktinfo()?;
+    Ok(udp)
 }
 
 /// Spawn a background task that periodically deletes expired DHCP leases.

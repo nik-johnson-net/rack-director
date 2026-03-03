@@ -114,6 +114,14 @@ pub struct Args {
         help = "Path to agent image files (vmlinuz, initramfs.img)"
     )]
     agent_images_path: String,
+
+    /// Disable the wildcard broadcast socket.
+    ///
+    /// When set, no `0.0.0.0:PORT` socket is created. The server-identifier
+    /// socket handles all traffic. Intended for integration tests where
+    /// broadcast sockets are undesirable.
+    #[arg(long, default_value_t = false)]
+    no_dhcp_broadcast: bool,
 }
 
 pub struct RackDirectorHandle {
@@ -125,8 +133,8 @@ pub struct RackDirectorHandle {
     tftp_handle: JoinHandle<Result<(), anyhow::Error>>,
     pub tftp_port: u16,
 
-    // Information for the dhcp service
-    dhcp_handle: JoinHandle<Result<(), anyhow::Error>>,
+    // Information for the dhcp service (socket manager run loop, returns ())
+    dhcp_handle: JoinHandle<()>,
     pub dhcp_port: u16,
 
     // Background task for cleaning up expired DHCP leases
@@ -137,7 +145,9 @@ impl RackDirectorHandle {
     // Wait for the services to stop.
     // TODO: Currently just waiting for any one to abort. Need a proper abort signal / shutdown architecture.
     pub async fn wait(self) {
-        let _ = tokio::try_join!(self.http_handle, self.tftp_handle, self.dhcp_handle);
+        // dhcp_handle returns () so it cannot be joined with try_join!; abort it on exit.
+        let _ = tokio::try_join!(self.http_handle, self.tftp_handle);
+        self.dhcp_handle.abort();
         self.lease_cleanup_handle.abort();
     }
 }
@@ -202,6 +212,9 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let mut tftp_server = tftp::Server::new(boot_file_provider.clone());
     tftp_server.address(args.tftp_address);
 
+    // Start DHCP Service first so the DhcpControl handle is available for HTTP.
+    let dhcp_start_result = dhcp_server.serve(args.no_dhcp_broadcast).await?;
+
     // Start HTTP Service — each HTTP handler opens its own connection via the
     // shared factory, keeping it independent of DHCP and Director connections.
     let http_start_result = http::start(
@@ -210,14 +223,12 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         args.http_address,
         std::path::PathBuf::from(&args.agent_images_path),
         boot_file_provider,
+        dhcp_start_result.control.clone(),
     )
     .await?;
 
     // Start TFTP Service
     let tftp_start_result = tftp_server.serve().await?;
-
-    // Start DHCP Service
-    let dhcp_start_result = dhcp_server.serve().await?;
 
     Ok(RackDirectorHandle {
         http_handle: http_start_result.join_handle,

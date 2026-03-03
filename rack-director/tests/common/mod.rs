@@ -104,6 +104,8 @@ pub async fn start_rack_director() -> Result<TestRackDirectorHandle, anyhow::Err
         &format!("--tftp-path={}", tftp_path.display()),
         &format!("--storage-path={}", storage_path),
         "--dhcp-address=0.0.0.0:0",
+        "--dhcp-server-identifier=127.0.0.1",
+        "--no-dhcp-broadcast",
         "--http-address=127.0.0.1:0",
         "--tftp-address=127.0.0.1:0",
         "--tftp-public-address=10.0.0.1",

@@ -23,10 +23,10 @@ pub fn get_ipv4_addresses_for_interface(if_index: u32) -> anyhow::Result<Vec<Ipv
 ///
 /// The local IP is used as the source IP for sending (so replies egress on the correct interface)
 /// and as the DHCP Server Identifier (Option 54) in the reply.
-pub fn find_matching_l2_network<'a>(
+pub fn find_matching_l2_network(
     if_index: u32,
-    networks: &'a [DhcpNetwork],
-) -> anyhow::Result<Option<(&'a DhcpNetwork, Ipv4Addr)>> {
+    networks: &[DhcpNetwork],
+) -> anyhow::Result<Option<(&DhcpNetwork, Ipv4Addr)>> {
     let local_ips = get_ipv4_addresses_for_interface(if_index)?;
     for network in networks {
         let subnet: Ipv4Subnet = network
@@ -45,10 +45,10 @@ pub fn find_matching_l2_network<'a>(
 /// Given a local IP, find which L2 network's subnet contains it.
 ///
 /// Used by per-network receive loops where the local IP is known from the socket bind address.
-pub fn find_l2_network_for_ip<'a>(
+pub fn find_l2_network_for_ip(
     local_ip: Ipv4Addr,
-    networks: &'a [DhcpNetwork],
-) -> anyhow::Result<Option<&'a DhcpNetwork>> {
+    networks: &[DhcpNetwork],
+) -> anyhow::Result<Option<&DhcpNetwork>> {
     for network in networks {
         let subnet: Ipv4Subnet = network
             .subnet
@@ -59,6 +59,28 @@ pub fn find_l2_network_for_ip<'a>(
         }
     }
     Ok(None)
+}
+
+/// Find the local interface IP that belongs to `subnet`.
+///
+/// Returns `Ok(None)` when no local interface has an address within the
+/// subnet (e.g. relay-only network). Returns `Err` on OS-level failures.
+pub fn find_local_ip_for_subnet(subnet: &str) -> anyhow::Result<Option<Ipv4Addr>> {
+    let subnet: common::Ipv4Subnet = subnet
+        .parse()
+        .map_err(|e: common::Ipv4SubnetError| anyhow::anyhow!("{}", e))?;
+
+    let all_ifaces = NetworkInterface::show()?;
+    let local_ip = all_ifaces
+        .iter()
+        .flat_map(|iface| &iface.addr)
+        .filter_map(|addr| match addr {
+            Addr::V4(v4) => Some(v4.ip),
+            _ => None,
+        })
+        .find(|&ip| subnet.ip_in_range(ip));
+
+    Ok(local_ip)
 }
 
 #[cfg(test)]
