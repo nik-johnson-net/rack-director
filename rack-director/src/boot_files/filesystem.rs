@@ -17,26 +17,6 @@ use crate::tftp::{Handler, TftpReader};
 /// Path validation is performed using canonicalization to prevent directory traversal
 /// attacks. The canonicalized requested path must be within the canonicalized base path.
 /// Any attempt to access files outside the base directory will be rejected.
-///
-/// # Example
-///
-/// ```no_run
-/// use rack_director::boot_files::{FilesystemBootFileProvider, BootFileProvider};
-/// use std::path::PathBuf;
-///
-/// # async fn example() -> anyhow::Result<()> {
-/// let provider = FilesystemBootFileProvider::new(
-///     PathBuf::from("/var/lib/tftpboot"),
-/// )?;
-///
-/// // This will succeed if the file exists
-/// let reader = provider.get_file("snponly.efi").await?;
-///
-/// // This will fail due to path traversal attempt
-/// assert!(provider.get_file("../etc/passwd").await.is_err());
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug)]
 pub struct FilesystemBootFileProvider {
     base_path: PathBuf,

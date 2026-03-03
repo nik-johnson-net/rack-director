@@ -617,6 +617,7 @@ mod tests {
             image_store: Arc::new(image_store),
             agent_images_path,
             boot_file_provider,
+            dhcp: crate::dhcp::DhcpControl::noop(),
         });
         (state, temp_dir)
     }
