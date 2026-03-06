@@ -1,5 +1,6 @@
 use super::store::DhcpNetwork;
 use common::Ipv4Subnet;
+use log::debug;
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use std::net::Ipv4Addr;
 
@@ -28,6 +29,10 @@ pub fn find_matching_l2_network(
     networks: &[DhcpNetwork],
 ) -> anyhow::Result<Option<(&DhcpNetwork, Ipv4Addr)>> {
     let local_ips = get_ipv4_addresses_for_interface(if_index)?;
+    debug!(
+        "Found local IPs for interface {}: {:#?}",
+        if_index, local_ips
+    );
     for network in networks {
         let subnet: Ipv4Subnet = network
             .subnet

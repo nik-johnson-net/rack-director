@@ -1,0 +1,53 @@
+[test]
+name = "disk-gpt-simple"
+description = "GPT layout with ESP + ext4 root using ROOT platform label"
+timeout_seconds = 1800
+
+[vm]
+memory_mb = 2048
+disks = [{ size_gb = 4 }]
+
+# Platform matching a single virtio disk in a QEMU q35 VM.
+# NOTE: The exact by-path value for the first virtio disk must be verified
+# empirically by running a VM and checking /dev/disk/by-path/. Common values:
+#   pci-0000:04:00.0-virtio-pci-virtio0   (older QEMU)
+#   pci-0000:00:04.0-virtio-pci-virtio0   (some configurations)
+# Run: ls -la /dev/disk/by-path/ inside a test VM to determine the correct path.
+[[rack_director.platforms]]
+name = "test-platform"
+[rack_director.platforms.attributes]
+disks = [{ path = "/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio0", size_gb = 4, disk_type = "hdd", label = "ROOT" }]
+nics = [{ logical = "eth0", speed_mbps = 1000 }]
+cpus = [{ brand = "intel", model = "Unknown", cores = 1 }]
+memory_gib = 1
+
+[[rack_director.roles]]
+name = "test-role"
+platform = "test-platform"
+
+[rack_director.roles.disk_layout]
+[[rack_director.roles.disk_layout.disks]]
+device = "ROOT"
+partition_table = "gpt"
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "efi"
+size = "512MiB"
+filesystem = "vfat"
+flags = ["esp", "boot"]
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "root"
+size = "rest"
+filesystem = "ext4"
+
+[[lifecycle.steps]]
+from = "new"
+to = "unprovisioned"
+
+[[lifecycle.steps]]
+from = "unprovisioned"
+to = "provisioned"
+
+[lifecycle]
+expect_final_state = "provisioned"

@@ -36,14 +36,24 @@ pub async fn partition_disks(client: &RackDirector) -> Result<()> {
     info!("Retrieved disk layout with {} disk(s)", layout.disks.len());
 
     // Apply layout
-    match apply_disk_layout(&layout).await {
+    if let Err(e) = apply_disk_layout(&layout).await {
+        let error_msg = format!("Disk partitioning failed: {}", e);
+        log::error!("{}", error_msg);
+        client.action_failed(&uuid, &error_msg).await?;
+        return Err(e);
+    }
+
+    info!("Disk partitioning completed, verifying layout...");
+
+    // Verify the layout was applied correctly before reporting success
+    match verify_disk_layout(&layout).await {
         Ok(()) => {
-            info!("Disk partitioning completed successfully");
+            info!("Disk layout verification passed");
             client.action_success(&uuid).await?;
             Ok(())
         }
         Err(e) => {
-            let error_msg = format!("Disk partitioning failed: {}", e);
+            let error_msg = format!("Disk layout verification failed: {}", e);
             log::error!("{}", error_msg);
             client.action_failed(&uuid, &error_msg).await?;
             Err(e)
@@ -492,6 +502,64 @@ async fn get_disk_size(device: &str) -> Result<u64> {
         .map_err(|_| anyhow!("Failed to parse disk size: '{}'", size_str.trim()))?;
 
     Ok(size)
+}
+
+/// Verify that the disk layout was applied correctly.
+///
+/// Checks:
+/// - Partition tables exist on each disk (via sfdisk --json)
+/// - LVM volume groups are present if configured (via vgs --noheadings)
+async fn verify_disk_layout(layout: &DiskLayout) -> Result<()> {
+    // Check partition tables on each disk
+    for disk in &layout.disks {
+        let output = tokio::process::Command::new("sfdisk")
+            .args(["--json", &disk.device])
+            .output()
+            .await
+            .map_err(|e| anyhow!("Failed to run sfdisk: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!(
+                "sfdisk verification failed for {}: {}",
+                disk.device,
+                stderr.trim()
+            ));
+        }
+
+        // Parse JSON to verify valid partition table data was written
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        serde_json::from_str::<serde_json::Value>(&stdout)
+            .map_err(|e| anyhow!("sfdisk output is not valid JSON for {}: {}", disk.device, e))?;
+    }
+
+    // Check LVM volume groups if any
+    if let Some(ref volume_groups) = layout.volume_groups {
+        if !volume_groups.is_empty() {
+            let output = tokio::process::Command::new("vgs")
+                .args(["--noheadings"])
+                .output()
+                .await
+                .map_err(|e| anyhow!("Failed to run vgs: {}", e))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow!("vgs verification failed: {}", stderr.trim()));
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for vg in volume_groups {
+                if !stdout.contains(&vg.name) {
+                    return Err(anyhow!(
+                        "Volume group '{}' not found after creation",
+                        vg.name
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Map filesystem type to parted's fs-type hint

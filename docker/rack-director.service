@@ -1,0 +1,24 @@
+[Unit]
+Description=Rack Director - Machine Inventory and Control Service
+After=systemd-networkd-wait-online.service
+Wants=systemd-networkd-wait-online.service
+Requires=systemd-networkd.service
+
+[Service]
+Type=simple
+Environment="LOG=debug"
+ExecStart=/usr/local/sbin/rack-director \
+  --db-path /var/lib/rack-director \
+  --storage-path /var/lib/rack-director/data \
+  --dhcp-address 0.0.0.0:67 \
+  --tftp-address 0.0.0.0:69 \
+  --tftp-public-address 10.0.0.1 \
+  --dhcp-server-identifier 10.0.0.1 \
+  --http-public-url http://10.0.0.1:3000
+StandardOutput=journal+console
+StandardError=journal+console
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

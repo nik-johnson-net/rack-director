@@ -1,0 +1,63 @@
+[test]
+name = "disk-lvm"
+description = "LVM layout with ROOT label, single VG, and logical volumes"
+timeout_seconds = 1800
+
+[vm]
+memory_mb = 2048
+disks = [{ size_gb = 20 }]
+
+# Platform matching a single virtio disk in a QEMU q35 VM.
+# NOTE: Verify the correct by-path value empirically (see disk-gpt-simple.toml).
+[[rack_director.platforms]]
+name = "test-platform"
+[rack_director.platforms.attributes]
+disks = [{ path = "/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio0", size_gb = 20, disk_type = "hdd", label = "ROOT" }]
+nics = [{ logical = "eth0", speed_mbps = 1000 }]
+cpus = [{ brand = "intel", model = "Unknown", cores = 1 }]
+memory_gib = 1
+
+[[rack_director.roles]]
+name = "test-role"
+platform = "test-platform"
+
+[rack_director.roles.disk_layout]
+[[rack_director.roles.disk_layout.disks]]
+device = "ROOT"
+partition_table = "gpt"
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "efi"
+size = "512MiB"
+filesystem = "vfat"
+flags = ["esp", "boot"]
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "lvm"
+size = "rest"
+volume_group = "vg0"
+flags = ["lvm"]
+
+[[rack_director.roles.disk_layout.volume_groups]]
+name = "vg0"
+
+[[rack_director.roles.disk_layout.volume_groups.logical_volumes]]
+name = "root"
+size = "10GiB"
+filesystem = "ext4"
+
+[[rack_director.roles.disk_layout.volume_groups.logical_volumes]]
+name = "data"
+size = "rest"
+filesystem = "xfs"
+
+[[lifecycle.steps]]
+from = "new"
+to = "unprovisioned"
+
+[[lifecycle.steps]]
+from = "unprovisioned"
+to = "provisioned"
+
+[lifecycle]
+expect_final_state = "provisioned"

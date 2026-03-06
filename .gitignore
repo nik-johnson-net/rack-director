@@ -5,4 +5,5 @@
 .db.sqlite
 db.sqlite
 
-/.local-storage/
+/.local-storage
+/.build

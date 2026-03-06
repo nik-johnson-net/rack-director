@@ -6,7 +6,7 @@ RELEASEVER=10
 mkdir -p /output
 dnf --noplugins -y --releasever "$RELEASEVER" --installroot /agent-image upgrade
 
-KERVERSION=$(chroot /agent-image ls /usr/lib/modules)
+KERVERSION=$(chroot /agent-image ls /usr/lib/modules | tail -n 1)
 echo "kernel version: $KERVERSION"
 
 chroot /agent-image ln -s /usr/lib /lib
@@ -36,6 +36,14 @@ chroot /agent-image systemctl set-default rack-agent.target
 mkdir -p /agent-image/etc/systemd/network
 install -m 644 /networkd-dhcp.network \
     /agent-image/etc/systemd/network/10-dhcp.network
+
+# networkd-wait-online: wait up to 60s for any interface to get online
+mkdir -p /agent-image/etc/systemd/system/systemd-networkd-wait-online.service.d
+cat > /agent-image/etc/systemd/system/systemd-networkd-wait-online.service.d/timeout.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --timeout=60 --any
+EOF
 
 # Enable networkd services
 chroot /agent-image systemctl enable systemd-networkd.service

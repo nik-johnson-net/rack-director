@@ -1,6 +1,5 @@
 [Match]
-Name=*
-Type=!loopback
+Type=ether
 
 [Network]
 DHCP=yes
@@ -8,6 +7,4 @@ LinkLocalAddressing=no
 
 [DHCP]
 UseDomains=yes
-
-[Link]
-RequiredForOnline=routable
+UseGateway=yes

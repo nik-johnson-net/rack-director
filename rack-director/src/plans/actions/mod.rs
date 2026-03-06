@@ -87,7 +87,9 @@ impl Action {
 
 /// Generate boot target for agent-based actions (discovery, BMC config, etc.)
 fn generate_agent_boot_target(action_name: &str) -> Result<BootTarget> {
-    let cmdline = "ro console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8".to_string();
+    let cmdline =
+        "ro no_timer_check console=ttyS0 console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8"
+            .to_string();
 
     Ok(BootTarget::AgentImage {
         action: action_name.into(),
@@ -199,7 +201,7 @@ mod tests {
                 assert_eq!(action, "device-scan");
                 assert_eq!(
                     cmdline,
-                    "ro console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8"
+                    "ro no_timer_check console=ttyS0 console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8"
                 );
             }
             _ => panic!("Expected NetBoot, got LocalDisk"),
