@@ -148,6 +148,7 @@ mod tests {
             agent_images_path,
             boot_file_provider,
             dhcp: crate::dhcp::DhcpControl::noop(),
+            unprovisioned_sleep_secs: 600,
         });
 
         (state, temp_dir)

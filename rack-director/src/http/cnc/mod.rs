@@ -151,7 +151,10 @@ async fn ipxe_handler(
     }
 
     // Non-fatal. If the boot target can't be found, redirect loop back here to try again
-    let boot_target = match director.next_boot_target(&uuid).await {
+    let boot_target = match director
+        .next_boot_target(&uuid, state.unprovisioned_sleep_secs)
+        .await
+    {
         Ok(x) => x,
         Err(e) => {
             warn!("Couldn't get boot target from director for {uuid}: {e}");
@@ -618,6 +621,7 @@ mod tests {
             agent_images_path,
             boot_file_provider,
             dhcp: crate::dhcp::DhcpControl::noop(),
+            unprovisioned_sleep_secs: 600,
         });
         (state, temp_dir)
     }
@@ -673,9 +677,11 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"), "Did not return an ipxe script");
+        // Unknown devices are not provisioned, so they should sleep and retry rather than
+        // attempt to boot local disk (which would have no OS).
         assert!(
-            body_str.contains("exit"),
-            "Devices on an unknown network must exit for next boot target"
+            body_str.contains("sleep") && body_str.contains("reboot"),
+            "Unprovisioned/unknown devices must sleep and retry, got: {body_str}"
         );
     }
 
@@ -710,7 +716,12 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
-        assert!(body_str.contains("exit"));
+        // A newly registered device is in the New lifecycle state with no active plan.
+        // It should sleep and retry rather than boot local disk (no OS is installed yet).
+        assert!(
+            body_str.contains("sleep") && body_str.contains("reboot"),
+            "New device with no active plan must sleep and retry, got: {body_str}"
+        );
     }
 
     #[tokio::test]

@@ -122,6 +122,10 @@ pub struct Args {
     /// broadcast sockets are undesirable.
     #[arg(long, default_value_t = false)]
     no_dhcp_broadcast: bool,
+
+    /// Number of seconds unprovisioned devices sleep before rebooting to retry PXE boot.
+    #[arg(long, default_value_t = 600)]
+    unprovisioned_sleep_secs: u64,
 }
 
 pub struct RackDirectorHandle {
@@ -224,6 +228,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         std::path::PathBuf::from(&args.agent_images_path),
         boot_file_provider,
         dhcp_start_result.control.clone(),
+        args.unprovisioned_sleep_secs,
     )
     .await?;
 

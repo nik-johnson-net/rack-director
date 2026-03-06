@@ -29,6 +29,9 @@ pub struct AppState {
     /// Handle to the DHCP socket manager, used by network create/delete
     /// handlers to bind or release per-network sockets in real time.
     pub dhcp: DhcpControl,
+    /// Number of seconds an unprovisioned or unknown device sleeps before
+    /// rebooting to retry PXE boot.  Configurable so e2e tests can set it to 0.
+    pub unprovisioned_sleep_secs: u64,
 }
 
 pub struct StartResult {
@@ -43,6 +46,7 @@ pub async fn start<T: Into<SocketAddr>>(
     agent_images_path: PathBuf,
     boot_file_provider: Arc<dyn BootFileProvider>,
     dhcp: DhcpControl,
+    unprovisioned_sleep_secs: u64,
 ) -> Result<StartResult> {
     let state = Arc::new(AppState {
         connection_factory,
@@ -50,6 +54,7 @@ pub async fn start<T: Into<SocketAddr>>(
         agent_images_path,
         boot_file_provider,
         dhcp,
+        unprovisioned_sleep_secs,
     });
 
     let app = Router::new()

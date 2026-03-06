@@ -65,7 +65,15 @@ impl<'a> Director<'a> {
     }
 
     /// Get the boot target for this device.
-    pub async fn next_boot_target(&self, uuid: &Uuid) -> anyhow::Result<BootTarget> {
+    ///
+    /// `sleep_secs` controls how long an unprovisioned or unknown device sleeps
+    /// before rebooting to retry PXE boot.  Production callers pass 600; e2e
+    /// tests may pass 0 to avoid waiting.
+    pub async fn next_boot_target(
+        &self,
+        uuid: &Uuid,
+        sleep_secs: u64,
+    ) -> anyhow::Result<BootTarget> {
         if self.device_exists(uuid).await? {
             store::update_device_last_seen(self.conn, uuid)
                 .await
@@ -89,10 +97,20 @@ impl<'a> Director<'a> {
                 // Return appropriate boot target based on the current action
                 return current_action.to_boot_target(&ctx).await;
             }
+
+            // No active plan — only boot local disk if the device is fully provisioned.
+            // Any other lifecycle state means the device has no OS yet, so sleep and retry
+            // so it will pick up a plan when one becomes available.
+            let lifecycle = crate::lifecycle::store::get_device_lifecycle(self.conn, uuid).await?;
+            if matches!(lifecycle, Some(DeviceLifecycle::Provisioned)) {
+                return Ok(BootTarget::LocalDisk);
+            }
         }
 
-        // Default to local disk if no active plan
-        Ok(BootTarget::LocalDisk)
+        // Unknown device or non-provisioned device with no active plan — sleep and retry.
+        Ok(BootTarget::SleepReboot {
+            seconds: sleep_secs,
+        })
     }
 
     pub async fn update_attributes(
@@ -912,7 +930,7 @@ mod tests {
         assert_eq!(plan.actions[1], crate::plans::Action::ConfigureBmc);
 
         // Verify the device gets the right boot target for first action (discover_hardware)
-        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         match boot_target {
             BootTarget::AgentImage { action, cmdline: _ } => {
                 assert_eq!(action, "device-scan");
@@ -933,7 +951,7 @@ mod tests {
         assert_eq!(plan.current_step, 1);
 
         // Verify the device gets BMC config boot target for second action
-        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         assert!(
             matches!(boot_target, BootTarget::AgentImage { action, cmdline } if action == "configure-bmc")
         );
@@ -960,12 +978,13 @@ mod tests {
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].success, Some(true));
 
-        // After discovery, device should boot to local disk
-        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
-        match boot_target {
-            BootTarget::LocalDisk => {} // Expected
-            _ => panic!("Expected LocalDisk after discovery completion"),
-        }
+        // After discovery, device is Unprovisioned (no OS installed yet) and has no active plan.
+        // It should sleep and retry rather than attempt to boot local disk.
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
+        assert!(
+            matches!(boot_target, BootTarget::SleepReboot { seconds: 600 }),
+            "Expected SleepReboot after discovery completion for Unprovisioned device, got {boot_target:?}"
+        );
     }
 
     #[tokio::test]
@@ -2148,5 +2167,53 @@ mod tests {
             .assign_role_to_device(&test_uuid, role.id.unwrap())
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unknown_device_sleep_reboot() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        // UUID that was never registered
+        let unknown_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440064").unwrap();
+
+        let boot_target = director.next_boot_target(&unknown_uuid, 600).await.unwrap();
+        assert!(
+            matches!(boot_target, BootTarget::SleepReboot { seconds: 600 }),
+            "Expected SleepReboot for unknown device, got {boot_target:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_provisioned_device_boots_local_disk() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440065").unwrap();
+
+        // Register device and directly set lifecycle to Provisioned via the store.
+        // This avoids running through the full plan machinery and keeps the test focused
+        // on the boot-target logic.
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        crate::lifecycle::store::update_device_lifecycle(
+            &conn,
+            &test_uuid,
+            DeviceLifecycle::Provisioned,
+        )
+        .await
+        .unwrap();
+
+        // Verify lifecycle is Provisioned
+        let lifecycle = director.get_device_lifecycle(&test_uuid).await.unwrap();
+        assert_eq!(lifecycle, Some(DeviceLifecycle::Provisioned));
+
+        // A provisioned device with no active plan should boot local disk
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
+        assert!(
+            matches!(boot_target, BootTarget::LocalDisk),
+            "Expected LocalDisk for Provisioned device, got {boot_target:?}"
+        );
     }
 }

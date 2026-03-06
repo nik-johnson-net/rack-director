@@ -14,7 +14,8 @@ ExecStart=/usr/local/sbin/rack-director \
   --tftp-address 0.0.0.0:69 \
   --tftp-public-address 10.0.0.1 \
   --dhcp-server-identifier 10.0.0.1 \
-  --http-public-url http://10.0.0.1:3000
+  --http-public-url http://10.0.0.1:3000 \
+  --unprovisioned-sleep-secs 0
 StandardOutput=journal+console
 StandardError=journal+console
 Restart=on-failure
