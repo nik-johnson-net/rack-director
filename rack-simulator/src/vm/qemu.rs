@@ -164,6 +164,8 @@ pub fn agent_vm_args(config: &AgentVmConfig) -> Vec<String> {
         "-smp".into(),
         "2".into(),
         "-nographic".into(),
+        "-boot".into(),
+        "order=n".into(),
         "-m".into(),
         config.memory_mb.to_string(),
     ];

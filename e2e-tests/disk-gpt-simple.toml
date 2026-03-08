@@ -5,21 +5,18 @@ timeout_seconds = 1800
 
 [vm]
 memory_mb = 2048
-disks = [{ size_gb = 4 }]
+disks = [{ size_gb = 20 }]
 
 # Platform matching a single virtio disk in a QEMU q35 VM.
-# NOTE: The exact by-path value for the first virtio disk must be verified
-# empirically by running a VM and checking /dev/disk/by-path/. Common values:
-#   pci-0000:04:00.0-virtio-pci-virtio0   (older QEMU)
-#   pci-0000:00:04.0-virtio-pci-virtio0   (some configurations)
-# Run: ls -la /dev/disk/by-path/ inside a test VM to determine the correct path.
+# Use /dev/vda (stable virtio block device name) since the by-path PCI address
+# varies by QEMU version and is not predictable without explicit addr= assignment.
 [[rack_director.platforms]]
 name = "test-platform"
 [rack_director.platforms.attributes]
-disks = [{ path = "/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio0", size_gb = 4, disk_type = "hdd", label = "ROOT" }]
+disks = [{ path = "/dev/vda", size_gb = 20, disk_type = "hdd", label = "ROOT" }]
 nics = [{ logical = "eth0", speed_mbps = 1000 }]
 cpus = [{ brand = "intel", model = "Unknown", cores = 1 }]
-memory_gib = 1
+memory_gib = 2
 
 [[rack_director.roles]]
 name = "test-role"
@@ -31,6 +28,11 @@ device = "ROOT"
 partition_table = "gpt"
 
 [[rack_director.roles.disk_layout.disks.partitions]]
+label = "bios_grub"
+size = "1MiB"
+flags = ["bios_grub"]
+
+[[rack_director.roles.disk_layout.disks.partitions]]
 label = "efi"
 size = "512MiB"
 filesystem = "vfat"
@@ -40,10 +42,6 @@ flags = ["esp", "boot"]
 label = "root"
 size = "rest"
 filesystem = "ext4"
-
-[[lifecycle.steps]]
-from = "new"
-to = "unprovisioned"
 
 [[lifecycle.steps]]
 from = "unprovisioned"

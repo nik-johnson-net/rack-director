@@ -68,6 +68,18 @@ enum E2eCommand {
             default_value = ".local-storage/director-image/director-initramfs.img"
         )]
         director_initramfs: PathBuf,
+        #[arg(
+            long,
+            default_value = ".local-storage/installer-cache/rocky-10.1-vmlinuz"
+        )]
+        rocky_installer_kernel: PathBuf,
+        #[arg(
+            long,
+            default_value = ".local-storage/installer-cache/rocky-10.1-initrd.img"
+        )]
+        rocky_installer_initramfs: PathBuf,
+        #[arg(long, default_value = "e2e-tests/rocky-linux-10.1-ks.cfg")]
+        rocky_installer_kickstart: PathBuf,
         #[arg(long)]
         serial_logs_dir: Option<PathBuf>,
     },
@@ -89,6 +101,18 @@ enum E2eCommand {
             default_value = ".local-storage/director-image/director-initramfs.img"
         )]
         director_initramfs: PathBuf,
+        #[arg(
+            long,
+            default_value = ".local-storage/installer-cache/rocky-10.1-vmlinuz"
+        )]
+        rocky_installer_kernel: PathBuf,
+        #[arg(
+            long,
+            default_value = ".local-storage/installer-cache/rocky-10.1-initrd.img"
+        )]
+        rocky_installer_initramfs: PathBuf,
+        #[arg(long, default_value = "e2e-tests/rocky-linux-10.1-ks.cfg")]
+        rocky_installer_kickstart: PathBuf,
         #[arg(long)]
         serial_logs_dir: Option<PathBuf>,
     },
@@ -290,6 +314,9 @@ async fn main() -> Result<()> {
                 agent_initramfs,
                 director_kernel,
                 director_initramfs,
+                rocky_installer_kernel,
+                rocky_installer_initramfs,
+                rocky_installer_kickstart,
                 serial_logs_dir,
             } => {
                 let run_config = e2e::runner::TestRunConfig {
@@ -297,6 +324,9 @@ async fn main() -> Result<()> {
                     agent_initramfs,
                     director_kernel,
                     director_initramfs,
+                    rocky_installer_kernel,
+                    rocky_installer_initramfs,
+                    rocky_installer_kickstart,
                     serial_logs_dir,
                 };
                 let result = e2e::runner::run_test(&test_file, &run_config, &output).await?;
@@ -311,6 +341,9 @@ async fn main() -> Result<()> {
                 agent_initramfs,
                 director_kernel,
                 director_initramfs,
+                rocky_installer_kernel,
+                rocky_installer_initramfs,
+                rocky_installer_kickstart,
                 serial_logs_dir,
             } => {
                 let run_config = e2e::runner::TestRunConfig {
@@ -318,6 +351,9 @@ async fn main() -> Result<()> {
                     agent_initramfs,
                     director_kernel,
                     director_initramfs,
+                    rocky_installer_kernel,
+                    rocky_installer_initramfs,
+                    rocky_installer_kickstart,
                     serial_logs_dir,
                 };
                 let results = if parallel {

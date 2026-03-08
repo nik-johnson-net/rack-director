@@ -255,6 +255,11 @@ async fn scan_disks() -> Result<Vec<DiskInfo>> {
 
         // Read disk information from sysfs
         let size = read_disk_size(&device_name);
+        // Skip devices with zero size (e.g., CD-ROM drives with no media)
+        if size == Some(0) {
+            debug!("Skipping zero-size device: {}", device_name);
+            continue;
+        }
         let disk_type = detect_disk_type(&device_name);
         let model = read_disk_model(&device_name);
 

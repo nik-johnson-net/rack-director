@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
 use crate::e2e::agent_vm::AgentVm;
-use crate::e2e::build::{ensure_agent_images, ensure_director_images};
+use crate::e2e::build::{ensure_agent_images, ensure_director_images, ensure_rocky_installer};
 use crate::e2e::config::TestConfig;
 use crate::e2e::director::DirectorVm;
 use crate::e2e::lifecycle;
@@ -19,6 +19,12 @@ pub struct TestRunConfig {
     pub agent_initramfs: PathBuf,
     pub director_kernel: PathBuf,
     pub director_initramfs: PathBuf,
+    /// Rocky Linux 10.1 PXE installer kernel (vmlinuz). Downloaded on first run.
+    pub rocky_installer_kernel: PathBuf,
+    /// Rocky Linux 10.1 PXE installer initramfs (initrd.img). Downloaded on first run.
+    pub rocky_installer_initramfs: PathBuf,
+    /// Kickstart file to serve as the OS install script.
+    pub rocky_installer_kickstart: PathBuf,
     /// If Some, write per-VM serial logs to named files in this directory.
     pub serial_logs_dir: Option<PathBuf>,
 }
@@ -52,6 +58,12 @@ pub async fn run_test(
     ensure_agent_images(
         &run_config.agent_kernel,
         &run_config.agent_initramfs,
+        output,
+    )
+    .await?;
+    ensure_rocky_installer(
+        &run_config.rocky_installer_kernel,
+        &run_config.rocky_installer_initramfs,
         output,
     )
     .await?;
@@ -106,6 +118,12 @@ pub async fn run_all(
         output,
     )
     .await?;
+    ensure_rocky_installer(
+        &run_config.rocky_installer_kernel,
+        &run_config.rocky_installer_initramfs,
+        output,
+    )
+    .await?;
 
     let test_files = collect_test_files(tests_dir)?;
     let mut results = Vec::new();
@@ -135,6 +153,12 @@ pub async fn run_all_parallel(
         output,
     )
     .await?;
+    ensure_rocky_installer(
+        &run_config.rocky_installer_kernel,
+        &run_config.rocky_installer_initramfs,
+        output,
+    )
+    .await?;
 
     let test_files = collect_test_files(tests_dir)?;
     let output = Arc::new(output.clone());
@@ -146,6 +170,9 @@ pub async fn run_all_parallel(
             agent_initramfs: run_config.agent_initramfs.clone(),
             director_kernel: run_config.director_kernel.clone(),
             director_initramfs: run_config.director_initramfs.clone(),
+            rocky_installer_kernel: run_config.rocky_installer_kernel.clone(),
+            rocky_installer_initramfs: run_config.rocky_installer_initramfs.clone(),
+            rocky_installer_kickstart: run_config.rocky_installer_kickstart.clone(),
             serial_logs_dir: run_config.serial_logs_dir.clone(),
         };
         let output = Arc::clone(&output);
@@ -202,6 +229,17 @@ async fn run_test_inner(
     // Set up rack-director data
     output.step("Creating Operating System in Rack Director");
     let os_id = director.create_stub_os().await?;
+
+    output.step("Uploading Rocky Linux OS architecture and installer files");
+    director
+        .setup_rocky_linux_os(
+            os_id,
+            &run_config.rocky_installer_kernel,
+            &run_config.rocky_installer_initramfs,
+            &run_config.rocky_installer_kickstart,
+            output,
+        )
+        .await?;
 
     output.step("Creating Platforms in Rack Director");
     let mut platform_ids: HashMap<String, i64> = HashMap::new();

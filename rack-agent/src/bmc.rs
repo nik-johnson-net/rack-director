@@ -561,6 +561,16 @@ pub async fn bmc_configure(client: &RackDirector) -> Result<()> {
         password: bmc_config.password,
     };
 
+    // Check if BMC hardware is actually present before trying to configure it.
+    // On VMs (e.g., QEMU) there is no IPMI device, so ipmitool would fail.
+    // Treat absence of BMC hardware as a graceful no-op rather than an error.
+    let bmc_present = scan_bmc().await.ok().flatten().is_some();
+    if !bmc_present {
+        info!("No BMC hardware detected, skipping BMC configuration");
+        client.action_success(&uuid).await?;
+        return Ok(());
+    }
+
     // Detect available LAN channels and try configuring BMC on each
     let channels = detect_bmc_lan_channels().await;
     let mut last_error = None;

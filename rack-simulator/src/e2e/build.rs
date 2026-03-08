@@ -3,9 +3,12 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
 };
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt as _, process::Command};
 
 use crate::output::Output;
+
+const ROCKY_LINUX_MIRROR: &str =
+    "https://mirror.rackspace.com/rocky/10.1/BaseOS/x86_64/kickstart/images/pxeboot";
 
 /// Ensure director VM images exist at the given paths, always running Docker build.
 ///
@@ -59,6 +62,72 @@ pub async fn ensure_agent_images(kernel: &Path, initramfs: &Path, output: &Outpu
         output,
     )
     .await
+}
+
+/// Ensure Rocky Linux 10.1 PXE installer files are cached locally.
+///
+/// Downloads `vmlinuz` and `initrd.img` from the Rackspace mirror if they are
+/// not already present at the given paths.  The files are large (tens of MiB)
+/// so they are cached and skipped on subsequent runs.
+pub async fn ensure_rocky_installer(
+    kernel: &Path,
+    initramfs: &Path,
+    output: &Output,
+) -> Result<()> {
+    if kernel.exists() && initramfs.exists() {
+        output.info("Rocky Linux installer already cached — skipping download");
+        return Ok(());
+    }
+
+    if let Some(dir) = kernel.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("Failed to create installer cache dir: {}", dir.display()))?;
+    }
+
+    output.step("Downloading Rocky Linux 10.1 PXE installer...");
+
+    download_file(&format!("{}/vmlinuz", ROCKY_LINUX_MIRROR), kernel, output)
+        .await
+        .context("Failed to download Rocky Linux vmlinuz")?;
+
+    download_file(
+        &format!("{}/initrd.img", ROCKY_LINUX_MIRROR),
+        initramfs,
+        output,
+    )
+    .await
+    .context("Failed to download Rocky Linux initrd.img")?;
+
+    output.success("Rocky Linux installer downloaded");
+    Ok(())
+}
+
+/// Download a URL to a local file, showing progress.
+async fn download_file(url: &str, dest: &Path, output: &Output) -> Result<()> {
+    output.info(&format!("Downloading {} → {}", url, dest.display()));
+
+    let response = reqwest::get(url)
+        .await
+        .with_context(|| format!("HTTP request failed: {}", url))?;
+
+    if !response.status().is_success() {
+        return Err(anyhow!("HTTP {} downloading {}", response.status(), url));
+    }
+
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .with_context(|| format!("Failed to create file: {}", dest.display()))?;
+
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("Failed to read response body from {}", url))?;
+
+    file.write_all(&bytes)
+        .await
+        .with_context(|| format!("Failed to write to {}", dest.display()))?;
+
+    Ok(())
 }
 
 /// Run a `docker build` with the given target and verify output files were produced.

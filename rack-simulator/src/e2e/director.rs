@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::e2e::config::{PlatformSpec, RoleSpec};
+use crate::output::Output;
 use crate::vm::qemu::{DirectorVmConfig, QemuProcess, director_vm_args, find_available_tcp_port};
 
 /// A running director VM with HTTP API access.
@@ -290,10 +291,40 @@ impl DirectorVm {
         Ok(())
     }
 
+    /// Wait until the device has no active lifecycle transition (polls every 2s).
+    pub async fn wait_for_idle(&self, uuid: &str, timeout: Duration) -> Result<()> {
+        let url = format!("{}/ui/devices/{}/transitions/active", self.host_url(), uuid);
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "Device {} still has an active transition after {:?}",
+                    uuid,
+                    timeout
+                ));
+            }
+            if let Ok(resp) = self.client.get(&url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(value) = resp.json::<Value>().await {
+                        if value.is_null() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            sleep(Duration::from_secs(2)).await;
+        }
+    }
+
     /// Start a lifecycle transition for a device.
     pub async fn start_transition(&self, uuid: &str, to_state: &str) -> Result<()> {
-        let url = format!("{}/ui/devices/{}/lifecycle", self.host_url(), uuid);
-        let body = json!({ "to": to_state });
+        let url = format!(
+            "{}/ui/devices/{}/lifecycle/transition",
+            self.host_url(),
+            uuid
+        );
+        let body = json!({ "to_state": to_state });
         let resp = self
             .client
             .post(&url)
@@ -334,6 +365,96 @@ impl DirectorVm {
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow!("No lifecycle in device response"))
+    }
+
+    /// Set up a Rocky Linux OS architecture: create the arch row, upload kernel,
+    /// initramfs, and kickstart install script.
+    pub async fn setup_rocky_linux_os(
+        &self,
+        os_id: i64,
+        kernel: &Path,
+        initramfs: &Path,
+        kickstart: &Path,
+        output: &Output,
+    ) -> Result<()> {
+        let arch_url = format!(
+            "{}/ui/operating_systems/{}/architectures",
+            self.host_url(),
+            os_id
+        );
+        let body = json!({
+            "architecture": "x86-64",
+            "cmdline_args": "inst.ks={{install_script_url}}"
+        });
+        let resp = self
+            .client
+            .post(&arch_url)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to create OS architecture")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Create OS architecture failed ({}): {}",
+                status,
+                text
+            ));
+        }
+
+        output.info("Uploading Rocky Linux kernel...");
+        self.upload_os_file(os_id, "x86-64", "kernel", kernel)
+            .await?;
+
+        output.info("Uploading Rocky Linux initramfs...");
+        self.upload_os_file(os_id, "x86-64", "initramfs", initramfs)
+            .await?;
+
+        output.info("Uploading Rocky Linux kickstart...");
+        self.upload_os_file(os_id, "x86-64", "install_script", kickstart)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Upload a file to an OS architecture component endpoint.
+    async fn upload_os_file(
+        &self,
+        os_id: i64,
+        arch: &str,
+        component: &str,
+        path: &Path,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/ui/operating_systems/{}/architectures/{}/{}",
+            self.host_url(),
+            os_id,
+            arch,
+            component
+        );
+        let file_bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let resp = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/octet-stream")
+            .body(file_bytes)
+            .send()
+            .await
+            .with_context(|| format!("Failed to upload {}", component))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Upload {} failed ({}): {}",
+                component,
+                status,
+                text
+            ));
+        }
+        Ok(())
     }
 
     /// The host-accessible URL of rack-director (via hostfwd).

@@ -16,6 +16,9 @@ pub async fn drive_lifecycle(
     timeout: Duration,
 ) -> Result<()> {
     for step in steps {
+        // Wait for any ongoing transition (e.g. initial discovery) to complete first
+        director.wait_for_idle(device_uuid, timeout).await?;
+
         let current = director.get_lifecycle_state(device_uuid).await?;
         if current != step.from {
             return Err(anyhow!(
