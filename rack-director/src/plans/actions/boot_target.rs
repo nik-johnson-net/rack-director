@@ -33,6 +33,7 @@ impl BootTarget {
         &self,
         root_url: &str,
         image_store: &Arc<ImageStore>,
+        device_uuid: Option<&uuid::Uuid>,
     ) -> Result<String> {
         match self {
             BootTarget::LocalDisk => Ok(generate_boot_local_script()),
@@ -66,7 +67,8 @@ impl BootTarget {
                 let module_urls = try_join_all(module_futures).await?;
 
                 // Run template.
-                let resolved_cmdline = templates::render_cmdline_args(cmdline, root_url)?;
+                let resolved_cmdline =
+                    templates::render_cmdline_args(cmdline, root_url, device_uuid)?;
 
                 Ok(generate_netboot_script(
                     &kernel_url,

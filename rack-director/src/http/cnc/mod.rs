@@ -44,6 +44,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/cnc/install_script", get(install_script_handler))
         .route("/cnc/agent-images/{filename}", get(agent_images_handler))
         .route("/cnc/boot/{filename}", get(boot_files::boot_file_handler))
+        .route("/cnc/files/{*path}", get(image_store_handler))
         .route("/cnc/update_attributes", post(update_attributes))
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
@@ -163,7 +164,7 @@ async fn ipxe_handler(
     };
 
     let ipxe_script = boot_target
-        .to_ipxe_script(&root_url, &state.image_store)
+        .to_ipxe_script(&root_url, &state.image_store, Some(&uuid))
         .await?;
 
     log::debug!("cnc/ipxe: returning script for {}:\n{}", uuid, ipxe_script);
@@ -186,6 +187,28 @@ async fn install_script_handler(
         .map_err(Error::ServerInternalError)?;
 
     install_script::render_for_device(&conn, &state.image_store, &uuid).await
+}
+
+/// Serve a file from the image store at `/cnc/files/{path}`.
+///
+/// Used by iPXE to download OS installer kernels and initramfs images that have been
+/// uploaded to the local image store. The `--storage-base-url` must be set to
+/// `http://<director>/cnc/files` so that `ImageStore::get_url` generates URLs that
+/// route here.
+async fn image_store_handler(
+    State(state): State<Arc<AppState>>,
+    extract::Path(path): extract::Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    let stream = state.image_store.download(&path).await.map_err(|e| {
+        warn!("image_store_handler: failed to download {}: {}", path, e);
+        StatusCode::NOT_FOUND
+    })?;
+    let body = axum::body::Body::from_stream(stream);
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        body,
+    ))
 }
 
 async fn agent_images_handler(

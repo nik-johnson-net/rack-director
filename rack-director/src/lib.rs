@@ -168,10 +168,6 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // dropped immediately after — the schema persists in the file.
     let _ = database::run_migrations(factory.as_ref()).await?;
 
-    // Initialize storage
-    let storage_config = build_storage_config(&args)?;
-    let image_store = ImageStore::new(storage_config)?;
-
     // Determine DHCP Server Identifier (Option 54)
     // Priority: CLI arg > auto-discovered IP > fallback to gateway
     let server_identifier = determine_server_identifier(args.dhcp_server_identifier.as_ref())?;
@@ -179,7 +175,12 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Initialize Director
     let public_url = args
         .http_public_url
+        .clone()
         .unwrap_or_else(|| format!("http://{}:{}", server_identifier, args.http_address.port()));
+
+    // Initialize storage (after public_url is known so it can be used as the default base URL)
+    let storage_config = build_storage_config(&args, &public_url)?;
+    let image_store = ImageStore::new(storage_config)?;
 
     // Cleanup task uses the shared factory.
     let lease_cleanup_handle = dhcp::spawn_lease_cleanup_task(factory.clone());
@@ -249,11 +250,14 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     })
 }
 
-fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow::Error> {
+fn build_storage_config(
+    args: &Args,
+    public_url: &str,
+) -> Result<storage::ImageStoreConfig, anyhow::Error> {
     let base_url = args
         .storage_base_url
         .clone()
-        .unwrap_or_else(|| format!("http://{}/images", args.http_address));
+        .unwrap_or_else(|| format!("{}/cnc/files", public_url));
 
     match args.storage_type.as_str() {
         "local" => Ok(storage::ImageStoreConfig::Local {

@@ -74,12 +74,21 @@ pub fn render_install_script(
     Ok(handlebars.render_template(template, &context)?)
 }
 
-pub fn render_cmdline_args(template: &str, root_url: &str) -> Result<String> {
+pub fn render_cmdline_args(
+    template: &str,
+    root_url: &str,
+    device_uuid: Option<&Uuid>,
+) -> Result<String> {
     let mut handlebars = Handlebars::new();
     handlebars.register_escape_fn(handlebars::no_escape);
 
+    let install_script_url = match device_uuid {
+        Some(uuid) => format!("{}/cnc/install_script?uuid={}", root_url, uuid),
+        None => format!("{}/cnc/install_script", root_url),
+    };
+
     let context = json!({
-        "install_script_url": format!("{}/cnc/install_script", root_url),
+        "install_script_url": install_script_url,
     });
 
     Ok(handlebars.render_template(template, &context)?)
