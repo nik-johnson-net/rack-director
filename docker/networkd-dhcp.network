@@ -1,9 +1,13 @@
 [Match]
-Name=en* eth*
+Name=*
+Type=!loopback
 
 [Network]
 DHCP=yes
-LinkLocalAddressing=yes
+LinkLocalAddressing=no
 
 [DHCP]
 UseDomains=yes
+
+[Link]
+RequiredForOnline=routable

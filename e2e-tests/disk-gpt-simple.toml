@@ -1,0 +1,39 @@
+[test]
+name = "disk-gpt-simple"
+description = "GPT layout with ESP + ext4 root using ROOT platform label"
+timeout_seconds = 1800
+
+[vm]
+memory_mb = 2048
+disks = [{ size_gb = 20 }]
+
+[[rack_director.roles]]
+name = "test-role"
+
+[rack_director.roles.disk_layout]
+[[rack_director.roles.disk_layout.disks]]
+device = "ROOT"
+partition_table = "gpt"
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "bios_grub"
+size = "1MiB"
+flags = ["bios_grub"]
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "efi"
+size = "512MiB"
+filesystem = "vfat"
+flags = ["esp", "boot"]
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "root"
+size = "rest"
+filesystem = "ext4"
+
+[[lifecycle.steps]]
+from = "unprovisioned"
+to = "provisioned"
+
+[lifecycle]
+expect_final_state = "provisioned"

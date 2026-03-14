@@ -6,6 +6,7 @@ use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleTransition};
 use crate::operating_systems::Architecture;
 use crate::plans::actions::BootTarget;
 use crate::plans::{Plan, PlanStatus};
+use crate::{platforms, roles};
 
 mod ipmi;
 pub(crate) mod store;
@@ -64,7 +65,15 @@ impl<'a> Director<'a> {
     }
 
     /// Get the boot target for this device.
-    pub async fn next_boot_target(&self, uuid: &Uuid) -> anyhow::Result<BootTarget> {
+    ///
+    /// `sleep_secs` controls how long an unprovisioned or unknown device sleeps
+    /// before rebooting to retry PXE boot.  Production callers pass 600; e2e
+    /// tests may pass 0 to avoid waiting.
+    pub async fn next_boot_target(
+        &self,
+        uuid: &Uuid,
+        sleep_secs: u64,
+    ) -> anyhow::Result<BootTarget> {
         if self.device_exists(uuid).await? {
             store::update_device_last_seen(self.conn, uuid)
                 .await
@@ -88,10 +97,20 @@ impl<'a> Director<'a> {
                 // Return appropriate boot target based on the current action
                 return current_action.to_boot_target(&ctx).await;
             }
+
+            // No active plan — only boot local disk if the device is fully provisioned.
+            // Any other lifecycle state means the device has no OS yet, so sleep and retry
+            // so it will pick up a plan when one becomes available.
+            let lifecycle = crate::lifecycle::store::get_device_lifecycle(self.conn, uuid).await?;
+            if matches!(lifecycle, Some(DeviceLifecycle::Provisioned)) {
+                return Ok(BootTarget::LocalDisk);
+            }
         }
 
-        // Default to local disk if no active plan
-        Ok(BootTarget::LocalDisk)
+        // Unknown device or non-provisioned device with no active plan — sleep and retry.
+        Ok(BootTarget::SleepReboot {
+            seconds: sleep_secs,
+        })
     }
 
     pub async fn update_attributes(
@@ -560,11 +579,37 @@ impl<'a> Director<'a> {
 
     // Role assignment methods
 
+    /// Assign a role to a device, validating disk layout labels against the platform
+    ///
+    /// If the role's disk layout uses platform labels (device names not starting with '/'),
+    /// the device must have a platform assigned, and all labels must exist in that platform.
     pub async fn assign_role_to_device(
         &self,
         device_uuid: &Uuid,
         role_id: i64,
     ) -> anyhow::Result<()> {
+        // Get the role to check its disk layout
+        let role = roles::store::get(self.conn, role_id).await?;
+
+        // Check if disk layout uses labels
+        if crate::disk_layout::layout_uses_labels(&role.disk_layout) {
+            // Get device to check platform
+            let device = store::get_device(self.conn, device_uuid).await?;
+
+            let platform_id = device.platform_id.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot assign role '{}': disk layout uses platform labels but device has no platform assigned",
+                    role.name
+                )
+            })?;
+
+            // Validate labels exist in platform
+            let platform = platforms::store::get(self.conn, platform_id).await?;
+            crate::disk_layout::validate_layout_against_platform(
+                &role.disk_layout,
+                &platform.attributes,
+            )?;
+        }
         store::assign_role_to_device(self.conn, device_uuid, role_id).await
     }
 
@@ -885,7 +930,7 @@ mod tests {
         assert_eq!(plan.actions[1], crate::plans::Action::ConfigureBmc);
 
         // Verify the device gets the right boot target for first action (discover_hardware)
-        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         match boot_target {
             BootTarget::AgentImage { action, cmdline: _ } => {
                 assert_eq!(action, "device-scan");
@@ -906,7 +951,7 @@ mod tests {
         assert_eq!(plan.current_step, 1);
 
         // Verify the device gets BMC config boot target for second action
-        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         assert!(
             matches!(boot_target, BootTarget::AgentImage { action, cmdline } if action == "configure-bmc")
         );
@@ -933,12 +978,13 @@ mod tests {
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].success, Some(true));
 
-        // After discovery, device should boot to local disk
-        let boot_target = director.next_boot_target(&test_uuid).await.unwrap();
-        match boot_target {
-            BootTarget::LocalDisk => {} // Expected
-            _ => panic!("Expected LocalDisk after discovery completion"),
-        }
+        // After discovery, device is Unprovisioned (no OS installed yet) and has no active plan.
+        // It should sleep and retry rather than attempt to boot local disk.
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
+        assert!(
+            matches!(boot_target, BootTarget::SleepReboot { seconds: 600 }),
+            "Expected SleepReboot after discovery completion for Unprovisioned device, got {boot_target:?}"
+        );
     }
 
     #[tokio::test]
@@ -1916,5 +1962,258 @@ mod tests {
         assert_eq!(device.platform_id, Some(manual_platform.id.unwrap()));
         assert_ne!(device.platform_id, Some(auto_platform_id));
         assert!(device.attributes.warnings.is_empty());
+    }
+
+    // ========== Role Assignment Validation Tests ==========
+
+    #[tokio::test]
+    async fn test_assign_role_with_labels_no_platform_fails() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440060").unwrap();
+
+        // Register device (no platform)
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create OS and role with label-based layout
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "ROOT".to_string(), // Platform label
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role =
+            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None)
+                .await
+                .unwrap();
+
+        // Assign role should fail - labels used but no platform
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no platform assigned")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_with_missing_labels_fails() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440061").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create platform without the label the role needs
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![crate::platforms::PlatformDisk {
+                path: "/dev/sda".to_string(),
+                size_gb: 480,
+                disk_type: crate::platforms::DiskType::Ssd,
+                label: Some("DATA1".to_string()), // Has DATA1, not ROOT
+            }],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 32,
+        };
+        let platform =
+            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
+                .await
+                .unwrap();
+        director
+            .assign_platform_to_device(&test_uuid, platform.id.unwrap())
+            .await
+            .unwrap();
+
+        // Create role that references ROOT label (not in platform)
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = crate::roles::store::create(
+            &conn,
+            "missing-label-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Assign should fail - label not in platform
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ROOT"));
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_with_matching_labels_succeeds() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440062").unwrap();
+
+        // Register device
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create platform with ROOT label
+        let platform_attrs = crate::platforms::PlatformAttributes {
+            disks: vec![crate::platforms::PlatformDisk {
+                path: "/dev/sda".to_string(),
+                size_gb: 480,
+                disk_type: crate::platforms::DiskType::Ssd,
+                label: Some("ROOT".to_string()),
+            }],
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 32,
+        };
+        let platform =
+            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
+                .await
+                .unwrap();
+        director
+            .assign_platform_to_device(&test_uuid, platform.id.unwrap())
+            .await
+            .unwrap();
+
+        // Create role that uses ROOT label
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role =
+            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None)
+                .await
+                .unwrap();
+
+        // Assign should succeed - label matches platform
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_with_paths_no_platform_succeeds() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440063").unwrap();
+
+        // Register device (no platform)
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create role with path-based layout (no labels)
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![common::disk_layout::DiskConfig {
+                device: "/dev/sda".to_string(), // Absolute path, not a label
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role =
+            crate::roles::store::create(&conn, "path-role", None, os.id.unwrap(), &layout, None)
+                .await
+                .unwrap();
+
+        // Assign should succeed - no labels, no platform needed
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unknown_device_sleep_reboot() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        // UUID that was never registered
+        let unknown_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440064").unwrap();
+
+        let boot_target = director.next_boot_target(&unknown_uuid, 600).await.unwrap();
+        assert!(
+            matches!(boot_target, BootTarget::SleepReboot { seconds: 600 }),
+            "Expected SleepReboot for unknown device, got {boot_target:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_provisioned_device_boots_local_disk() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440065").unwrap();
+
+        // Register device and directly set lifecycle to Provisioned via the store.
+        // This avoids running through the full plan machinery and keeps the test focused
+        // on the boot-target logic.
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        crate::lifecycle::store::update_device_lifecycle(
+            &conn,
+            &test_uuid,
+            DeviceLifecycle::Provisioned,
+        )
+        .await
+        .unwrap();
+
+        // Verify lifecycle is Provisioned
+        let lifecycle = director.get_device_lifecycle(&test_uuid).await.unwrap();
+        assert_eq!(lifecycle, Some(DeviceLifecycle::Provisioned));
+
+        // A provisioned device with no active plan should boot local disk
+        let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
+        assert!(
+            matches!(boot_target, BootTarget::LocalDisk),
+            "Expected LocalDisk for Provisioned device, got {boot_target:?}"
+        );
     }
 }

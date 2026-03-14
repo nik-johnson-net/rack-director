@@ -16,12 +16,15 @@ dhcproto = { workspace = true }
 futures = "0.3"
 handlebars = { workspace = true }
 log = { workspace = true }
+network-interface = { workspace = true }
 rand = "0.8"
 rusqlite = { workspace = true, features = ["uuid"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+socket2 = { workspace = true }
 env_logger = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
+tokio-recvmsg = { workspace = true }
 uuid = { version = "1.20.0", features = ["serde"] }
 object_store = { version = "0.13.1", features = ["aws"] }
 

@@ -1,4 +1,5 @@
 pub mod device_attributes;
+pub mod disk_layout;
 mod subnet;
 
 pub use subnet::Ipv4Subnet;

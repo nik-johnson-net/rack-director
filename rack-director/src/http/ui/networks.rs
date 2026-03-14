@@ -145,6 +145,14 @@ async fn create_network(
     )
     .await?;
 
+    // Notify the DHCP socket manager so it can bind a socket for this network
+    // before we return 201. This ensures the socket is ready when the caller
+    // starts sending DHCP packets.
+    state
+        .dhcp
+        .network_created(network.id, network.subnet.clone())
+        .await;
+
     Ok((StatusCode::CREATED, Json(network)))
 }
 
@@ -189,6 +197,8 @@ async fn delete_network(
 ) -> Result<StatusCode, HttpError> {
     let conn = state.connection_factory.open().await?;
     crate::dhcp::store::delete_network(&conn, id).await?;
+    // Notify the DHCP socket manager to close the socket for this network.
+    state.dhcp.network_deleted(id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

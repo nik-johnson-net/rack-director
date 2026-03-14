@@ -1,7 +1,8 @@
-pub mod boot_files;
+mod boot_files;
 mod database;
 mod dhcp;
 mod director;
+mod disk_layout;
 mod http;
 mod lifecycle;
 mod operating_systems;
@@ -113,6 +114,18 @@ pub struct Args {
         help = "Path to agent image files (vmlinuz, initramfs.img)"
     )]
     agent_images_path: String,
+
+    /// Disable the wildcard broadcast socket.
+    ///
+    /// When set, no `0.0.0.0:PORT` socket is created. The server-identifier
+    /// socket handles all traffic. Intended for integration tests where
+    /// broadcast sockets are undesirable.
+    #[arg(long, default_value_t = false)]
+    no_dhcp_broadcast: bool,
+
+    /// Number of seconds unprovisioned devices sleep before rebooting to retry PXE boot.
+    #[arg(long, default_value_t = 600)]
+    unprovisioned_sleep_secs: u64,
 }
 
 pub struct RackDirectorHandle {
@@ -124,8 +137,8 @@ pub struct RackDirectorHandle {
     tftp_handle: JoinHandle<Result<(), anyhow::Error>>,
     pub tftp_port: u16,
 
-    // Information for the dhcp service
-    dhcp_handle: JoinHandle<Result<(), anyhow::Error>>,
+    // Information for the dhcp service (socket manager run loop, returns ())
+    dhcp_handle: JoinHandle<()>,
     pub dhcp_port: u16,
 
     // Background task for cleaning up expired DHCP leases
@@ -136,7 +149,9 @@ impl RackDirectorHandle {
     // Wait for the services to stop.
     // TODO: Currently just waiting for any one to abort. Need a proper abort signal / shutdown architecture.
     pub async fn wait(self) {
-        let _ = tokio::try_join!(self.http_handle, self.tftp_handle, self.dhcp_handle);
+        // dhcp_handle returns () so it cannot be joined with try_join!; abort it on exit.
+        let _ = tokio::try_join!(self.http_handle, self.tftp_handle);
+        self.dhcp_handle.abort();
         self.lease_cleanup_handle.abort();
     }
 }
@@ -153,10 +168,6 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // dropped immediately after — the schema persists in the file.
     let _ = database::run_migrations(factory.as_ref()).await?;
 
-    // Initialize storage
-    let storage_config = build_storage_config(&args)?;
-    let image_store = ImageStore::new(storage_config)?;
-
     // Determine DHCP Server Identifier (Option 54)
     // Priority: CLI arg > auto-discovered IP > fallback to gateway
     let server_identifier = determine_server_identifier(args.dhcp_server_identifier.as_ref())?;
@@ -164,7 +175,12 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Initialize Director
     let public_url = args
         .http_public_url
+        .clone()
         .unwrap_or_else(|| format!("http://{}:{}", server_identifier, args.http_address.port()));
+
+    // Initialize storage (after public_url is known so it can be used as the default base URL)
+    let storage_config = build_storage_config(&args, &public_url)?;
+    let image_store = ImageStore::new(storage_config)?;
 
     // Cleanup task uses the shared factory.
     let lease_cleanup_handle = dhcp::spawn_lease_cleanup_task(factory.clone());
@@ -201,6 +217,9 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let mut tftp_server = tftp::Server::new(boot_file_provider.clone());
     tftp_server.address(args.tftp_address);
 
+    // Start DHCP Service first so the DhcpControl handle is available for HTTP.
+    let dhcp_start_result = dhcp_server.serve(args.no_dhcp_broadcast).await?;
+
     // Start HTTP Service — each HTTP handler opens its own connection via the
     // shared factory, keeping it independent of DHCP and Director connections.
     let http_start_result = http::start(
@@ -209,14 +228,13 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         args.http_address,
         std::path::PathBuf::from(&args.agent_images_path),
         boot_file_provider,
+        dhcp_start_result.control.clone(),
+        args.unprovisioned_sleep_secs,
     )
     .await?;
 
     // Start TFTP Service
     let tftp_start_result = tftp_server.serve().await?;
-
-    // Start DHCP Service
-    let dhcp_start_result = dhcp_server.serve().await?;
 
     Ok(RackDirectorHandle {
         http_handle: http_start_result.join_handle,
@@ -232,11 +250,14 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     })
 }
 
-fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow::Error> {
+fn build_storage_config(
+    args: &Args,
+    public_url: &str,
+) -> Result<storage::ImageStoreConfig, anyhow::Error> {
     let base_url = args
         .storage_base_url
         .clone()
-        .unwrap_or_else(|| format!("http://{}/images", args.http_address));
+        .unwrap_or_else(|| format!("{}/cnc/files", public_url));
 
     match args.storage_type.as_str() {
         "local" => Ok(storage::ImageStoreConfig::Local {

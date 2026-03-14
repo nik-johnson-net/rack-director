@@ -74,12 +74,21 @@ pub fn render_install_script(
     Ok(handlebars.render_template(template, &context)?)
 }
 
-pub fn render_cmdline_args(template: &str, root_url: &str) -> Result<String> {
+pub fn render_cmdline_args(
+    template: &str,
+    root_url: &str,
+    device_uuid: Option<&Uuid>,
+) -> Result<String> {
     let mut handlebars = Handlebars::new();
     handlebars.register_escape_fn(handlebars::no_escape);
 
+    let install_script_url = match device_uuid {
+        Some(uuid) => format!("{}/cnc/install_script?uuid={}", root_url, uuid),
+        None => format!("{}/cnc/install_script", root_url),
+    };
+
     let context = json!({
-        "install_script_url": format!("{}/cnc/install_script", root_url),
+        "install_script_url": install_script_url,
     });
 
     Ok(handlebars.render_template(template, &context)?)
@@ -103,7 +112,11 @@ mod tests {
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: None,
             created_at: None,
             updated_at: None,
@@ -146,7 +159,11 @@ network:
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: None,
             created_at: None,
             updated_at: None,
@@ -185,7 +202,11 @@ network:
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: Some(json!({
                 "packages": ["nginx", "postgresql", "redis"]
             })),
@@ -230,7 +251,11 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
             name: "test-role".to_string(),
             description: None,
             os_id: 1,
-            disk_layout: DiskLayout { partitions: vec![] },
+            disk_layout: DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
             config_template: None,
             created_at: None,
             updated_at: None,

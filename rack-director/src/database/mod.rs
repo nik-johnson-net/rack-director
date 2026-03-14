@@ -64,7 +64,7 @@ pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
 }
 
-const LATEST_VERSION: usize = 13;
+const LATEST_VERSION: usize = 14;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -79,6 +79,7 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/11.sql"),
     include_str!("migrations/12.sql"),
     include_str!("migrations/13.sql"),
+    include_str!("migrations/14.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -87,19 +88,20 @@ use futures::{FutureExt, future::BoxFuture};
 /// Index corresponds to migration version (1-indexed, so POST_MIGRATION_HOOKS[10] runs after migration 11)
 type PostMigrationHook = fn(&Connection) -> BoxFuture<Result<()>>;
 const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
-    None,                                                               // Migration 1
-    None,                                                               // Migration 2
-    None,                                                               // Migration 3
-    None,                                                               // Migration 4
-    None,                                                               // Migration 5
-    None,                                                               // Migration 6
-    None,                                                               // Migration 7
-    None,                                                               // Migration 8
-    None,                                                               // Migration 9
-    None,                                                               // Migration 10
-    Some(|conn| migrations::migration_11::convert_uuids(conn).boxed()), // Migration 11
-    None,                                                               // Migration 12
-    None,                                                               // Migration 13
+    None,                                                                      // Migration 1
+    None,                                                                      // Migration 2
+    None,                                                                      // Migration 3
+    None,                                                                      // Migration 4
+    None,                                                                      // Migration 5
+    None,                                                                      // Migration 6
+    None,                                                                      // Migration 7
+    None,                                                                      // Migration 8
+    None,                                                                      // Migration 9
+    None,                                                                      // Migration 10
+    Some(|conn| migrations::migration_11::convert_uuids(conn).boxed()),        // Migration 11
+    None,                                                                      // Migration 12
+    None,                                                                      // Migration 13
+    Some(|conn| migrations::migration_14::convert_disk_layouts(conn).boxed()), // Migration 14
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.
@@ -337,5 +339,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(plan_uuid, test_uuid1);
+    }
+
+    #[tokio::test]
+    async fn test_migration_14_disk_layout_conversion() {
+        let conn = Connection::open(test_database_path!()).await.unwrap();
+
+        // Set up database to migration 13 (before disk layout migration)
+        conn.execute_batch(
+            "CREATE TABLE migrations (version INTEGER);
+             INSERT INTO migrations (version) VALUES (0)",
+        )
+        .await
+        .unwrap();
+
+        // Run migrations 1-13
+        for version in 1..=13 {
+            conn.execute_batch(MIGRATIONS[version - 1]).await.unwrap();
+            if let Some(hook) = POST_MIGRATION_HOOKS[version - 1] {
+                hook(&conn).await.unwrap();
+            }
+            conn.execute("UPDATE migrations SET version = ?1", [version])
+                .await
+                .unwrap();
+        }
+
+        // Insert test OS (required by roles foreign key)
+        conn.execute(
+            "INSERT INTO operating_systems (name, version) VALUES ('TestOS', '1.0')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        // Insert test role with old disk layout format
+        let old_layout = r#"{
+            "partitions": [
+                {
+                    "device": "/dev/sda1",
+                    "size": "512M",
+                    "filesystem": "vfat",
+                    "mount_point": "/boot/efi",
+                    "flags": ["esp"]
+                },
+                {
+                    "device": "/dev/sda2",
+                    "size": "rest",
+                    "filesystem": "ext4",
+                    "mount_point": "/",
+                    "flags": []
+                }
+            ]
+        }"#;
+
+        conn.execute(
+            "INSERT INTO roles (name, os_id, disk_layout) VALUES ('test_role', 1, ?1)",
+            (old_layout,),
+        )
+        .await
+        .unwrap();
+
+        // Verify old format is stored
+        let stored: String = conn
+            .query_row(
+                "SELECT disk_layout FROM roles WHERE name = 'test_role'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert!(stored.contains("\"partitions\""));
+        assert!(!stored.contains("\"disks\""));
+
+        // Run migration 14
+        let conn_factory = test_connection_factory!();
+        run_migrations(&conn_factory).await.unwrap();
+
+        // Verify new format is stored
+        let stored: String = conn
+            .query_row(
+                "SELECT disk_layout FROM roles WHERE name = 'test_role'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        // The new format should have "disks" at the top level
+        assert!(stored.contains("\"disks\""));
+        // The old format had top-level "partitions" - this should be gone
+        // (Note: "partitions" still exists inside each disk in the new format)
+        let layout: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert!(layout.get("disks").is_some());
+        assert!(layout.get("partitions").is_none());
+
+        // Verify structure is correct
+        let layout: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        let disks = layout.get("disks").unwrap().as_array().unwrap();
+        assert_eq!(disks.len(), 1);
+        assert_eq!(
+            disks[0].get("device").unwrap().as_str().unwrap(),
+            "/dev/sda"
+        );
+        assert_eq!(
+            disks[0].get("partition_table").unwrap().as_str().unwrap(),
+            "gpt"
+        );
+
+        let partitions = disks[0].get("partitions").unwrap().as_array().unwrap();
+        assert_eq!(partitions.len(), 2);
+        assert_eq!(partitions[0].get("size").unwrap().as_str().unwrap(), "512M");
+        assert_eq!(partitions[1].get("size").unwrap().as_str().unwrap(), "rest");
     }
 }

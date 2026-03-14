@@ -2,11 +2,13 @@ mod agent;
 mod boot;
 mod config;
 mod dhcp;
+mod e2e;
 mod hardware_profiles;
 mod http;
 mod output;
 mod server;
 mod tftp;
+mod vm;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -50,6 +52,56 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum E2eCommand {
+    /// Run a single e2e test
+    Run {
+        /// Path to test TOML file
+        test_file: PathBuf,
+        #[arg(long, default_value = ".build/agent-image/vmlinuz")]
+        agent_kernel: PathBuf,
+        #[arg(long, default_value = ".build/agent-image/initramfs.img")]
+        agent_initramfs: PathBuf,
+        #[arg(long, default_value = ".build/director-image/vmlinuz-director")]
+        director_kernel: PathBuf,
+        #[arg(long, default_value = ".build/director-image/director-initramfs.img")]
+        director_initramfs: PathBuf,
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-vmlinuz")]
+        rocky_installer_kernel: PathBuf,
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-initrd.img")]
+        rocky_installer_initramfs: PathBuf,
+        #[arg(long, default_value = "e2e-tests/rocky-linux-10.1-ks.cfg")]
+        rocky_installer_kickstart: PathBuf,
+        #[arg(long)]
+        serial_logs_dir: Option<PathBuf>,
+    },
+    /// Run all e2e tests in a directory
+    RunAll {
+        /// Directory containing test TOML files
+        #[arg(default_value = ".e2e-tests")]
+        tests_dir: PathBuf,
+        /// Run tests in parallel
+        #[arg(long)]
+        parallel: bool,
+        #[arg(long, default_value = ".build/agent-image/vmlinuz")]
+        agent_kernel: PathBuf,
+        #[arg(long, default_value = ".build/agent-image/initramfs.img")]
+        agent_initramfs: PathBuf,
+        #[arg(long, default_value = ".build/director-image/vmlinuz-director")]
+        director_kernel: PathBuf,
+        #[arg(long, default_value = ".build/director-image/director-initramfs.img")]
+        director_initramfs: PathBuf,
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-vmlinuz")]
+        rocky_installer_kernel: PathBuf,
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-initrd.img")]
+        rocky_installer_initramfs: PathBuf,
+        #[arg(long, default_value = "e2e-tests/rocky-linux-10.1-ks.cfg")]
+        rocky_installer_kickstart: PathBuf,
+        #[arg(long)]
+        serial_logs_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Full boot sequence (discovery + verify local boot)
     Boot {
@@ -90,6 +142,12 @@ enum Commands {
     /// Configuration management
     #[command(subcommand)]
     Config(ConfigCommands),
+
+    /// Run QEMU-based end-to-end integration tests
+    E2e {
+        #[command(subcommand)]
+        command: E2eCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,6 +289,69 @@ async fn main() -> Result<()> {
             let state = ServerState::load_or_create(&server, &server_config)?;
             agent::run(&conn, &state, &output).await?;
         }
+
+        Commands::E2e { command } => match command {
+            E2eCommand::Run {
+                test_file,
+                agent_kernel,
+                agent_initramfs,
+                director_kernel,
+                director_initramfs,
+                rocky_installer_kernel,
+                rocky_installer_initramfs,
+                rocky_installer_kickstart,
+                serial_logs_dir,
+            } => {
+                let run_config = e2e::runner::TestRunConfig {
+                    agent_kernel,
+                    agent_initramfs,
+                    director_kernel,
+                    director_initramfs,
+                    rocky_installer_kernel,
+                    rocky_installer_initramfs,
+                    rocky_installer_kickstart,
+                    serial_logs_dir,
+                };
+                let result = e2e::runner::run_test(&test_file, &run_config, &output).await?;
+                if !result.passed {
+                    std::process::exit(1);
+                }
+            }
+            E2eCommand::RunAll {
+                tests_dir,
+                parallel,
+                agent_kernel,
+                agent_initramfs,
+                director_kernel,
+                director_initramfs,
+                rocky_installer_kernel,
+                rocky_installer_initramfs,
+                rocky_installer_kickstart,
+                serial_logs_dir,
+            } => {
+                let run_config = e2e::runner::TestRunConfig {
+                    agent_kernel,
+                    agent_initramfs,
+                    director_kernel,
+                    director_initramfs,
+                    rocky_installer_kernel,
+                    rocky_installer_initramfs,
+                    rocky_installer_kickstart,
+                    serial_logs_dir,
+                };
+                let results = if parallel {
+                    e2e::runner::run_all_parallel(&tests_dir, &run_config, &output).await?
+                } else {
+                    e2e::runner::run_all(&tests_dir, &run_config, &output).await?
+                };
+                let failed_count = results.iter().filter(|r| !r.passed).count();
+                if failed_count > 0 {
+                    output.error(&format!("{} test(s) failed", failed_count));
+                    std::process::exit(1);
+                }
+                output.success(&format!("All {} test(s) passed", results.len()));
+            }
+        },
 
         Commands::Config(config_cmd) => match config_cmd {
             ConfigCommands::CreateServer {

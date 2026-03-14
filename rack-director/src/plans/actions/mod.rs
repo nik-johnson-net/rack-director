@@ -40,6 +40,7 @@ impl Action {
             Action::DiscoverHardware => generate_agent_boot_target("device-scan"),
             Action::ConfigureBmc => generate_agent_boot_target("configure-bmc"),
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
+            Action::PartitionDisks => generate_agent_boot_target("partition-disks"),
             // All other actions default to local disk boot
             _ => Ok(BootTarget::LocalDisk),
         }
@@ -84,9 +85,27 @@ impl Action {
     }
 }
 
+/// Console and debugging kernel arguments shared by both the agent image boot and the OS
+/// installer boot. These args ensure serial console output is available for debugging
+/// regardless of which boot stage is running.
+const DEFAULT_LINUX_CMDLINE: &str =
+    "console=ttyS0 console=ttyS1,115200n8 earlyprintk=serial,ttyS0,115200n8";
+
+/// Prepend the default Linux cmdline args to an OS-provided cmdline string.
+///
+/// When the OS provides its own cmdline args, the defaults are prepended so that
+/// OS-specific args can override or extend the defaults. When the OS provides no
+/// cmdline args, only the defaults are used.
+fn prepend_default_cmdline(os_cmdline: Option<String>) -> String {
+    match os_cmdline {
+        Some(args) if !args.is_empty() => format!("{DEFAULT_LINUX_CMDLINE} {args}"),
+        _ => DEFAULT_LINUX_CMDLINE.to_string(),
+    }
+}
+
 /// Generate boot target for agent-based actions (discovery, BMC config, etc.)
 fn generate_agent_boot_target(action_name: &str) -> Result<BootTarget> {
-    let cmdline = "ro console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8".to_string();
+    let cmdline = format!("ro no_timer_check {DEFAULT_LINUX_CMDLINE}");
 
     Ok(BootTarget::AgentImage {
         action: action_name.into(),
@@ -112,7 +131,7 @@ async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<Boot
         crate::operating_systems::store::get_architecture(ctx.conn, role.os_id, architecture)
             .await?;
 
-    let cmdline = os_arch.cmdline_args.unwrap_or_default();
+    let cmdline = prepend_default_cmdline(os_arch.cmdline_args);
 
     Ok(BootTarget::NetBoot {
         ramdisk: os_arch.initramfs_path.clone(),
@@ -196,12 +215,13 @@ mod tests {
         match boot_target {
             BootTarget::AgentImage { action, cmdline } => {
                 assert_eq!(action, "device-scan");
+                // Agent-specific args precede the shared console/debugging defaults.
                 assert_eq!(
                     cmdline,
-                    "ro console=ttyS1,115200n8 earlyprintk=serial,ttyS1,115200n8"
+                    format!("ro no_timer_check {DEFAULT_LINUX_CMDLINE}")
                 );
             }
-            _ => panic!("Expected NetBoot, got LocalDisk"),
+            _ => panic!("Expected AgentImage, got something else"),
         }
     }
 
@@ -230,7 +250,11 @@ mod tests {
         .unwrap();
 
         // Create a role
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
         let role = roles_store::create(
             &conn,
             "web-server",
@@ -350,7 +374,11 @@ mod tests {
         .unwrap();
 
         // Create a role
-        let disk_layout = DiskLayout { partitions: vec![] };
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
         let role = roles_store::create(
             &conn,
             "database-server",
@@ -402,10 +430,10 @@ mod tests {
             } => {
                 assert!(kernel.contains("installer/debian-12/vmlinuz"));
                 assert!(ramdisk.contains("installer/debian-12/initrd.img"));
-                // cmdline should be empty when no template is provided
+                // When no OS cmdline is provided, the cmdline should equal only the defaults.
                 assert_eq!(
-                    cmdline, "",
-                    "Expected empty cmdline when no template provided"
+                    cmdline, DEFAULT_LINUX_CMDLINE,
+                    "Expected default cmdline when no OS cmdline provided"
                 );
             }
             _ => panic!("Expected NetBoot for InstallOs, got LocalDisk"),
@@ -500,6 +528,43 @@ mod tests {
             _ => {
                 panic!("Expected LocalDisk for RebootDevice, got NetBoot")
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_partition_disks_boot_target() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+
+        let device = Device {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440009").unwrap(),
+            architecture: Architecture::X86_64,
+            lifecycle: None,
+            role_id: None,
+            platform_id: None,
+            attributes: common::device_attributes::DeviceAttributes::default(),
+            created_at: None,
+            first_seen_at: None,
+            last_seen_at: None,
+        };
+
+        let ctx = ActionContext {
+            device: &device,
+            conn: &conn,
+            director: None,
+        };
+
+        let action = Action::PartitionDisks;
+        let boot_target = action.to_boot_target(&ctx).await.unwrap();
+
+        match boot_target {
+            BootTarget::AgentImage { action, cmdline } => {
+                assert_eq!(action, "partition-disks");
+                assert!(cmdline.contains("console=ttyS1"));
+            }
+            _ => panic!(
+                "Expected AgentImage for PartitionDisks, got {:?}",
+                boot_target
+            ),
         }
     }
 }

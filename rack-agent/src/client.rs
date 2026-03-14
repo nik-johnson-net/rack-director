@@ -136,6 +136,30 @@ impl RackDirector {
             }
         }
     }
+
+    /// Fetch resolved disk layout for a device from rack-director
+    ///
+    /// Returns:
+    /// - Ok(layout) if layout exists (200 OK)
+    /// - Err(...) for network errors, missing role (400), device not found (404), or server errors
+    pub async fn get_disk_layout(&self, uuid: &str) -> Result<common::disk_layout::DiskLayout> {
+        let response = self
+            .client
+            .get(format!("{}/cnc/devices/{}/disk_layout", self.url, uuid))
+            .send()
+            .await?;
+
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                let layout = response.json::<common::disk_layout::DiskLayout>().await?;
+                Ok(layout)
+            }
+            status => {
+                let body = response.text().await.unwrap_or_default();
+                anyhow::bail!("Failed to fetch disk layout: {} - {}", status, body)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -320,5 +344,82 @@ mod tests {
 
         mock.assert_async().await;
         assert!(result.is_err());
+    }
+
+    /// Test get_disk_layout returns layout on 200 OK
+    #[tokio::test]
+    async fn test_get_disk_layout_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/cnc/devices/test-uuid/disk_layout")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"disks":[{"device":"/dev/sda","partition_table":"gpt","partitions":[{"label":"root","size":"rest","filesystem":"ext4","mount_point":"/"}]}]}"#)
+            .create_async()
+            .await;
+
+        let client = RackDirector::new(&server.url());
+        let result = client.get_disk_layout("test-uuid").await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let layout = result.unwrap();
+        assert_eq!(layout.disks.len(), 1);
+        assert_eq!(layout.disks[0].device, "/dev/sda");
+    }
+
+    /// Test get_disk_layout returns error on 400 (no role assigned)
+    #[tokio::test]
+    async fn test_get_disk_layout_no_role() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/cnc/devices/test-uuid/disk_layout")
+            .with_status(400)
+            .with_body("Device has no role assigned")
+            .create_async()
+            .await;
+
+        let client = RackDirector::new(&server.url());
+        let result = client.get_disk_layout("test-uuid").await;
+
+        mock.assert_async().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("400"));
+    }
+
+    /// Test get_disk_layout returns error on 404 (device not found)
+    #[tokio::test]
+    async fn test_get_disk_layout_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/cnc/devices/test-uuid/disk_layout")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = RackDirector::new(&server.url());
+        let result = client.get_disk_layout("test-uuid").await;
+
+        mock.assert_async().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("404"));
+    }
+
+    /// Test get_disk_layout returns error on 500 (server error)
+    #[tokio::test]
+    async fn test_get_disk_layout_server_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/cnc/devices/test-uuid/disk_layout")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = RackDirector::new(&server.url());
+        let result = client.get_disk_layout("test-uuid").await;
+
+        mock.assert_async().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("500"));
     }
 }

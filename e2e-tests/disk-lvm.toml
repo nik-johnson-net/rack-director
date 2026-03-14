@@ -1,0 +1,53 @@
+[test]
+name = "disk-lvm"
+description = "LVM layout with ROOT label, single VG, and logical volumes"
+timeout_seconds = 1800
+
+[vm]
+memory_mb = 2048
+disks = [{ size_gb = 20 }]
+
+[[rack_director.roles]]
+name = "test-role"
+
+[rack_director.roles.disk_layout]
+[[rack_director.roles.disk_layout.disks]]
+device = "ROOT"
+partition_table = "gpt"
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "bios_grub"
+size = "1MiB"
+flags = ["bios_grub"]
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "efi"
+size = "512MiB"
+filesystem = "vfat"
+flags = ["esp", "boot"]
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "lvm"
+size = "rest"
+volume_group = "vg0"
+flags = ["lvm"]
+
+[[rack_director.roles.disk_layout.volume_groups]]
+name = "vg0"
+
+[[rack_director.roles.disk_layout.volume_groups.logical_volumes]]
+name = "root"
+size = "10GiB"
+filesystem = "ext4"
+
+[[rack_director.roles.disk_layout.volume_groups.logical_volumes]]
+name = "data"
+size = "rest"
+filesystem = "xfs"
+
+[[lifecycle.steps]]
+from = "unprovisioned"
+to = "provisioned"
+
+[lifecycle]
+expect_final_state = "provisioned"

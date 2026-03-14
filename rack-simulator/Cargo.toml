@@ -16,3 +16,6 @@ tokio = { workspace = true }
 toml = "0.8"
 uuid = { version = "1.0", features = ["v4"] }
 dirs = "5.0"
+rand = "0.8"
+tempfile = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
