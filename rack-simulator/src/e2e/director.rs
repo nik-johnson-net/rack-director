@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::sleep;
+use tokio_util::io::ReaderStream;
 
 use crate::e2e::config::{PlatformSpec, RoleSpec};
 use crate::output::Output;
@@ -69,10 +70,10 @@ impl DirectorVm {
                     timeout
                 ));
             }
-            if let Ok(resp) = self.client.get(&url).send().await {
-                if resp.status().is_success() {
-                    return Ok(());
-                }
+            if let Ok(resp) = self.client.get(&url).send().await
+                && resp.status().is_success()
+            {
+                return Ok(());
             }
             sleep(Duration::from_secs(2)).await;
         }
@@ -234,18 +235,14 @@ impl DirectorVm {
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!("No device appeared within {:?}", timeout));
             }
-            if let Ok(resp) = self.client.get(&url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(value) = resp.json::<Value>().await {
-                        if let Some(devices) = value["devices"].as_array() {
-                            if let Some(device) = devices.first() {
-                                if let Some(uuid) = device["uuid"].as_str() {
-                                    return Ok(uuid.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Ok(resp) = self.client.get(&url).send().await
+                && resp.status().is_success()
+                && let Ok(value) = resp.json::<Value>().await
+                && let Some(devices) = value["devices"].as_array()
+                && let Some(device) = devices.first()
+                && let Some(uuid) = device["uuid"].as_str()
+            {
+                return Ok(uuid.to_string());
             }
             sleep(Duration::from_secs(2)).await;
         }
@@ -291,26 +288,34 @@ impl DirectorVm {
         Ok(())
     }
 
-    /// Wait until the device has no active lifecycle transition (polls every 2s).
-    pub async fn wait_for_idle(&self, uuid: &str, timeout: Duration) -> Result<()> {
-        let url = format!("{}/ui/devices/{}/transitions/active", self.host_url(), uuid);
+    /// Wait until the device reaches a specific lifecycle state (polls every 2s).
+    pub async fn wait_for_lifecycle_state(
+        &self,
+        uuid: &str,
+        state: &str,
+        timeout: Duration,
+    ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
-
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!(
-                    "Device {} still has an active transition after {:?}",
+                    "Device {} did not reach lifecycle state '{}' within {:?}",
                     uuid,
+                    state,
                     timeout
                 ));
             }
-            if let Ok(resp) = self.client.get(&url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(value) = resp.json::<Value>().await {
-                        if value.is_null() {
-                            return Ok(());
-                        }
-                    }
+            if let Ok(current) = self.get_lifecycle_state(uuid).await {
+                if current == state {
+                    return Ok(());
+                }
+                if current == "broken" || current == "failed" {
+                    return Err(anyhow!(
+                        "Device {} entered error state '{}' while waiting for '{}'",
+                        uuid,
+                        current,
+                        state
+                    ));
                 }
             }
             sleep(Duration::from_secs(2)).await;
@@ -433,14 +438,15 @@ impl DirectorVm {
             arch,
             component
         );
-        let file_bytes = tokio::fs::read(path)
+        let file = tokio::fs::File::open(path)
             .await
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+            .with_context(|| format!("Failed to open {}", path.display()))?;
+        let stream = ReaderStream::new(file);
         let resp = self
             .client
             .post(&url)
             .header("Content-Type", "application/octet-stream")
-            .body(file_bytes)
+            .body(reqwest::Body::wrap_stream(stream))
             .send()
             .await
             .with_context(|| format!("Failed to upload {}", component))?;

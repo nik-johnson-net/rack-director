@@ -1,11 +1,11 @@
 use anyhow::{Result, anyhow};
-use std::net::{TcpListener, UdpSocket};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 /// A running QEMU process. Kills the child on Drop.
 pub struct QemuProcess {
-    label: String,
+    _label: String,
     child: Child,
 }
 
@@ -16,18 +16,14 @@ impl QemuProcess {
         let child = Command::new(&binary)
             .args(args)
             .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
             .stdin(Stdio::null())
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn QEMU ({}): {}", binary, e))?;
         Ok(Self {
-            label: label.to_string(),
+            _label: label.to_string(),
             child,
         })
-    }
-
-    /// Returns true if the process is still running.
-    pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
     }
 }
 
@@ -229,26 +225,6 @@ pub fn create_disk_image(path: &Path, size_bytes: u64) -> Result<()> {
     Ok(())
 }
 
-/// Find an available UDP port in the given range.
-pub fn find_available_udp_port(range_start: u16, range_end: u16) -> Result<u16> {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    if range_end <= range_start {
-        return Err(anyhow!("Invalid port range: {}-{}", range_start, range_end));
-    }
-    for _ in 0..100 {
-        let port = rng.gen_range(range_start..range_end);
-        if UdpSocket::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
-        }
-    }
-    Err(anyhow!(
-        "Could not find available UDP port in range {}-{}",
-        range_start,
-        range_end
-    ))
-}
-
 /// Find an available TCP port in the given range.
 pub fn find_available_tcp_port(range_start: u16, range_end: u16) -> Result<u16> {
     use rand::Rng;
@@ -267,27 +243,6 @@ pub fn find_available_tcp_port(range_start: u16, range_end: u16) -> Result<u16> 
         range_start,
         range_end
     ))
-}
-
-/// Find the OVMF/EDK2 x86_64 UEFI firmware file for direct-kernel boot.
-///
-/// Returns `None` if not found; in that case the caller falls back to SeaBIOS.
-pub fn find_ovmf_firmware() -> Option<String> {
-    let candidates = [
-        // QEMU Windows installer default location
-        r"C:\Program Files\qemu\share\edk2-x86_64-code.fd",
-        // Linux/Fedora/RHEL
-        "/usr/share/edk2/x64/OVMF_CODE.fd",
-        "/usr/share/OVMF/OVMF_CODE.fd",
-        // Debian/Ubuntu
-        "/usr/share/ovmf/x64/OVMF.fd",
-    ];
-    for path in &candidates {
-        if std::path::Path::new(path).exists() {
-            return Some(path.to_string());
-        }
-    }
-    None
 }
 
 /// Return acceleration arguments appropriate for the current platform.
@@ -408,14 +363,6 @@ mod tests {
         create_disk_image(&path, size).unwrap();
         let metadata = std::fs::metadata(&path).unwrap();
         assert_eq!(metadata.len(), size);
-    }
-
-    #[test]
-    fn test_find_available_udp_port() {
-        let port = find_available_udp_port(20000, 29999).unwrap();
-        assert!((20000..=29999).contains(&port));
-        // Verify it's actually bindable
-        UdpSocket::bind(("127.0.0.1", port)).unwrap();
     }
 
     #[test]

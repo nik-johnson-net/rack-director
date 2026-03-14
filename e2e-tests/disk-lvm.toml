@@ -7,24 +7,18 @@ timeout_seconds = 1800
 memory_mb = 2048
 disks = [{ size_gb = 20 }]
 
-# Platform matching a single virtio disk in a QEMU q35 VM.
-# NOTE: Verify the correct by-path value empirically (see disk-gpt-simple.toml).
-[[rack_director.platforms]]
-name = "test-platform"
-[rack_director.platforms.attributes]
-disks = [{ path = "/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio0", size_gb = 20, disk_type = "hdd", label = "ROOT" }]
-nics = [{ logical = "eth0", speed_mbps = 1000 }]
-cpus = [{ brand = "intel", model = "Unknown", cores = 1 }]
-memory_gib = 1
-
 [[rack_director.roles]]
 name = "test-role"
-platform = "test-platform"
 
 [rack_director.roles.disk_layout]
 [[rack_director.roles.disk_layout.disks]]
 device = "ROOT"
 partition_table = "gpt"
+
+[[rack_director.roles.disk_layout.disks.partitions]]
+label = "bios_grub"
+size = "1MiB"
+flags = ["bios_grub"]
 
 [[rack_director.roles.disk_layout.disks.partitions]]
 label = "efi"
@@ -50,10 +44,6 @@ filesystem = "ext4"
 name = "data"
 size = "rest"
 filesystem = "xfs"
-
-[[lifecycle.steps]]
-from = "new"
-to = "unprovisioned"
 
 [[lifecycle.steps]]
 from = "unprovisioned"

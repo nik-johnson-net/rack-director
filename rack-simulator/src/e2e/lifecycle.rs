@@ -16,17 +16,10 @@ pub async fn drive_lifecycle(
     timeout: Duration,
 ) -> Result<()> {
     for step in steps {
-        // Wait for any ongoing transition (e.g. initial discovery) to complete first
-        director.wait_for_idle(device_uuid, timeout).await?;
-
-        let current = director.get_lifecycle_state(device_uuid).await?;
-        if current != step.from {
-            return Err(anyhow!(
-                "Expected device to be in state '{}' but found '{}'",
-                step.from,
-                current
-            ));
-        }
+        // Wait for the device to reach the expected starting state before driving the transition.
+        director
+            .wait_for_lifecycle_state(device_uuid, &step.from, timeout)
+            .await?;
 
         director.start_transition(device_uuid, &step.to).await?;
         wait_for_state(director, device_uuid, &step.to, timeout).await?;

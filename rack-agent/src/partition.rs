@@ -94,7 +94,7 @@ async fn apply_disk_layout(layout: &DiskLayout) -> Result<()> {
 
     // Step 5: Format simple partitions (not LVM, not ZFS)
     for disk in &layout.disks {
-        format_simple_partitions(disk).await?;
+        format_simple_partitions(disk, layout).await?;
     }
 
     Ok(())
@@ -280,10 +280,20 @@ async fn setup_zfs_pool(pool: &ZfsPool) -> Result<()> {
 
 // ========== Simple Partition Formatting ==========
 
-async fn format_simple_partitions(disk: &DiskConfig) -> Result<()> {
+async fn format_simple_partitions(disk: &DiskConfig, layout: &DiskLayout) -> Result<()> {
+    // Build the set of partition labels on this disk that belong to a ZFS pool.
+    // ZFS pool device refs use the format "DISK_LABEL-PARTITION_LABEL" (e.g. "DATA1-zfs1").
+    let zfs_partition_labels: std::collections::HashSet<&str> =
+        build_zfs_partition_labels(disk, layout);
+
     for (i, partition) in disk.partitions.iter().enumerate() {
         // Skip partitions that belong to LVM
         if partition.volume_group.is_some() {
+            continue;
+        }
+
+        // Skip partitions that belong to ZFS
+        if zfs_partition_labels.contains(partition.label.as_str()) {
             continue;
         }
 
@@ -293,6 +303,30 @@ async fn format_simple_partitions(disk: &DiskConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Build the set of partition labels on this disk that belong to a ZFS pool.
+///
+/// ZFS device refs use the format "DISK_LABEL-PARTITION_LABEL" (e.g. "DATA1-zfs1").
+/// We match refs whose prefix equals `disk.device` and collect the partition label suffix.
+fn build_zfs_partition_labels<'a>(
+    disk: &'a DiskConfig,
+    layout: &'a DiskLayout,
+) -> std::collections::HashSet<&'a str> {
+    let mut labels = std::collections::HashSet::new();
+    let Some(ref zfs_pools) = layout.zfs_pools else {
+        return labels;
+    };
+    let disk_label = disk.device.as_str();
+    let prefix = format!("{}-", disk_label);
+    for pool in zfs_pools {
+        for device_ref in &pool.devices {
+            if let Some(partition_label) = device_ref.strip_prefix(&prefix) {
+                labels.insert(partition_label);
+            }
+        }
+    }
+    labels
 }
 
 async fn format_filesystem(device: &str, filesystem: &str) -> Result<()> {
@@ -341,7 +375,13 @@ async fn run_command(cmd: &str, args: &[&str]) -> Result<()> {
 /// For SATA/SCSI: /dev/sda + 1 = /dev/sda1
 /// For NVMe: /dev/nvme0n1 + 1 = /dev/nvme0n1p1
 /// For device-mapper: /dev/dm-0 + 1 = /dev/dm-0p1
+/// For by-path/by-id symlinks: /dev/disk/by-path/pci-0000:00:03.0 + 1 = /dev/disk/by-path/pci-0000:00:03.0-part1
 fn partition_path(disk: &str, partition_num: usize) -> String {
+    // For persistent symlink paths (by-path, by-id), udev creates partition
+    // symlinks with a -partN suffix (e.g. pci-0000:00:03.0-part2).
+    if disk.contains("/by-path/") || disk.contains("/by-id/") {
+        return format!("{}-part{}", disk, partition_num);
+    }
     // NVMe and device-mapper disks need a 'p' separator
     let needs_p = disk.chars().last().is_some_and(|c| c.is_ascii_digit());
     if needs_p {
@@ -401,6 +441,24 @@ fn parse_size(size_str: &str) -> Result<u64> {
     Ok((num * multiplier as f64) as u64)
 }
 
+/// Parse a partition size string into an absolute byte count, or `None` for "rest".
+///
+/// Returns `Some(bytes)` for fixed sizes and percentages, `None` for "rest".
+/// Percentages are resolved against `usable_size`.
+fn parse_partition_size(size_str: &str, usable_size: u64) -> Result<Option<u64>> {
+    if size_str == "rest" {
+        Ok(None)
+    } else if size_str.ends_with('%') {
+        let pct: f64 = size_str
+            .trim_end_matches('%')
+            .parse()
+            .map_err(|_| anyhow!("Invalid percentage: '{}'", size_str))?;
+        Ok(Some((usable_size as f64 * pct / 100.0) as u64))
+    } else {
+        Ok(Some(parse_size(size_str)?))
+    }
+}
+
 /// Calculate partition start/end byte offsets
 ///
 /// Handles fixed sizes, percentages, and "rest" (remaining space).
@@ -427,17 +485,9 @@ fn calculate_partition_offsets(
     let mut fixed_total = 0u64;
 
     for p in partitions {
-        if p.size == "rest" {
-            rest_count += 1;
-        } else if p.size.ends_with('%') {
-            let pct: f64 = p
-                .size
-                .trim_end_matches('%')
-                .parse()
-                .map_err(|_| anyhow!("Invalid percentage: '{}'", p.size))?;
-            fixed_total += (usable_size as f64 * pct / 100.0) as u64;
-        } else {
-            fixed_total += parse_size(&p.size)?;
+        match parse_partition_size(&p.size, usable_size)? {
+            None => rest_count += 1,
+            Some(bytes) => fixed_total += bytes,
         }
     }
 
@@ -463,13 +513,9 @@ fn calculate_partition_offsets(
     let mut offsets = Vec::new();
 
     for p in partitions {
-        let size = if p.size == "rest" {
-            rest_size
-        } else if p.size.ends_with('%') {
-            let pct: f64 = p.size.trim_end_matches('%').parse().unwrap();
-            (usable_size as f64 * pct / 100.0) as u64
-        } else {
-            parse_size(&p.size)?
+        let size = match parse_partition_size(&p.size, usable_size)? {
+            None => rest_size,
+            Some(bytes) => bytes,
         };
 
         // Align size up to boundary
@@ -534,27 +580,30 @@ async fn verify_disk_layout(layout: &DiskLayout) -> Result<()> {
     }
 
     // Check LVM volume groups if any
-    if let Some(ref volume_groups) = layout.volume_groups {
-        if !volume_groups.is_empty() {
-            let output = tokio::process::Command::new("vgs")
-                .args(["--noheadings"])
-                .output()
-                .await
-                .map_err(|e| anyhow!("Failed to run vgs: {}", e))?;
+    if let Some(ref volume_groups) = layout.volume_groups
+        && !volume_groups.is_empty()
+    {
+        let output = tokio::process::Command::new("vgs")
+            .args(["--noheadings"])
+            .output()
+            .await
+            .map_err(|e| anyhow!("Failed to run vgs: {}", e))?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow!("vgs verification failed: {}", stderr.trim()));
-            }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("vgs verification failed: {}", stderr.trim()));
+        }
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for vg in volume_groups {
-                if !stdout.contains(&vg.name) {
-                    return Err(anyhow!(
-                        "Volume group '{}' not found after creation",
-                        vg.name
-                    ));
-                }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for vg in volume_groups {
+            let found = stdout
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(vg.name.as_str()));
+            if !found {
+                return Err(anyhow!(
+                    "Volume group '{}' not found after creation",
+                    vg.name
+                ));
             }
         }
     }
@@ -598,6 +647,26 @@ mod tests {
     #[test]
     fn test_partition_path_dm() {
         assert_eq!(partition_path("/dev/dm-0", 1), "/dev/dm-0p1");
+    }
+
+    #[test]
+    fn test_partition_path_by_path() {
+        assert_eq!(
+            partition_path("/dev/disk/by-path/pci-0000:00:03.0", 1),
+            "/dev/disk/by-path/pci-0000:00:03.0-part1"
+        );
+        assert_eq!(
+            partition_path("/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio1", 2),
+            "/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio1-part2"
+        );
+    }
+
+    #[test]
+    fn test_partition_path_by_id() {
+        assert_eq!(
+            partition_path("/dev/disk/by-id/wwn-0x5000c500-0", 1),
+            "/dev/disk/by-id/wwn-0x5000c500-0-part1"
+        );
     }
 
     // ========== parse_size tests ==========
@@ -759,6 +828,102 @@ mod tests {
         }];
 
         assert!(calculate_partition_offsets(&partitions, 1).is_err());
+    }
+
+    // ========== parse_partition_size tests ==========
+
+    #[test]
+    fn test_parse_partition_size_rest() {
+        let result = parse_partition_size("rest", 1024 * 1024 * 1024).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_partition_size_percentage() {
+        let usable = 100 * 1024 * 1024 * 1024u64; // 100 GiB
+        let result = parse_partition_size("50%", usable).unwrap();
+        assert_eq!(result, Some(50 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_partition_size_invalid_percentage() {
+        assert!(parse_partition_size("abc%", 1024).is_err());
+    }
+
+    #[test]
+    fn test_parse_partition_size_fixed() {
+        let result = parse_partition_size("512MiB", 1024 * 1024 * 1024).unwrap();
+        assert_eq!(result, Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_partition_size_invalid_fixed() {
+        assert!(parse_partition_size("notasize", 1024).is_err());
+    }
+
+    // ========== build_zfs_partition_labels tests ==========
+
+    #[test]
+    fn test_build_zfs_partition_labels_matches_disk() {
+        let disk = DiskConfig {
+            device: "DATA1".to_string(),
+            partition_table: "gpt".to_string(),
+            partitions: vec![],
+        };
+        let layout = DiskLayout {
+            disks: vec![disk.clone()],
+            volume_groups: None,
+            zfs_pools: Some(vec![ZfsPool {
+                name: "tank".to_string(),
+                vdev_type: "single".to_string(),
+                devices: vec!["DATA1-zfs1".to_string(), "DATA2-zfs2".to_string()],
+                datasets: vec![],
+                properties: None,
+            }]),
+        };
+        let labels = build_zfs_partition_labels(&disk, &layout);
+        assert!(labels.contains("zfs1"));
+        // DATA2-zfs2 should NOT appear for DATA1's disk
+        assert!(!labels.contains("zfs2"));
+    }
+
+    #[test]
+    fn test_build_zfs_partition_labels_no_zfs_pools() {
+        let disk = DiskConfig {
+            device: "ROOT".to_string(),
+            partition_table: "gpt".to_string(),
+            partitions: vec![],
+        };
+        let layout = DiskLayout {
+            disks: vec![disk.clone()],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let labels = build_zfs_partition_labels(&disk, &layout);
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn test_build_zfs_partition_labels_no_false_prefix_match() {
+        // "DATA1-zfs1" should not match disk device "DATA" (shorter prefix without dash)
+        let disk = DiskConfig {
+            device: "DATA".to_string(),
+            partition_table: "gpt".to_string(),
+            partitions: vec![],
+        };
+        let layout = DiskLayout {
+            disks: vec![disk.clone()],
+            volume_groups: None,
+            zfs_pools: Some(vec![ZfsPool {
+                name: "tank".to_string(),
+                vdev_type: "single".to_string(),
+                devices: vec!["DATA1-zfs1".to_string()],
+                datasets: vec![],
+                properties: None,
+            }]),
+        };
+        let labels = build_zfs_partition_labels(&disk, &layout);
+        assert!(labels.is_empty());
     }
 
     // ========== fs_type_hint tests ==========

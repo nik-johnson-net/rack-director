@@ -253,6 +253,12 @@ async fn scan_disks() -> Result<Vec<DiskInfo>> {
 
         debug!("Resolved {} -> {}", path_name, device_name);
 
+        // Skip removable devices (CD-ROMs, floppy drives, etc.)
+        if is_removable_device(&device_name) {
+            debug!("Skipping removable device: {}", device_name);
+            continue;
+        }
+
         // Read disk information from sysfs
         let size = read_disk_size(&device_name);
         // Skip devices with zero size (e.g., CD-ROM drives with no media)
@@ -279,6 +285,14 @@ async fn scan_disks() -> Result<Vec<DiskInfo>> {
 
     info!("Found {} disk(s)", disks.len());
     Ok(disks)
+}
+
+/// Returns true if the device is removable (CD-ROM, floppy, etc.).
+fn is_removable_device(device_name: &str) -> bool {
+    let path = format!("/sys/block/{}/removable", device_name);
+    std::fs::read_to_string(&path)
+        .map(|c| c.trim() == "1")
+        .unwrap_or(false)
 }
 
 /// Detect disk type (NVMe, SSD, or HDD)

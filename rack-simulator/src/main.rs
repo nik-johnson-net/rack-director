@@ -57,26 +57,17 @@ enum E2eCommand {
     Run {
         /// Path to test TOML file
         test_file: PathBuf,
-        #[arg(long, default_value = ".local-storage/agent-image/vmlinuz")]
+        #[arg(long, default_value = ".build/agent-image/vmlinuz")]
         agent_kernel: PathBuf,
-        #[arg(long, default_value = ".local-storage/agent-image/initramfs.img")]
+        #[arg(long, default_value = ".build/agent-image/initramfs.img")]
         agent_initramfs: PathBuf,
-        #[arg(long, default_value = ".local-storage/director-image/vmlinuz-director")]
+        #[arg(long, default_value = ".build/director-image/vmlinuz-director")]
         director_kernel: PathBuf,
-        #[arg(
-            long,
-            default_value = ".local-storage/director-image/director-initramfs.img"
-        )]
+        #[arg(long, default_value = ".build/director-image/director-initramfs.img")]
         director_initramfs: PathBuf,
-        #[arg(
-            long,
-            default_value = ".local-storage/installer-cache/rocky-10.1-vmlinuz"
-        )]
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-vmlinuz")]
         rocky_installer_kernel: PathBuf,
-        #[arg(
-            long,
-            default_value = ".local-storage/installer-cache/rocky-10.1-initrd.img"
-        )]
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-initrd.img")]
         rocky_installer_initramfs: PathBuf,
         #[arg(long, default_value = "e2e-tests/rocky-linux-10.1-ks.cfg")]
         rocky_installer_kickstart: PathBuf,
@@ -86,30 +77,22 @@ enum E2eCommand {
     /// Run all e2e tests in a directory
     RunAll {
         /// Directory containing test TOML files
+        #[arg(default_value = ".e2e-tests")]
         tests_dir: PathBuf,
         /// Run tests in parallel
         #[arg(long)]
         parallel: bool,
-        #[arg(long, default_value = ".local-storage/agent-image/vmlinuz")]
+        #[arg(long, default_value = ".build/agent-image/vmlinuz")]
         agent_kernel: PathBuf,
-        #[arg(long, default_value = ".local-storage/agent-image/initramfs.img")]
+        #[arg(long, default_value = ".build/agent-image/initramfs.img")]
         agent_initramfs: PathBuf,
-        #[arg(long, default_value = ".local-storage/director-image/vmlinuz-director")]
+        #[arg(long, default_value = ".build/director-image/vmlinuz-director")]
         director_kernel: PathBuf,
-        #[arg(
-            long,
-            default_value = ".local-storage/director-image/director-initramfs.img"
-        )]
+        #[arg(long, default_value = ".build/director-image/director-initramfs.img")]
         director_initramfs: PathBuf,
-        #[arg(
-            long,
-            default_value = ".local-storage/installer-cache/rocky-10.1-vmlinuz"
-        )]
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-vmlinuz")]
         rocky_installer_kernel: PathBuf,
-        #[arg(
-            long,
-            default_value = ".local-storage/installer-cache/rocky-10.1-initrd.img"
-        )]
+        #[arg(long, default_value = ".build/installer-cache/rocky-10.1-initrd.img")]
         rocky_installer_initramfs: PathBuf,
         #[arg(long, default_value = "e2e-tests/rocky-linux-10.1-ks.cfg")]
         rocky_installer_kickstart: PathBuf,

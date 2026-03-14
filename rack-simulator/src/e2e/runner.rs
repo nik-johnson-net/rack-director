@@ -14,6 +14,7 @@ use crate::output::Output;
 use crate::vm::qemu::find_available_tcp_port;
 
 /// Configuration for running e2e tests.
+#[derive(Clone)]
 pub struct TestRunConfig {
     pub agent_kernel: PathBuf,
     pub agent_initramfs: PathBuf,
@@ -31,10 +32,7 @@ pub struct TestRunConfig {
 
 /// Result of a single e2e test run.
 pub struct TestResult {
-    pub name: String,
     pub passed: bool,
-    pub error: Option<String>,
-    pub duration_secs: u64,
 }
 
 /// Run a single e2e test from a TOML file.
@@ -79,23 +77,15 @@ pub async fn run_test(
         Ok(()) => {
             let duration_secs = start.elapsed().as_secs();
             output.success(&format!("Test '{}' passed in {}s", name, duration_secs));
-            Ok(TestResult {
-                name,
-                passed: true,
-                error: None,
-                duration_secs,
-            })
+            Ok(TestResult { passed: true })
         }
         Err(e) => {
             let duration_secs = start.elapsed().as_secs();
-            let error = e.to_string();
-            output.error(&format!("Test '{}' failed: {}", name, error));
-            Ok(TestResult {
-                name,
-                passed: false,
-                error: Some(error),
-                duration_secs,
-            })
+            output.error(&format!(
+                "Test '{}' failed in {}s: {}",
+                name, duration_secs, e
+            ));
+            Ok(TestResult { passed: false })
         }
     }
 }
@@ -165,16 +155,7 @@ pub async fn run_all_parallel(
     let mut join_set: JoinSet<Result<TestResult>> = JoinSet::new();
 
     for test_file in test_files {
-        let run_config = TestRunConfig {
-            agent_kernel: run_config.agent_kernel.clone(),
-            agent_initramfs: run_config.agent_initramfs.clone(),
-            director_kernel: run_config.director_kernel.clone(),
-            director_initramfs: run_config.director_initramfs.clone(),
-            rocky_installer_kernel: run_config.rocky_installer_kernel.clone(),
-            rocky_installer_initramfs: run_config.rocky_installer_initramfs.clone(),
-            rocky_installer_kickstart: run_config.rocky_installer_kickstart.clone(),
-            serial_logs_dir: run_config.serial_logs_dir.clone(),
-        };
+        let run_config = run_config.clone();
         let output = Arc::clone(&output);
         join_set.spawn(async move { run_test(&test_file, &run_config, &output).await });
     }
@@ -199,7 +180,7 @@ async fn run_test_inner(
     // Two UDP ports needed: one for director (director_net_port), one for agent (agent_net_port).
     // Each VM sends to the other's port and receives on its own port.
     let director_net_port = find_available_tcp_port(20000, 29998)?;
-    let agent_net_port = director_net_port + 1;
+    let agent_net_port = find_available_tcp_port(20000, 29998)?;
     let timeout = Duration::from_secs(config.test.timeout_seconds);
 
     // Resolve serial log directory: use the user-supplied path if given, otherwise default to
@@ -276,6 +257,11 @@ async fn run_test_inner(
     // Wait for device to appear
     output.step("Waiting for Agent to register");
     let device_uuid = director.wait_for_device(timeout).await?;
+
+    // Wait for hardware discovery to complete (device lands in "unprovisioned")
+    director
+        .wait_for_lifecycle_state(&device_uuid, "unprovisioned", timeout)
+        .await?;
 
     // Assign platform and role using the first role's configuration
     output.step("Assigning Role to Agent");

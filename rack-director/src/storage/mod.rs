@@ -9,6 +9,7 @@ use object_store::local::LocalFileSystem;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 
 /// Type alias for data streams used in upload/download operations
 pub type DataStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
@@ -80,7 +81,7 @@ impl ImageStore {
                 }
             }
             ImageStoreConfig::Local { path, base_url } => {
-                let client = LocalFileSystem::new().with_automatic_cleanup(true);
+                let client = LocalFileSystem::new_with_prefix(&path)?.with_automatic_cleanup(true);
                 ImageStore {
                     kind: "local".to_owned(),
                     location: path.to_string_lossy().to_string(),
@@ -148,6 +149,7 @@ impl ImageStore {
             }
         }
 
+        writer.shutdown().await?;
         log::debug!("Uploaded object {}/{}", self.location, path);
         Ok(())
     }

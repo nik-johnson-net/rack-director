@@ -16,7 +16,6 @@ pub struct TestConfig {
 #[derive(Debug, Deserialize)]
 pub struct TestMeta {
     pub name: String,
-    pub description: Option<String>,
     pub timeout_seconds: u64,
 }
 
@@ -36,6 +35,7 @@ pub struct DiskSpec {
 /// rack-director setup: platforms and roles to create before the test.
 #[derive(Debug, Deserialize)]
 pub struct RackDirectorSetup {
+    #[serde(default)]
     pub platforms: Vec<PlatformSpec>,
     pub roles: Vec<RoleSpec>,
 }
@@ -98,14 +98,8 @@ timeout_seconds = 300
 memory_mb = 512
 disks = [{{ size_gb = 20 }}]
 
-[[rack_director.platforms]]
-name = "test-platform"
-[rack_director.platforms.attributes]
-total_memory_mb = 512
-
 [[rack_director.roles]]
 name = "test-role"
-platform = "test-platform"
 
 [rack_director.roles.disk_layout]
 disks = []
@@ -126,7 +120,7 @@ expect_final_state = "unprovisioned"
         assert_eq!(config.vm.memory_mb, 512);
         assert_eq!(config.vm.disks.len(), 1);
         assert_eq!(config.vm.disks[0].size_gb, 20);
-        assert_eq!(config.rack_director.platforms.len(), 1);
+        assert_eq!(config.rack_director.platforms.len(), 0);
         assert_eq!(config.rack_director.roles.len(), 1);
         assert_eq!(config.lifecycle.steps.len(), 1);
         assert_eq!(config.lifecycle.expect_final_state, "unprovisioned");

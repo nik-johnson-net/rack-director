@@ -7,20 +7,8 @@ timeout_seconds = 1800
 memory_mb = 2048
 disks = [{ size_gb = 20 }]
 
-# Platform matching a single virtio disk in a QEMU q35 VM.
-# Use /dev/vda (stable virtio block device name) since the by-path PCI address
-# varies by QEMU version and is not predictable without explicit addr= assignment.
-[[rack_director.platforms]]
-name = "test-platform"
-[rack_director.platforms.attributes]
-disks = [{ path = "/dev/vda", size_gb = 20, disk_type = "hdd", label = "ROOT" }]
-nics = [{ logical = "eth0", speed_mbps = 1000 }]
-cpus = [{ brand = "intel", model = "Unknown", cores = 1 }]
-memory_gib = 2
-
 [[rack_director.roles]]
 name = "test-role"
-platform = "test-platform"
 
 [rack_director.roles.disk_layout]
 [[rack_director.roles.disk_layout.disks]]

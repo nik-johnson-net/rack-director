@@ -7,7 +7,6 @@ use crate::vm::qemu::{AgentVmConfig, QemuProcess, agent_vm_args, create_disk_ima
 /// A running agent VM.
 pub struct AgentVm {
     _process: QemuProcess,
-    pub disk_paths: Vec<PathBuf>,
 }
 
 impl AgentVm {
@@ -34,7 +33,7 @@ impl AgentVm {
         let config = AgentVmConfig {
             net_port,
             director_net_port,
-            disk_paths: disk_paths.clone(),
+            disk_paths,
             memory_mb,
             serial_log,
         };
@@ -42,14 +41,6 @@ impl AgentVm {
         let args = agent_vm_args(&config);
         let process = QemuProcess::spawn("agent", &args)?;
 
-        Ok(Self {
-            _process: process,
-            disk_paths,
-        })
-    }
-
-    /// Returns true if the VM process is still running.
-    pub fn is_running(&mut self) -> bool {
-        self._process.is_running()
+        Ok(Self { _process: process })
     }
 }
