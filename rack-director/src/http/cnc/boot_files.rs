@@ -125,6 +125,7 @@ mod tests {
 
         // Create storage path for image store
         let storage_path = temp_dir.path().join("images");
+        std::fs::create_dir_all(&storage_path).unwrap();
 
         let image_store = ImageStore::new(ImageStoreConfig::Local {
             path: storage_path,
