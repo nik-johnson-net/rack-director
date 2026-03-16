@@ -421,7 +421,7 @@ async fn download_component(
         }
     };
 
-    let stream = state.image_store.download(&path).await?;
+    let (stream, _size) = state.image_store.download(&path).await?;
     let body = axum::body::Body::from_stream(stream);
 
     Ok((

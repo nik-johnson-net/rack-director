@@ -201,16 +201,17 @@ async fn image_store_handler(
     State(state): State<Arc<AppState>>,
     extract::Path(path): extract::Path<String>,
 ) -> Result<impl axum::response::IntoResponse, StatusCode> {
-    let stream = state.image_store.download(&path).await.map_err(|e| {
+    let (stream, size) = state.image_store.download(&path).await.map_err(|e| {
         warn!("image_store_handler: failed to download {}: {}", path, e);
         StatusCode::NOT_FOUND
     })?;
     let body = axum::body::Body::from_stream(stream);
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        body,
-    ))
+    Ok(axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, size)
+        .body(body)
+        .unwrap())
 }
 
 async fn agent_images_handler(
@@ -1625,6 +1626,81 @@ mod tests {
             .unwrap();
         let result: common::disk_layout::DiskLayout = serde_json::from_slice(&body).unwrap();
         assert_eq!(result.disks[0].device, "/dev/sda"); // Label resolved to path
+    }
+
+    /// Verify that `image_store_handler` sets a `Content-Length` header so that iPXE does not
+    /// fall back to chunked transfer encoding, which causes it to hang.
+    #[tokio::test]
+    async fn test_image_store_handler_sets_content_length() {
+        let (state, _temp_dir) = setup_test_state().await;
+
+        // Upload a small test file into the in-memory image store.
+        let file_data = b"kernel image data for testing";
+        let stream = Box::pin(futures::stream::once(async {
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(file_data))
+        }));
+        state
+            .image_store
+            .upload("test-kernel", stream)
+            .await
+            .unwrap();
+
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
+
+        let request = Request::builder()
+            .uri("/cnc/files/test-kernel")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let content_length = response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .expect("Content-Length header must be present so iPXE does not use chunked encoding")
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(
+            content_length,
+            file_data.len() as u64,
+            "Content-Length must match the actual file size"
+        );
+
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("Content-Type header must be present")
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type, "application/octet-stream");
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), file_data);
+    }
+
+    /// Verify that `image_store_handler` returns 404 for a missing file.
+    #[tokio::test]
+    async fn test_image_store_handler_not_found() {
+        let (state, _temp_dir) = setup_test_state().await;
+
+        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
+
+        let request = Request::builder()
+            .uri("/cnc/files/nonexistent-file")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
 

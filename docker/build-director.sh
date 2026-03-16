@@ -83,6 +83,66 @@ chroot /director-image systemctl mask NetworkManager.service
 chroot /director-image systemctl mask NetworkManager-dispatcher.service
 chroot /director-image systemctl mask NetworkManager-wait-online.service
 
+# ============================================
+# Enable IP forwarding and NAT masquerade so agent VMs can reach the internet.
+#
+# The agent VM's default gateway is 10.0.0.1 (this director VM, NIC0).
+# NIC1 (user-networking) has internet access via QEMU's NAT (10.0.2.x / 10.0.2.2).
+# nftables masquerades 10.0.0.0/24 traffic out through NIC1 so agents can reach
+# external mirrors (e.g. dl.rockylinux.org) during OS installation.
+# ============================================
+
+# Enable IP forwarding persistently
+cat > /director-image/etc/sysctl.d/10-forwarding.conf << 'EOF'
+net.ipv4.ip_forward=1
+EOF
+
+# NAT masquerade: apply nft rules via a shell script to avoid escaping issues
+# with braces/semicolons in systemd ExecStart lines.
+# Runs after both NICs are up so the masquerade target can resolve its egress IP.
+cat > /director-image/usr/local/sbin/rack-nat-start.sh << 'EOF'
+#!/bin/bash
+set -e
+/sbin/nft add table ip nat
+/sbin/nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat ; policy accept ; }'
+/sbin/nft add rule ip nat postrouting ip saddr 10.0.0.0/24 masquerade
+EOF
+chmod +x /director-image/usr/local/sbin/rack-nat-start.sh
+
+cat > /director-image/etc/systemd/system/rack-nat.service << 'EOF'
+[Unit]
+Description=NAT masquerade for rack agent subnet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rack-nat-start.sh
+ExecStop=/sbin/nft delete table ip nat
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chroot /director-image systemctl enable rack-nat.service
+
+# Diagnostic oneshot: log routes + nftables rules + ip_forward to serial after
+# the network and NAT are both up.  Output flows via journald ForwardToConsole.
+cat > /director-image/etc/systemd/system/rack-nat-diag.service << 'EOF'
+[Unit]
+Description=NAT routing diagnostics (rack-director e2e)
+After=rack-nat.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo "=NAT-DIAG ip_forward=" && cat /proc/sys/net/ipv4/ip_forward && echo "=NAT-DIAG ip route=" && ip route && echo "=NAT-DIAG nft ruleset=" && nft list ruleset && echo "=NAT-DIAG end="'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chroot /director-image systemctl enable rack-nat-diag.service
+
 # Configure networkd-wait-online to succeed as soon as ANY one interface is
 # routable (--any). The rack NIC uses a static address and comes up in ~5s;
 # we don't need to wait for the DHCP control NIC before starting rack-director.
@@ -195,8 +255,14 @@ EOF
 
 # Build initramfs with dmsquash-live + embedded squashfs.
 # Expected size: ~48 MiB (modules) + 461 MiB (squashfs) = ~509 MiB < 511.9 MiB limit.
+#
+# --force-drivers: The squashfs root has no kernel modules (excluded to save space), so
+# modprobe cannot load anything after switch_root.  nf_tables and its NAT/masquerade
+# dependencies must be force-loaded here (before root switch) so that nftables.service
+# can open its Netlink socket after the squashfs environment starts.
 chroot /director-image dracut --kver "$KERVERSION" --no-hostonly --force --reproducible --xz \
     --add "dmsquash-live" \
+    --force-drivers "nf_tables nf_conntrack nf_nat nft_chain_nat nft_masq" \
     --omit "bluetooth resume nfs" \
     --include /tmp/squashfs-director.img /squashfs-director.img \
     --include /tmp/99-live.conf /etc/cmdline.d/99-live.conf \
