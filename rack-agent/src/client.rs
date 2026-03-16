@@ -2,6 +2,8 @@ use anyhow::Result;
 use common::device_attributes::DeviceAttributes;
 use serde::{Deserialize, Serialize};
 
+pub use common::poll_action::{PollAction, PollResponse};
+
 pub struct RackDirector {
     client: reqwest::Client,
     url: String,
@@ -157,6 +159,32 @@ impl RackDirector {
             status => {
                 let body = response.text().await.unwrap_or_default();
                 anyhow::bail!("Failed to fetch disk layout: {} - {}", status, body)
+            }
+        }
+    }
+
+    /// Poll rack-director for a pending action for the given device UUID.
+    ///
+    /// Returns:
+    /// - `Ok(Some(msg))` if an action is pending (200 OK), deserialized as [`PollResponse`]
+    /// - `Ok(None)` if no active plan or the plan has no remaining actions (204 No Content)
+    /// - `Err(...)` for network errors or unexpected status codes
+    pub async fn poll(&self, uuid: &str) -> Result<Option<PollResponse>> {
+        let response = self
+            .client
+            .get(format!("{}/cnc/poll", self.url))
+            .query(&[("uuid", uuid)])
+            .send()
+            .await?;
+
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                let msg = response.json::<PollResponse>().await?;
+                Ok(Some(msg))
+            }
+            reqwest::StatusCode::NO_CONTENT => Ok(None),
+            status => {
+                anyhow::bail!("Unexpected status from poll endpoint: {}", status)
             }
         }
     }
@@ -421,5 +449,126 @@ mod tests {
         mock.assert_async().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
+    }
+
+    /// Test poll returns Some(PollResponse) on 200 OK with action payload
+    #[tokio::test]
+    async fn test_poll_returns_action_on_200() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/cnc/poll")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "uuid".to_string(),
+                "test-uuid".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"type":"action","payload":{"type":"discover_hardware"}}"#)
+            .create_async()
+            .await;
+
+        let client = RackDirector::new(&server.url());
+        let result = client.poll("test-uuid").await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        let msg = result.unwrap();
+        assert!(msg.is_some());
+
+        let PollResponse::Action { payload } = msg.unwrap();
+        assert_eq!(payload, PollAction::DiscoverHardware);
+    }
+
+    /// Test poll returns None on 204 No Content
+    #[tokio::test]
+    async fn test_poll_returns_none_on_204() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/cnc/poll")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "uuid".to_string(),
+                "test-uuid".to_string(),
+            ))
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let client = RackDirector::new(&server.url());
+        let result = client.poll("test-uuid").await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    /// Test poll returns error on 500 Internal Server Error
+    #[tokio::test]
+    async fn test_poll_returns_error_on_500() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/cnc/poll")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "uuid".to_string(),
+                "test-uuid".to_string(),
+            ))
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = RackDirector::new(&server.url());
+        let result = client.poll("test-uuid").await;
+
+        mock.assert_async().await;
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("500"));
+    }
+
+    /// Test poll handles all action variants correctly
+    #[tokio::test]
+    async fn test_poll_deserializes_all_action_variants() {
+        let test_cases = [
+            (
+                r#"{"type":"action","payload":{"type":"discover_hardware"}}"#,
+                PollAction::DiscoverHardware,
+            ),
+            (
+                r#"{"type":"action","payload":{"type":"configure_bmc"}}"#,
+                PollAction::ConfigureBmc,
+            ),
+            (
+                r#"{"type":"action","payload":{"type":"partition_disks"}}"#,
+                PollAction::PartitionDisks,
+            ),
+            (
+                r#"{"type":"action","payload":{"type":"reboot_device"}}"#,
+                PollAction::RebootDevice,
+            ),
+            (
+                r#"{"type":"action","payload":{"type":"install_os"}}"#,
+                PollAction::InstallOs,
+            ),
+        ];
+
+        let mut server = mockito::Server::new_async().await;
+        let client = RackDirector::new(&server.url());
+
+        for (body, expected_action) in test_cases {
+            let mock = server
+                .mock("GET", "/cnc/poll")
+                .match_query(mockito::Matcher::Any)
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(body)
+                .create_async()
+                .await;
+
+            let result = client.poll("any-uuid").await;
+
+            mock.assert_async().await;
+            assert!(result.is_ok(), "Expected Ok for body: {}", body);
+            let PollResponse::Action { payload } = result.unwrap().unwrap();
+            assert_eq!(payload, expected_action, "Mismatch for body: {}", body);
+        }
     }
 }

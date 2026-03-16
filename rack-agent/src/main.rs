@@ -6,6 +6,7 @@ use log::{error, info, warn};
 
 mod bmc;
 mod client;
+mod daemon;
 mod partition;
 mod scan;
 
@@ -17,6 +18,8 @@ enum Command {
     ConfigureBmc,
     /// Partitions disks according to the device's role disk layout.
     PartitionDisks,
+    /// Continuously polls rack-director for actions and executes them without rebooting between actions.
+    Daemon,
 }
 
 #[derive(Parser, Debug)]
@@ -56,6 +59,7 @@ async fn main() {
             Command::DeviceScan(device_args) => scan::device_scan(&client, &device_args).await,
             Command::ConfigureBmc => bmc::bmc_configure(&client).await,
             Command::PartitionDisks => partition::partition_disks(&client).await,
+            Command::Daemon => daemon::run_daemon(&client).await,
         }
     } else {
         // Read action from --action flag or /proc/cmdline
@@ -72,6 +76,7 @@ async fn main() {
             }
             "configure-bmc" => bmc::bmc_configure(&client).await,
             "partition-disks" => partition::partition_disks(&client).await,
+            "daemon" => daemon::run_daemon(&client).await,
             _ => {
                 error!("Unknown action: {}", action);
                 std::process::exit(1);

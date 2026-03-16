@@ -8,6 +8,27 @@ pub async fn create_plan(conn: &Connection, plan: &Plan) -> Result<i64> {
     let actions_json = serde_json::to_string(&plan.actions)?;
     let status_str: String = plan.status.clone().into();
 
+    // RebootDevice and InstallOs must never be the first action in a plan.
+    //
+    // RebootDevice: a daemon agent already running on the device would exit
+    // immediately, causing an unnecessary reboot before any real work is done.
+    // RebootDevice is valid as an intermediate step (e.g. between two actions
+    // that require a clean reboot), just not as the first.
+    //
+    // InstallOs: the OS installer is served by rack-director only after
+    // partition_disks has completed. Placing InstallOs first would skip disk
+    // preparation and attempt to install onto unpartitioned disks.
+    if matches!(
+        plan.actions.first(),
+        Some(crate::plans::Action::RebootDevice) | Some(crate::plans::Action::InstallOs)
+    ) {
+        return Err(anyhow::anyhow!(
+            "Cannot create plan for device {}: {:?} cannot be the first action",
+            plan.device_uuid,
+            plan.actions.first().unwrap()
+        ));
+    }
+
     // Check if there's already an active plan for this device
     if get_active_plan_for_device(conn, &plan.device_uuid)
         .await?
@@ -93,4 +114,102 @@ pub async fn update_plan_status(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plans::{Action, Plan};
+    use crate::{database, test_connection_factory};
+    use uuid::Uuid;
+
+    async fn setup(factory: crate::database::DatabaseConnectionFactory) -> Connection {
+        database::run_migrations(&factory).await.unwrap()
+    }
+
+    async fn register_device(conn: &Connection, uuid: Uuid) {
+        conn.execute(
+            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', 'x86-64')",
+            (uuid,),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_rejects_reboot_device_as_first_action() {
+        let conn = setup(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655441001").unwrap();
+        register_device(&conn, uuid).await;
+
+        let plan = Plan::new(uuid, vec![Action::RebootDevice, Action::DiscoverHardware]);
+        let result = create_plan(&conn, &plan).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("RebootDevice cannot be the first action")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_rejects_install_os_as_first_action() {
+        let conn = setup(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655441004").unwrap();
+        register_device(&conn, uuid).await;
+
+        let plan = Plan::new(uuid, vec![Action::InstallOs, Action::DiscoverHardware]);
+        let result = create_plan(&conn, &plan).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("InstallOs cannot be the first action")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_allows_reboot_device_as_later_action() {
+        let conn = setup(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655441002").unwrap();
+        register_device(&conn, uuid).await;
+
+        // RebootDevice is valid as a non-first action
+        let plan = Plan::new(
+            uuid,
+            vec![
+                Action::DiscoverHardware,
+                Action::RebootDevice,
+                Action::ConfigureBmc,
+            ],
+        );
+        let result = create_plan(&conn, &plan).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_plan_rejects_duplicate_active_plan() {
+        let conn = setup(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655441003").unwrap();
+        register_device(&conn, uuid).await;
+
+        let plan = Plan::new(uuid, vec![Action::DiscoverHardware]);
+        create_plan(&conn, &plan).await.unwrap();
+
+        let plan2 = Plan::new(uuid, vec![Action::ConfigureBmc]);
+        let result = create_plan(&conn, &plan2).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("an active plan already exists")
+        );
+    }
 }

@@ -3,6 +3,7 @@ mod device_registration;
 mod install_script;
 mod ipxe_scripts;
 mod network_processing;
+mod poll;
 
 use std::sync::Arc;
 
@@ -50,6 +51,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/cnc/action_failed", post(action_failed))
         .route("/cnc/devices/{uuid}/bmc_config", get(get_bmc_config))
         .route("/cnc/devices/{uuid}/disk_layout", get(get_disk_layout))
+        .route("/cnc/poll", get(poll::poll_handler))
         .with_state(state)
 }
 
@@ -852,8 +854,11 @@ mod tests {
         let (state, _temp_dir) = setup_test_state().await;
         let test_uuid = test_uuid(0x03);
 
-        // Create a test plan
-        let actions = vec![crate::plans::Action::InstallOs];
+        // Create a test plan — InstallOs must not be first; prepend DiscoverHardware
+        let actions = vec![
+            crate::plans::Action::DiscoverHardware,
+            crate::plans::Action::InstallOs,
+        ];
         let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
@@ -889,8 +894,11 @@ mod tests {
         let (state, _temp_dir) = setup_test_state().await;
         let test_uuid = test_uuid(0x04);
 
-        // Create a test plan
-        let actions = vec![crate::plans::Action::InstallOs];
+        // Create a test plan — InstallOs must not be first; prepend DiscoverHardware
+        let actions = vec![
+            crate::plans::Action::DiscoverHardware,
+            crate::plans::Action::InstallOs,
+        ];
         let plan = crate::plans::Plan::new(test_uuid, actions);
 
         // Register device and create plan
@@ -1617,5 +1625,56 @@ mod tests {
             .unwrap();
         let result: common::disk_layout::DiskLayout = serde_json::from_slice(&body).unwrap();
         assert_eq!(result.disks[0].device, "/dev/sda"); // Label resolved to path
+    }
+}
+
+/// Shared test helpers for cnc submodule tests.
+///
+/// Provides a common `setup_test_state` that accepts a `DatabaseConnectionFactory`
+/// so each test can supply a unique in-memory DB URI via `test_connection_factory!()`.
+/// The returned `Connection` must be kept alive for the duration of the test to
+/// prevent the in-memory database from being destroyed.
+#[cfg(test)]
+pub(super) mod test_helpers {
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use crate::{
+        database::{self, DatabaseConnectionFactory},
+        http::AppState,
+        storage::ImageStore,
+    };
+
+    pub(super) async fn setup_test_state(
+        factory: DatabaseConnectionFactory,
+    ) -> (Arc<AppState>, TempDir, database::Connection) {
+        let conn_factory: Arc<dyn crate::database::ConnectionFactory> = Arc::new(factory);
+        let migration_conn = database::run_migrations(conn_factory.as_ref())
+            .await
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let agent_images_path = temp_dir.path().join("agent-image");
+        std::fs::create_dir_all(&agent_images_path).unwrap();
+
+        let boot_files_path = temp_dir.path().join("boot");
+        std::fs::create_dir_all(&boot_files_path).unwrap();
+
+        let boot_file_provider =
+            Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
+
+        let image_store = ImageStore::memory("http://localhost:8080");
+
+        let state = Arc::new(AppState {
+            connection_factory: conn_factory,
+            image_store: Arc::new(image_store),
+            agent_images_path,
+            boot_file_provider,
+            dhcp: crate::dhcp::DhcpControl::noop(),
+            unprovisioned_sleep_secs: 600,
+        });
+
+        (state, temp_dir, migration_conn)
     }
 }

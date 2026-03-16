@@ -790,8 +790,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Create first plan
-        let first_actions = vec![crate::plans::Action::InstallOs];
+        // Create first plan — InstallOs is valid as a non-first action
+        let first_actions = vec![
+            crate::plans::Action::DiscoverHardware,
+            crate::plans::Action::InstallOs,
+        ];
         let first_plan = crate::plans::Plan::new(test_uuid, first_actions);
         director.create_plan(&first_plan).await.unwrap();
 
@@ -803,7 +806,7 @@ mod tests {
         assert!(active_plan.is_some());
         assert_eq!(
             active_plan.as_ref().unwrap().actions[0],
-            crate::plans::Action::InstallOs
+            crate::plans::Action::DiscoverHardware
         );
 
         // Create second plan - this should be rejected
@@ -827,7 +830,7 @@ mod tests {
             .unwrap();
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
-        assert_eq!(plan.actions[0], crate::plans::Action::InstallOs);
+        assert_eq!(plan.actions[0], crate::plans::Action::DiscoverHardware);
         assert_eq!(plan.status, PlanStatus::Pending);
     }
 
@@ -933,7 +936,7 @@ mod tests {
         let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         match boot_target {
             BootTarget::AgentImage { action, cmdline: _ } => {
-                assert_eq!(action, "device-scan");
+                assert_eq!(action, "daemon");
             }
             _ => panic!("Expected NetBoot, got LocalDisk"),
         }
@@ -953,7 +956,7 @@ mod tests {
         // Verify the device gets BMC config boot target for second action
         let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         assert!(
-            matches!(boot_target, BootTarget::AgentImage { action, cmdline } if action == "configure-bmc")
+            matches!(boot_target, BootTarget::AgentImage { action, cmdline } if action == "daemon")
         );
 
         // Simulate BMC configuration completion
@@ -1087,28 +1090,26 @@ mod tests {
             .await
             .unwrap();
 
-        // Create a plan with RebootDevice and InstallOs actions
+        // Create a realistic plan: DiscoverHardware first, then RebootDevice, then InstallOs.
+        // RebootDevice cannot be the first action (daemon may already be running).
         let actions = vec![
+            crate::plans::Action::DiscoverHardware,
             crate::plans::Action::RebootDevice,
             crate::plans::Action::InstallOs,
         ];
         let plan = crate::plans::Plan::new(test_uuid, actions);
-        director.create_plan(&plan).await.unwrap();
+        let plan_id = director.create_plan(&plan).await.unwrap();
 
-        // Verify plan is active with RebootDevice as current action
-        let active_plan = director
-            .get_active_plan_for_device(&test_uuid)
-            .await
-            .unwrap();
-        assert!(active_plan.is_some());
-        let plan = active_plan.unwrap();
-        assert_eq!(plan.current_step, 0);
-        assert_eq!(plan.actions[0], crate::plans::Action::RebootDevice);
+        // Simulate DiscoverHardware completing by advancing current_step to 1
+        // so that RebootDevice is now the current action.
+        conn.execute(
+            "UPDATE plans SET status = 'running', current_step = 1 WHERE id = ?1",
+            (plan_id,),
+        )
+        .await
+        .unwrap();
 
-        // Call on_boot - should advance past RebootDevice
-        director.on_boot(&test_uuid).await.unwrap();
-
-        // Verify plan advanced to next action
+        // Verify RebootDevice is now the current action
         let active_plan = director
             .get_active_plan_for_device(&test_uuid)
             .await
@@ -1116,7 +1117,20 @@ mod tests {
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
         assert_eq!(plan.current_step, 1);
-        assert_eq!(plan.actions[1], crate::plans::Action::InstallOs);
+        assert_eq!(plan.actions[1], crate::plans::Action::RebootDevice);
+
+        // Call on_boot - should advance past RebootDevice
+        director.on_boot(&test_uuid).await.unwrap();
+
+        // Verify plan advanced to InstallOs
+        let active_plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_some());
+        let plan = active_plan.unwrap();
+        assert_eq!(plan.current_step, 2);
+        assert_eq!(plan.actions[2], crate::plans::Action::InstallOs);
     }
 
     #[tokio::test]
