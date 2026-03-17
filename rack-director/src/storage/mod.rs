@@ -154,15 +154,16 @@ impl ImageStore {
         Ok(())
     }
 
-    /// Download data from the store as a stream
-    pub async fn download(&self, path: &str) -> Result<DataStream> {
+    /// Download data from the store as a stream, returning the stream and file size in bytes.
+    ///
+    /// The file size is extracted from the object metadata before consuming the result into a
+    /// stream, enabling callers to set a `Content-Length` header on HTTP responses so that
+    /// clients (e.g. iPXE) do not fall back to chunked transfer encoding.
+    pub async fn download(&self, path: &str) -> Result<(DataStream, u64)> {
         let result = self.client.get(&path.into()).await?;
-
-        // Map the stream error type
+        let size = result.meta.size as u64;
         let datastream = result.into_stream().map_err(|e| e.into());
-
-        // Pin the mapped datastream
-        Ok(Box::pin(datastream))
+        Ok((Box::pin(datastream), size))
     }
 
     /// Delete data at the given path (currently only used in tests)

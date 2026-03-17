@@ -71,7 +71,7 @@ RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} install \
   https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} \
   --repo centos10-x86_64-appstream-rpms --repo epel --installroot /director-image install \
-  redhat-release systemd passwd rootfiles sudo dracut dracut-network dracut-live systemd-networkd
+  redhat-release systemd passwd rootfiles sudo dracut dracut-network dracut-live systemd-networkd nftables
 
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /director-image install \
   kernel

@@ -5,6 +5,6 @@ Type=ether
 DHCP=yes
 LinkLocalAddressing=no
 
-[DHCP]
+[DHCPv4]
 UseDomains=yes
 UseGateway=yes

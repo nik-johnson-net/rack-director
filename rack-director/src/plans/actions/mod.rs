@@ -37,10 +37,10 @@ impl Action {
     /// BMC configuration, and OS installation, it returns NetBoot with appropriate kernel/initramfs.
     pub async fn to_boot_target(&self, ctx: &ActionContext<'_>) -> Result<BootTarget> {
         match self {
-            Action::DiscoverHardware => generate_agent_boot_target("device-scan"),
-            Action::ConfigureBmc => generate_agent_boot_target("configure-bmc"),
+            Action::DiscoverHardware | Action::ConfigureBmc | Action::PartitionDisks => {
+                generate_agent_boot_target("daemon")
+            }
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
-            Action::PartitionDisks => generate_agent_boot_target("partition-disks"),
             // All other actions default to local disk boot
             _ => Ok(BootTarget::LocalDisk),
         }
@@ -210,11 +210,11 @@ mod tests {
 
     #[test]
     fn test_generate_agent_boot_target() {
-        let boot_target = generate_agent_boot_target("device-scan").unwrap();
+        let boot_target = generate_agent_boot_target("daemon").unwrap();
 
         match boot_target {
             BootTarget::AgentImage { action, cmdline } => {
-                assert_eq!(action, "device-scan");
+                assert_eq!(action, "daemon");
                 // Agent-specific args precede the shared console/debugging defaults.
                 assert_eq!(
                     cmdline,
@@ -558,7 +558,7 @@ mod tests {
 
         match boot_target {
             BootTarget::AgentImage { action, cmdline } => {
-                assert_eq!(action, "partition-disks");
+                assert_eq!(action, "daemon");
                 assert!(cmdline.contains("console=ttyS1"));
             }
             _ => panic!(

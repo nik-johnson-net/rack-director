@@ -69,7 +69,7 @@ pub async fn render_for_device(
         .ok_or_else(|| Error::NotFound("No install script for this OS architecture".to_string()))?;
 
     // Download install script template from storage
-    let stream = image_store.download(&script_path).await.map_err(|e| {
+    let (stream, _size) = image_store.download(&script_path).await.map_err(|e| {
         Error::ServerInternalError(anyhow::anyhow!("Failed to download script: {}", e))
     })?;
 
