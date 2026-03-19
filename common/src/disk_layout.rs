@@ -79,9 +79,68 @@ pub struct ZfsDataset {
     pub zvol_size: Option<String>, // Creates zvol if set
 }
 
+/// Generate partition device path from a disk path and partition number.
+///
+/// For SATA/SCSI: /dev/sda + 1 = /dev/sda1
+/// For NVMe: /dev/nvme0n1 + 1 = /dev/nvme0n1p1
+/// For device-mapper: /dev/dm-0 + 1 = /dev/dm-0p1
+/// For by-path/by-id symlinks: /dev/disk/by-path/pci-0000:00:03.0 + 1 = /dev/disk/by-path/pci-0000:00:03.0-part1
+pub fn partition_path(disk: &str, partition_num: usize) -> String {
+    if disk.contains("/by-path/") || disk.contains("/by-id/") {
+        return format!("{}-part{}", disk, partition_num);
+    }
+    let needs_p = disk.chars().last().is_some_and(|c| c.is_ascii_digit());
+    if needs_p {
+        format!("{}p{}", disk, partition_num)
+    } else {
+        format!("{}{}", disk, partition_num)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========== partition_path tests ==========
+
+    #[test]
+    fn test_partition_path_sata() {
+        assert_eq!(partition_path("/dev/sda", 1), "/dev/sda1");
+        assert_eq!(partition_path("/dev/sda", 2), "/dev/sda2");
+        assert_eq!(partition_path("/dev/sdb", 10), "/dev/sdb10");
+    }
+
+    #[test]
+    fn test_partition_path_nvme() {
+        assert_eq!(partition_path("/dev/nvme0n1", 1), "/dev/nvme0n1p1");
+        assert_eq!(partition_path("/dev/nvme0n1", 2), "/dev/nvme0n1p2");
+        assert_eq!(partition_path("/dev/nvme1n1", 3), "/dev/nvme1n1p3");
+    }
+
+    #[test]
+    fn test_partition_path_dm() {
+        assert_eq!(partition_path("/dev/dm-0", 1), "/dev/dm-0p1");
+    }
+
+    #[test]
+    fn test_partition_path_by_path() {
+        assert_eq!(
+            partition_path("/dev/disk/by-path/pci-0000:00:03.0", 1),
+            "/dev/disk/by-path/pci-0000:00:03.0-part1"
+        );
+        assert_eq!(
+            partition_path("/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio1", 2),
+            "/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio1-part2"
+        );
+    }
+
+    #[test]
+    fn test_partition_path_by_id() {
+        assert_eq!(
+            partition_path("/dev/disk/by-id/wwn-0x5000c500-0", 1),
+            "/dev/disk/by-id/wwn-0x5000c500-0-part1"
+        );
+    }
 
     #[test]
     fn test_simple_layout_serialization_roundtrip() {

@@ -2,6 +2,7 @@ use clap::Parser;
 use rack_director::RackDirectorHandle;
 use serde_json::json;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 pub mod dhcp_client;
 pub mod tftp_client;
@@ -77,6 +78,62 @@ pub async fn create_test_pool(http_port: u16, network_id: u64) -> Result<(), any
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+/// Register a test device via the standard PXE boot flow.
+///
+/// This performs the two-DHCP-exchange dance required to get a DHCP lease
+/// with `device_uuid` set (needed for install_script rendering):
+/// 1. DHCP exchange #1 → creates lease without device_uuid
+/// 2. `GET /cnc/ipxe?uuid=<uuid>&mac=<mac>` → registers device, stores MAC
+/// 3. DHCP exchange #2 → lease gets device_uuid linked
+///
+/// Returns the IP address assigned during the second DHCP exchange.
+#[allow(dead_code)]
+pub async fn register_test_device(
+    http_port: u16,
+    dhcp_port: u16,
+    mac: [u8; 6],
+    uuid: Uuid,
+) -> Result<String, anyhow::Error> {
+    use dhcp_client::{Architecture, DhcpClient};
+
+    // DHCP exchange #1: creates a lease without device_uuid
+    tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+        let mut client = DhcpClient::new(mac, Architecture::X86Bios, dhcp_port)?;
+        let (offered_ip, server_id) = client.discover()?;
+        client.request(offered_ip, server_id)?;
+        Ok(())
+    })
+    .await??;
+
+    // HTTP call: registers the device and links MAC to UUID.
+    // /cnc/ipxe always returns 200 with an iPXE script; error_for_status catches
+    // any unexpected server-side failure during registration.
+    let mac_str = format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+    reqwest::Client::new()
+        .get(format!(
+            "http://127.0.0.1:{}/cnc/ipxe?uuid={}&mac={}",
+            http_port, uuid, mac_str
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // DHCP exchange #2: creates/updates the lease with device_uuid set
+    let (leased_ip, _boot_options) =
+        tokio::task::spawn_blocking(move || -> Result<_, anyhow::Error> {
+            let mut client = DhcpClient::new(mac, Architecture::X86Bios, dhcp_port)?;
+            let (offered_ip, server_id) = client.discover()?;
+            let result = client.request(offered_ip, server_id)?;
+            Ok(result)
+        })
+        .await??;
+
+    Ok(leased_ip.to_string())
 }
 
 pub async fn start_rack_director() -> Result<TestRackDirectorHandle, anyhow::Error> {
