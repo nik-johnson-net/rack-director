@@ -366,10 +366,10 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
     }
 
     #[test]
-    fn test_build_disk_layout_context_sata_partitions() {
+    fn test_build_disk_layout_context_ata_partitions() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![
                     PartitionConfig {
@@ -399,9 +399,18 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         assert_eq!(partitions.len(), 2);
         assert!(logical_volumes.is_empty());
 
-        assert_eq!(partitions[0].disk, "/dev/sda");
-        assert_eq!(partitions[0].device, "/dev/sda1");
-        assert_eq!(partitions[0].device_name, "sda1");
+        assert_eq!(
+            partitions[0].disk,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        );
+        assert_eq!(
+            partitions[0].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1-part1"
+        );
+        assert_eq!(
+            partitions[0].device_name,
+            "disk/by-path/pci-0000:00:1f.2-ata-1-part1"
+        );
         assert_eq!(partitions[0].label, "efi");
         assert_eq!(partitions[0].size, "512MiB");
         assert_eq!(partitions[0].filesystem, Some("vfat".to_string()));
@@ -409,8 +418,14 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         assert_eq!(partitions[0].flags, vec!["esp", "boot"]);
         assert!(partitions[0].volume_group.is_none());
 
-        assert_eq!(partitions[1].device, "/dev/sda2");
-        assert_eq!(partitions[1].device_name, "sda2");
+        assert_eq!(
+            partitions[1].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1-part2"
+        );
+        assert_eq!(
+            partitions[1].device_name,
+            "disk/by-path/pci-0000:00:1f.2-ata-1-part2"
+        );
         assert_eq!(partitions[1].label, "root");
         assert_eq!(partitions[1].filesystem, Some("ext4".to_string()));
         assert_eq!(partitions[1].flags, Vec::<String>::new());
@@ -477,7 +492,7 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
     fn test_build_disk_layout_context_lvm() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![
                     PartitionConfig {
@@ -524,8 +539,14 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         assert_eq!(logical_volumes.len(), 2);
 
         // LVM partition has no filesystem, has volume_group
-        assert_eq!(partitions[1].device, "/dev/sda2");
-        assert_eq!(partitions[1].device_name, "sda2");
+        assert_eq!(
+            partitions[1].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1-part2"
+        );
+        assert_eq!(
+            partitions[1].device_name,
+            "disk/by-path/pci-0000:00:1f.2-ata-1-part2"
+        );
         assert!(partitions[1].filesystem.is_none());
         assert_eq!(partitions[1].volume_group, Some("vg0".to_string()));
 
@@ -547,7 +568,7 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
     fn test_build_disk_layout_context_device_name_strips_dev_prefix() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sdb".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![PartitionConfig {
                     label: "data".to_string(),
@@ -564,8 +585,14 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
 
         let (partitions, _) = build_disk_layout_context(&layout);
 
-        assert_eq!(partitions[0].device, "/dev/sdb1");
-        assert_eq!(partitions[0].device_name, "sdb1");
+        assert_eq!(
+            partitions[0].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-2-part1"
+        );
+        assert_eq!(
+            partitions[0].device_name,
+            "disk/by-path/pci-0000:00:1f.2-ata-2-part1"
+        );
     }
 
     #[test]
@@ -574,7 +601,7 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         let layout = DiskLayout {
             disks: vec![
                 DiskConfig {
-                    device: "/dev/sda".to_string(),
+                    device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     partition_table: "gpt".to_string(),
                     partitions: vec![PartitionConfig {
                         label: "boot".to_string(),
@@ -586,7 +613,7 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
                     }],
                 },
                 DiskConfig {
-                    device: "/dev/sdb".to_string(),
+                    device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     partition_table: "gpt".to_string(),
                     partitions: vec![PartitionConfig {
                         label: "lvm".to_string(),
@@ -615,10 +642,22 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         assert_eq!(partitions.len(), 2);
         assert_eq!(logical_volumes.len(), 1);
 
-        assert_eq!(partitions[0].disk, "/dev/sda");
-        assert_eq!(partitions[0].device, "/dev/sda1");
-        assert_eq!(partitions[1].disk, "/dev/sdb");
-        assert_eq!(partitions[1].device, "/dev/sdb1");
+        assert_eq!(
+            partitions[0].disk,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        );
+        assert_eq!(
+            partitions[0].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1-part1"
+        );
+        assert_eq!(
+            partitions[1].disk,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-2"
+        );
+        assert_eq!(
+            partitions[1].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-2-part1"
+        );
 
         assert_eq!(logical_volumes[0].device, "/dev/vg0/home");
         assert_eq!(logical_volumes[0].device_name, "vg0/home");
@@ -629,7 +668,7 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         let template = "{{#each partitions}}{{ this.device }} {{ this.mount_point }}\n{{/each}}";
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![
                     PartitionConfig {
@@ -664,8 +703,8 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         )
         .unwrap();
 
-        assert!(result.contains("/dev/sda1 /boot/efi"));
-        assert!(result.contains("/dev/sda2 /"));
+        assert!(result.contains("/dev/disk/by-path/pci-0000:00:1f.2-ata-1-part1 /boot/efi"));
+        assert!(result.contains("/dev/disk/by-path/pci-0000:00:1f.2-ata-1-part2 /"));
     }
 
     #[test]
@@ -674,7 +713,7 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
             "{{#each logical_volumes}}{{ this.device }} {{ this.mount_point }}\n{{/each}}";
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![PartitionConfig {
                     label: "lvm".to_string(),

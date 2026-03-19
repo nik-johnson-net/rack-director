@@ -221,7 +221,7 @@ fn load_expected(name: &str) -> String {
 fn rhel10_bios_simple_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "biosboot", "size": "2MiB", "filesystem": null, "mount_point": null, "flags": ["bios_grub"], "volume_group": null },
@@ -238,7 +238,7 @@ fn rhel10_bios_simple_layout() -> serde_json::Value {
 fn rhel10_bios_lvm_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "biosboot", "size": "2MiB", "filesystem": null, "mount_point": null, "flags": ["bios_grub"], "volume_group": null },
@@ -261,7 +261,7 @@ fn rhel10_bios_lvm_layout() -> serde_json::Value {
 fn rhel10_uefi_simple_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "efi",  "size": "600MiB", "filesystem": "vfat", "mount_point": "/boot/efi", "flags": ["esp"], "volume_group": null },
@@ -278,7 +278,7 @@ fn rhel10_uefi_simple_layout() -> serde_json::Value {
 fn rhel10_uefi_lvm_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "efi",  "size": "600MiB", "filesystem": "vfat", "mount_point": "/boot/efi", "flags": ["esp"], "volume_group": null },
@@ -301,7 +301,7 @@ fn rhel10_uefi_lvm_layout() -> serde_json::Value {
 fn ubuntu_bios_simple_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "biosboot", "size": "2MiB", "filesystem": null,   "mount_point": null,    "flags": ["bios_grub"], "volume_group": null },
@@ -318,7 +318,7 @@ fn ubuntu_bios_simple_layout() -> serde_json::Value {
 fn ubuntu_bios_lvm_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "biosboot", "size": "2MiB", "filesystem": null,   "mount_point": null,    "flags": ["bios_grub"], "volume_group": null },
@@ -341,7 +341,7 @@ fn ubuntu_bios_lvm_layout() -> serde_json::Value {
 fn ubuntu_uefi_simple_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "efi",  "size": "512MiB", "filesystem": "vfat", "mount_point": "/boot/efi", "flags": ["esp"], "volume_group": null },
@@ -358,7 +358,7 @@ fn ubuntu_uefi_simple_layout() -> serde_json::Value {
 fn ubuntu_uefi_lvm_layout() -> serde_json::Value {
     json!({
         "disks": [{
-            "device": "/dev/sda",
+            "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
             "partition_table": "gpt",
             "partitions": [
                 { "label": "efi",  "size": "512MiB", "filesystem": "vfat", "mount_point": "/boot/efi", "flags": ["esp"], "volume_group": null },

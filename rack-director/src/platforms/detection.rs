@@ -413,7 +413,7 @@ mod tests {
     fn test_assign_disk_labels() {
         let mut disks = vec![
             PlatformDisk {
-                path: "/dev/sda".to_string(),
+                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 2000,
                 disk_type: DiskType::Hdd,
                 label: None,
@@ -425,7 +425,7 @@ mod tests {
                 label: None,
             },
             PlatformDisk {
-                path: "/dev/sdb".to_string(),
+                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                 size_gb: 2000,
                 disk_type: DiskType::Hdd,
                 label: None,
@@ -434,14 +434,20 @@ mod tests {
 
         assign_disk_labels(&mut disks);
 
-        // After sorting by path, order is: /dev/nvme0n1, /dev/sda, /dev/sdb
+        // After sorting by path, order is: /dev/disk/by-path/...-ata-1, /dev/disk/by-path/...-ata-2, /dev/nvme0n1
         // NVMe disk (smallest + fastest) should be ROOT
         let nvme_disk = disks.iter().find(|d| d.path == "/dev/nvme0n1").unwrap();
         assert_eq!(nvme_disk.label, Some("ROOT".to_string()));
 
         // HDDs should be DATA1 and DATA2
-        let sda_disk = disks.iter().find(|d| d.path == "/dev/sda").unwrap();
-        let sdb_disk = disks.iter().find(|d| d.path == "/dev/sdb").unwrap();
+        let sda_disk = disks
+            .iter()
+            .find(|d| d.path == "/dev/disk/by-path/pci-0000:00:1f.2-ata-1")
+            .unwrap();
+        let sdb_disk = disks
+            .iter()
+            .find(|d| d.path == "/dev/disk/by-path/pci-0000:00:1f.2-ata-2")
+            .unwrap();
         assert!(
             sda_disk.label == Some("DATA1".to_string())
                 || sda_disk.label == Some("DATA2".to_string())
@@ -480,13 +486,13 @@ mod tests {
         let attrs = PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/sda".to_string(),
+                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/sdb".to_string(),
+                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Hdd,
                     label: Some("DATA1".to_string()),
@@ -511,7 +517,7 @@ mod tests {
     fn test_generate_platform_name_single_disk() {
         let attrs = PlatformAttributes {
             disks: vec![PlatformDisk {
-                path: "/dev/sda".to_string(),
+                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: DiskType::Ssd,
                 label: Some("ROOT".to_string()),
@@ -581,13 +587,13 @@ mod tests {
         let attrs = PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/sda".to_string(),
+                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/sdb".to_string(),
+                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     size_gb: 1000,
                     disk_type: DiskType::Hdd,
                     label: Some("DATA1".to_string()),

@@ -15,9 +15,9 @@ network --bootproto=static --ip=127.0.0.100 --netmask=255.0.0.0 --gateway=127.0.
 # --noformat preserves existing data; --onpart references the pre-created partition.
 # Partitions with no mount_point (biosboot, LVM PVs) are omitted.
 
-part /boot/efi --fstype="vfat" --onpart=sda1 --noformat
+part /boot/efi --fstype="vfat" --onpart=disk/by-path/pci-0000:00:1f.2-ata-1-part1 --noformat
 
-part /boot --fstype="ext4" --onpart=sda2 --noformat
+part /boot --fstype="ext4" --onpart=disk/by-path/pci-0000:00:1f.2-ata-1-part2 --noformat
 
 
 # LVM: declare pre-existing VGs and LVs.

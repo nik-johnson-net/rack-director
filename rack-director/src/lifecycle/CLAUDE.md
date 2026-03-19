@@ -119,7 +119,7 @@ When assigning a role to a device, rack-director validates:
 
 **Best Practices:**
 - Prefer platform labels (`"ROOT"`, `"DATA1"`) over device paths for portability
-- Use device paths (`/dev/sda`) only for fixed hardware configurations
+- Use device paths (`/dev/disk/by-path/...`) only for fixed hardware configurations — prefer platform labels for portability
 - Define EFI partition first (512MiB-1GiB, vfat, flags: ["esp", "boot"])
 - Use "rest" for the last partition on each device
 - Consider swap size based on RAM (16GiB+ for systems with <32GiB RAM)

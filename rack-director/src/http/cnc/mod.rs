@@ -1469,7 +1469,7 @@ mod tests {
             .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![common::disk_layout::DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![common::disk_layout::PartitionConfig {
                     label: "root".to_string(),
@@ -1508,7 +1508,10 @@ mod tests {
             .unwrap();
         let result: common::disk_layout::DiskLayout = serde_json::from_slice(&body).unwrap();
         assert_eq!(result.disks.len(), 1);
-        assert_eq!(result.disks[0].device, "/dev/sda");
+        assert_eq!(
+            result.disks[0].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        );
     }
 
     #[tokio::test]
@@ -1565,7 +1568,7 @@ mod tests {
         // Create platform with ROOT label
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/sda".to_string(),
+                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("ROOT".to_string()),
@@ -1625,7 +1628,10 @@ mod tests {
             .await
             .unwrap();
         let result: common::disk_layout::DiskLayout = serde_json::from_slice(&body).unwrap();
-        assert_eq!(result.disks[0].device, "/dev/sda"); // Label resolved to path
+        assert_eq!(
+            result.disks[0].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        ); // Label resolved to path
     }
 
     /// Verify that `image_store_handler` sets a `Content-Length` header so that iPXE does not

@@ -29,7 +29,7 @@ autoinstall:
 {{#each partitions}}
       - id: part-{{ this.label }}
         type: partition
-        device: /dev/sda
+        device: {{ this.disk }}
         preserve: true
 {{#if this.mount_point}}
       - id: fmt-{{ this.label }}

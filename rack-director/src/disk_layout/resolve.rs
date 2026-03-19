@@ -231,7 +231,7 @@ mod tests {
                     partitions: vec![],
                 },
                 DiskConfig {
-                    device: "/dev/sda".to_string(),
+                    device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     partition_table: "gpt".to_string(),
                     partitions: vec![],
                 },
@@ -246,7 +246,10 @@ mod tests {
             resolved.disks[0].device,
             "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
         );
-        assert_eq!(resolved.disks[1].device, "/dev/sda");
+        assert_eq!(
+            resolved.disks[1].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        );
     }
 
     #[test]
@@ -384,7 +387,7 @@ mod tests {
         let platform = make_test_platform();
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![],
             }],
@@ -416,7 +419,7 @@ mod tests {
     fn test_layout_uses_labels_false() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![],
             }],
@@ -431,7 +434,7 @@ mod tests {
     fn test_layout_uses_labels_zfs() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![],
             }],

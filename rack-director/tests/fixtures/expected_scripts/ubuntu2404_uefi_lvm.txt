@@ -28,7 +28,7 @@ autoinstall:
     config:
       - id: part-efi
         type: partition
-        device: /dev/sda
+        device: /dev/disk/by-path/pci-0000:00:1f.2-ata-1
         preserve: true
       - id: fmt-efi
         type: format
@@ -41,7 +41,7 @@ autoinstall:
         path: /boot/efi
       - id: part-boot
         type: partition
-        device: /dev/sda
+        device: /dev/disk/by-path/pci-0000:00:1f.2-ata-1
         preserve: true
       - id: fmt-boot
         type: format
@@ -54,7 +54,7 @@ autoinstall:
         path: /boot
       - id: part-lvm
         type: partition
-        device: /dev/sda
+        device: /dev/disk/by-path/pci-0000:00:1f.2-ata-1
         preserve: true
       - id: lv-root
         type: lvm_partition

@@ -433,7 +433,7 @@ mod tests {
             disk_type: Some(DiskType::Ssd),
             model: Some("Samsung 860 EVO".to_string()),
             serial: Some("S3Z9NX0M123456".to_string()),
-            path: Some("/dev/sda".to_string()),
+            path: Some("/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string()),
         };
 
         let json_str = serde_json::to_string(&disk).unwrap();

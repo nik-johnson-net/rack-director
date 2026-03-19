@@ -382,7 +382,7 @@ mod tests {
             .mock("GET", "/cnc/devices/test-uuid/disk_layout")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"disks":[{"device":"/dev/sda","partition_table":"gpt","partitions":[{"label":"root","size":"rest","filesystem":"ext4","mount_point":"/"}]}]}"#)
+            .with_body(r#"{"disks":[{"device":"/dev/disk/by-path/pci-0000:00:1f.2-ata-1","partition_table":"gpt","partitions":[{"label":"root","size":"rest","filesystem":"ext4","mount_point":"/"}]}]}"#)
             .create_async()
             .await;
 
@@ -393,7 +393,10 @@ mod tests {
         assert!(result.is_ok());
         let layout = result.unwrap();
         assert_eq!(layout.disks.len(), 1);
-        assert_eq!(layout.disks[0].device, "/dev/sda");
+        assert_eq!(
+            layout.disks[0].device,
+            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        );
     }
 
     /// Test get_disk_layout returns error on 400 (no role assigned)

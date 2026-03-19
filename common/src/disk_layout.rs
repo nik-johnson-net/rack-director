@@ -14,7 +14,7 @@ pub struct DiskLayout {
 /// Configuration for a single disk
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiskConfig {
-    pub device: String, // Platform label ("ROOT") or path ("/dev/sda")
+    pub device: String, // Platform label ("ROOT") or path ("/dev/disk/by-path/pci-0000:00:1f.2-ata-1")
     #[serde(default = "default_partition_table")]
     pub partition_table: String, // "gpt" (default) or "msdos"
     pub partitions: Vec<PartitionConfig>,
@@ -180,7 +180,7 @@ mod tests {
     fn test_lvm_layout_serialization_roundtrip() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![
                     PartitionConfig {
@@ -301,7 +301,7 @@ mod tests {
         // Test that omitting partition_table in JSON defaults to "gpt"
         let json = r#"{
             "disks": [{
-                "device": "/dev/sda",
+                "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
                 "partitions": []
             }],
             "volume_groups": null,
@@ -316,7 +316,7 @@ mod tests {
     fn test_optional_fields_omit_from_json() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![],
             }],
@@ -339,7 +339,7 @@ mod tests {
     fn test_partition_optional_fields_omit_from_json() {
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![PartitionConfig {
                     label: "lvm".to_string(),

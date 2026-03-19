@@ -221,7 +221,7 @@ mod tests {
         // Create role
         let disk_layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "/dev/sda".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![PartitionConfig {
                     label: "root".to_string(),

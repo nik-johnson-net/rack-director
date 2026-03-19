@@ -217,7 +217,7 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=partition-dis
 {
   "disks": [
     {
-      "device": "/dev/sda",
+      "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
       "partition_table": "gpt",
       "partitions": [
         {
@@ -691,7 +691,7 @@ sudo ./target/debug/rack-agent --director-url http://localhost:3000/cnc partitio
 - Verify device has assigned role in rack-director UI
 - Check role has disk_layout configured
 
-### "Device not found: /dev/sda"
+### "Device not found: /dev/disk/by-path/..."
 
 **Cause:** Disk path in layout doesn't exist on device
 
