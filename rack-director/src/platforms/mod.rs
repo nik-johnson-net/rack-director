@@ -3,6 +3,7 @@ mod detection;
 pub mod store;
 
 pub use detection::detect_or_create_platform;
+pub(crate) use detection::sort_disks_canonical;
 
 // Re-export types for convenience
 pub use common::device_attributes::DiskType;

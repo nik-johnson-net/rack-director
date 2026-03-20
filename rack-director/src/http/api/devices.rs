@@ -95,23 +95,11 @@ async fn put_label_override(
         .await
         .map_err(|_| HttpError::NotFound(format!("Device {} not found", uuid)))?;
 
-    let mut attrs = serde_json::to_value(&device.attributes)?;
-    let obj = attrs.as_object_mut().ok_or_else(|| {
-        HttpError::ServerInternalError(anyhow::anyhow!("attributes is not a JSON object"))
-    })?;
+    let mut attrs = device.attributes.clone();
+    attrs.disk_label_overrides.insert(req.label, req.path);
+    director.update_attributes_raw(&uuid, &attrs).await?;
 
-    let overrides_entry = obj
-        .entry("disk_label_overrides")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-
-    if let Some(map) = overrides_entry.as_object_mut() {
-        map.insert(req.label, serde_json::Value::String(req.path));
-    }
-
-    let merged: common::device_attributes::DeviceAttributes = serde_json::from_value(attrs)?;
-    director.update_attributes_raw(&uuid, &merged).await?;
-
-    let overrides = build_overrides_response(&merged.disk_label_overrides);
+    let overrides = build_overrides_response(&attrs.disk_label_overrides);
     Ok((StatusCode::OK, Json(LabelOverridesResponse { overrides })))
 }
 
@@ -132,23 +120,16 @@ async fn delete_label_override(
         .await
         .map_err(|_| HttpError::NotFound(format!("Device {} not found", uuid)))?;
 
-    if !device.attributes.disk_label_overrides.contains_key(&label) {
+    let mut attrs = device.attributes.clone();
+    let removed = attrs.disk_label_overrides.remove(&label);
+    if removed.is_none() {
         return Err(HttpError::NotFound(format!(
             "Label override '{}' not found on device {}",
             label, uuid
         )));
     }
 
-    let mut attrs = serde_json::to_value(&device.attributes)?;
-    if let Some(obj) = attrs.as_object_mut()
-        && let Some(overrides) = obj.get_mut("disk_label_overrides")
-        && let Some(map) = overrides.as_object_mut()
-    {
-        map.remove(&label);
-    }
-
-    let merged: common::device_attributes::DeviceAttributes = serde_json::from_value(attrs)?;
-    director.update_attributes_raw(&uuid, &merged).await?;
+    director.update_attributes_raw(&uuid, &attrs).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

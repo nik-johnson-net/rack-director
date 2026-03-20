@@ -78,7 +78,7 @@ pub async fn find_matching_platform(
 /// For disks with identical type and size, the stable sort preserves discovery order.
 /// We intentionally do NOT use path as a tiebreaker, since path varies by PCI slot
 /// and would make label assignment inconsistent across identical hardware.
-fn sort_disks_canonical(disks: &mut [PlatformDisk]) {
+pub(crate) fn sort_disks_canonical(disks: &mut [PlatformDisk]) {
     disks.sort_by(|a, b| {
         a.disk_type
             .priority()

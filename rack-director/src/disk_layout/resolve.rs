@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
-use common::device_attributes::{DeviceAttributes, DiskInfo, DiskType};
+use common::device_attributes::{DeviceAttributes, DiskInfo};
 use common::disk_layout::DiskLayout;
 
-use crate::platforms::{PlatformAttributes, PlatformDisk};
+use crate::platforms::{self, PlatformAttributes};
 
 /// Error type for label resolution failures, used internally before converting to `anyhow::Error`.
 #[derive(Debug)]
@@ -34,82 +34,55 @@ impl std::fmt::Display for ResolveError {
     }
 }
 
-/// Sort `PlatformDisk` slices by canonical hardware characteristics.
-///
-/// Sort key: `(disk_type.priority(), size_gb)` — fastest/smallest first.
-/// This mirrors the order used by `assign_disk_labels()` in `platforms/detection.rs`,
-/// ensuring that label position (e.g. ROOT = index 0) is reproducible.
-fn sort_platform_disks_canonical(disks: &mut [PlatformDisk]) {
-    disks.sort_by(|a, b| {
-        a.disk_type
-            .priority()
-            .cmp(&b.disk_type.priority())
-            .then_with(|| a.size_gb.cmp(&b.size_gb))
-    });
-}
-
 /// Sort `DiskInfo` slices by the same canonical key used for `PlatformDisk`.
 ///
 /// Disks with unknown type are placed last (priority 4). Disks with unknown size
 /// are placed last within their type group.
 fn sort_device_disks_canonical(disks: &mut [DiskInfo]) {
     disks.sort_by(|a, b| {
-        let priority_a = disk_info_type_priority(a);
-        let priority_b = disk_info_type_priority(b);
+        let priority_a = a.disk_type.map(|t| t.priority()).unwrap_or(4);
+        let priority_b = b.disk_type.map(|t| t.priority()).unwrap_or(4);
         priority_a
             .cmp(&priority_b)
             .then_with(|| a.size.unwrap_or(u64::MAX).cmp(&b.size.unwrap_or(u64::MAX)))
     });
 }
 
-/// Map `DiskInfo.disk_type` to the same numeric priority used by `DiskType::priority()`,
-/// with unknown types mapping to 4 so they sort last.
-fn disk_info_type_priority(disk: &DiskInfo) -> u8 {
-    match disk.disk_type {
-        Some(DiskType::Nvme) => 1,
-        Some(DiskType::Ssd) => 2,
-        Some(DiskType::Hdd) => 3,
-        None => 4,
-    }
-}
-
-/// Resolve a disk label to a `by-path` device path using the device's hardware.
+/// Resolve a disk label to a `by-path` device path using pre-sorted disk slices.
 ///
 /// Resolution order:
 /// 1. If the device has an explicit override for this label in
 ///    `DeviceAttributes.disk_label_overrides`, that path is returned immediately.
-/// 2. Otherwise, both the platform disks and the device disks are sorted in canonical
-///    order (NVMe < SSD < HDD < Unknown, then smaller first). The label's index in the
-///    sorted platform list is used to index into the sorted device list, and the
-///    by-path of the device disk at that index is returned.
+/// 2. Otherwise, the label's index in the pre-sorted `sorted_platform_disks` list is used
+///    to index into `sorted_device_disks`, and the by-path of the device disk at that
+///    index is returned.
+///
+/// Both `sorted_platform_disks` and `sorted_device_disks` must already be sorted in
+/// canonical order (NVMe < SSD < HDD < Unknown, then smaller first) before calling this
+/// function.
 ///
 /// Returns `ResolveError::LabelNotFound` if the label does not appear in the platform,
 /// or `ResolveError::DiskPathMissing` if the device has fewer disks than needed or the
 /// disk at the matching position carries no path.
-fn resolve_label(
+fn resolve_label<'a>(
     label: &str,
-    device: &DeviceAttributes,
-    platform: &PlatformAttributes,
+    overrides: &std::collections::HashMap<String, String>,
+    sorted_platform_disks: &[crate::platforms::PlatformDisk],
+    sorted_device_disks: &'a [DiskInfo],
 ) -> std::result::Result<String, ResolveError> {
     // Device-level override wins unconditionally.
-    if let Some(path) = device.disk_label_overrides.get(label) {
+    if let Some(path) = overrides.get(label) {
         return Ok(path.clone());
     }
 
-    // Canonical position matching: sort platform disks and find the label's index.
-    let mut platform_disks = platform.disks.clone();
-    sort_platform_disks_canonical(&mut platform_disks);
-
-    let idx = platform_disks
+    // Canonical position matching: find the label's index in the sorted platform list.
+    let idx = sorted_platform_disks
         .iter()
         .position(|d| d.label.as_deref() == Some(label))
         .ok_or_else(|| ResolveError::LabelNotFound(label.to_string()))?;
 
-    // Apply the same sort to the device's disks and pick the disk at `idx`.
-    let mut device_disks = device.disks.clone();
-    sort_device_disks_canonical(&mut device_disks);
-
-    device_disks
+    // Pick the device disk at the same canonical position.
+    sorted_device_disks
         .get(idx)
         .and_then(|d| d.path.clone())
         .ok_or(ResolveError::DiskPathMissing(idx))
@@ -123,7 +96,7 @@ fn resolve_label(
 ///
 /// Resolution uses:
 /// 1. `DeviceAttributes.disk_label_overrides` — operator-specified per-device overrides.
-/// 2. Canonical position matching — both platform and device disks are sorted by
+/// 2. Canonical position matching — both platform and device disks are sorted once by
 ///    `(disk_type_priority, size_gb)`, and the label's position in the platform list
 ///    is used to select the device disk at the same position.
 ///
@@ -134,12 +107,24 @@ pub fn resolve_disk_layout(
     platform_attrs: &PlatformAttributes,
     device_attrs: &DeviceAttributes,
 ) -> Result<DiskLayout> {
+    // Pre-sort both disk slices once so that `resolve_label` does not re-sort on
+    // every label lookup. This is especially valuable when the layout references
+    // multiple labels (e.g. ROOT + DATA1 + DATA2).
+    let mut sorted_platform_disks = platform_attrs.disks.clone();
+    platforms::sort_disks_canonical(&mut sorted_platform_disks);
+
+    let mut sorted_device_disks = device_attrs.disks.clone();
+    sort_device_disks_canonical(&mut sorted_device_disks);
+
+    let overrides = &device_attrs.disk_label_overrides;
+
     let mut resolved = layout.clone();
 
     for disk in &mut resolved.disks {
         if !disk.device.starts_with('/') {
-            disk.device = resolve_label(&disk.device, device_attrs, platform_attrs)
-                .map_err(|e| anyhow!("{}", e))?;
+            disk.device =
+                resolve_label(&disk.device, overrides, &sorted_platform_disks, &sorted_device_disks)
+                    .map_err(|e| anyhow!("{}", e))?;
         }
     }
 
@@ -147,8 +132,9 @@ pub fn resolve_disk_layout(
         for pool in pools {
             for device_ref in &mut pool.devices {
                 if !device_ref.starts_with('/') {
-                    *device_ref = resolve_label(device_ref, device_attrs, platform_attrs)
-                        .map_err(|e| anyhow!("{}", e))?;
+                    *device_ref =
+                        resolve_label(device_ref, overrides, &sorted_platform_disks, &sorted_device_disks)
+                            .map_err(|e| anyhow!("{}", e))?;
                 }
             }
         }
@@ -332,6 +318,29 @@ mod tests {
     // resolve_label tests
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Convenience wrapper matching the old `resolve_label(label, device, platform)` signature.
+    ///
+    /// Sorts both disk slices and delegates to the production function so that tests
+    /// remain readable without repeating the sort boilerplate in every test body.
+    fn resolve_label_helper(
+        label: &str,
+        device: &DeviceAttributes,
+        platform: &PlatformAttributes,
+    ) -> std::result::Result<String, ResolveError> {
+        let mut sorted_platform_disks = platform.disks.clone();
+        platforms::sort_disks_canonical(&mut sorted_platform_disks);
+
+        let mut sorted_device_disks = device.disks.clone();
+        sort_device_disks_canonical(&mut sorted_device_disks);
+
+        resolve_label(
+            label,
+            &device.disk_label_overrides,
+            &sorted_platform_disks,
+            &sorted_device_disks,
+        )
+    }
+
     /// A device with identical hardware but different by-path strings should resolve ROOT
     /// to its own disk path, not any path stored on the platform.
     #[test]
@@ -351,10 +360,10 @@ mod tests {
             ),
         ]);
 
-        let path = resolve_label("ROOT", &device, &platform).unwrap();
+        let path = resolve_label_helper("ROOT", &device, &platform).unwrap();
         assert_eq!(path, "/dev/disk/by-path/pci-0000:05:00.0-ata-1");
 
-        let path = resolve_label("DATA1", &device, &platform).unwrap();
+        let path = resolve_label_helper("DATA1", &device, &platform).unwrap();
         assert_eq!(path, "/dev/disk/by-path/pci-0000:06:00.0-ata-2");
     }
 
@@ -377,13 +386,13 @@ mod tests {
             ),
         ]);
 
-        let path = resolve_label("ROOT", &device, &platform).unwrap();
+        let path = resolve_label_helper("ROOT", &device, &platform).unwrap();
         assert_eq!(
             path, "/dev/disk/by-path/pci-0000:05:00.0-ata-1",
             "ROOT should map to SSD regardless of disk discovery order"
         );
 
-        let path = resolve_label("DATA1", &device, &platform).unwrap();
+        let path = resolve_label_helper("DATA1", &device, &platform).unwrap();
         assert_eq!(
             path, "/dev/disk/by-path/pci-0000:06:00.0-ata-2",
             "DATA1 should map to HDD regardless of disk discovery order"
@@ -415,7 +424,7 @@ mod tests {
             overrides,
         );
 
-        let path = resolve_label("ROOT", &device, &platform).unwrap();
+        let path = resolve_label_helper("ROOT", &device, &platform).unwrap();
         assert_eq!(
             path, "/dev/disk/by-path/pci-0000:99:00.0-ata-override",
             "Device override must win over canonical resolution"
@@ -448,7 +457,7 @@ mod tests {
         );
 
         // DATA1 has no override, so canonical resolution applies.
-        let path = resolve_label("DATA1", &device, &platform).unwrap();
+        let path = resolve_label_helper("DATA1", &device, &platform).unwrap();
         assert_eq!(path, "/dev/disk/by-path/pci-0000:06:00.0-ata-2");
     }
 
@@ -462,7 +471,7 @@ mod tests {
             DiskType::Ssd,
         )]);
 
-        let result = resolve_label("NONEXISTENT", &device, &platform);
+        let result = resolve_label_helper("NONEXISTENT", &device, &platform);
         assert!(
             matches!(result, Err(ResolveError::LabelNotFound(ref l)) if l == "NONEXISTENT"),
             "Expected LabelNotFound, got: {:?}",
@@ -482,7 +491,7 @@ mod tests {
             DiskType::Ssd,
         )]);
 
-        let result = resolve_label("DATA1", &device, &platform);
+        let result = resolve_label_helper("DATA1", &device, &platform);
         assert!(
             matches!(result, Err(ResolveError::DiskPathMissing(1))),
             "Expected DiskPathMissing(1), got: {:?}",
@@ -503,7 +512,7 @@ mod tests {
         disk.path = None; // strip the path
         let device = make_device_attrs(vec![disk]);
 
-        let result = resolve_label("ROOT", &device, &platform);
+        let result = resolve_label_helper("ROOT", &device, &platform);
         assert!(
             matches!(result, Err(ResolveError::DiskPathMissing(0))),
             "Expected DiskPathMissing(0), got: {:?}",
