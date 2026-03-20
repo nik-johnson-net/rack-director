@@ -94,10 +94,12 @@ pub async fn render_for_device(
 
     // Get device attributes
     let hostname = device.attributes.hostname.clone();
+    let boot_mode = device.attributes.boot_mode;
 
     let device_info = templates::DeviceInfo {
         uuid: *device_uuid,
         hostname,
+        boot_mode,
     };
 
     // Get resolved disk layout for template context.

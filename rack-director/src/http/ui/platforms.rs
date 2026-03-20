@@ -170,6 +170,7 @@ async fn create_platform(
         &req.name,
         req.description.as_deref(),
         &req.attributes,
+        req.firmware_mode,
     )
     .await?;
 
@@ -212,6 +213,7 @@ async fn update_platform(
         req.name.as_deref(),
         req.description.as_deref(),
         req.attributes.as_ref(),
+        req.firmware_mode,
     )
     .await?;
 
@@ -353,6 +355,7 @@ mod tests {
             "Test Platform",
             Some("Test Description"),
             &attrs,
+            None,
         )
         .await
         .unwrap();
@@ -380,6 +383,7 @@ mod tests {
             "Test Platform",
             Some("Test Description"),
             &attrs,
+            None,
         )
         .await
         .unwrap();
@@ -431,6 +435,7 @@ mod tests {
             "Test Platform",
             Some("Test Description"),
             &attrs,
+            None,
         )
         .await
         .unwrap();
@@ -517,6 +522,7 @@ mod tests {
             "Test Platform",
             Some("Test Description"),
             &attrs,
+            None,
         )
         .await
         .unwrap();

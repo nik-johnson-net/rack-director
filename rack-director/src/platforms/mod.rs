@@ -21,6 +21,11 @@ pub struct Platform {
     pub name: String,
     pub description: Option<String>,
     pub attributes: PlatformAttributes,
+    /// Firmware mode constraint for this platform.
+    /// If set, only devices with the matching boot_mode will auto-match this platform.
+    /// None means no firmware constraint (matches any or unknown firmware mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_mode: Option<common::FirmwareMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,11 +44,19 @@ impl FromRow for Platform {
                 )
             })?;
 
+        let firmware_mode_str: Option<String> = row.get("firmware_mode")?;
+        let firmware_mode = firmware_mode_str.and_then(|s| match s.as_str() {
+            "bios" => Some(common::FirmwareMode::Bios),
+            "uefi" => Some(common::FirmwareMode::Uefi),
+            _ => None,
+        });
+
         Ok(Platform {
             id: row.get("id")?,
             name: row.get("name")?,
             description: row.get("description")?,
             attributes,
+            firmware_mode,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -103,6 +116,7 @@ pub struct CreatePlatformRequest {
     pub name: String,
     pub description: Option<String>,
     pub attributes: PlatformAttributes,
+    pub firmware_mode: Option<common::FirmwareMode>,
 }
 
 /// Request to update an existing platform
@@ -111,6 +125,7 @@ pub struct UpdatePlatformRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub attributes: Option<PlatformAttributes>,
+    pub firmware_mode: Option<common::FirmwareMode>,
 }
 
 /// Request to assign a platform to a device

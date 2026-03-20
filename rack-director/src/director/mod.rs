@@ -332,13 +332,14 @@ impl<'a> Director<'a> {
         let device = store::get_device(self.conn, device_uuid).await?;
         let attrs = &device.attributes;
 
-        // Perform platform detection
+        // Perform platform detection (pass boot_mode for firmware-aware matching)
         let platform_id = crate::platforms::detect_or_create_platform(
             self.conn,
             &attrs.disks,
             &attrs.network_interfaces,
             &attrs.cpus,
             &attrs.memory,
+            attrs.boot_mode,
         )
         .await?;
 
@@ -600,23 +601,27 @@ impl<'a> Director<'a> {
 
     // Role assignment methods
 
-    /// Assign a role to a device, validating disk layout labels against the platform
+    /// Assign a role to a device, validating disk layout labels and firmware compatibility.
     ///
-    /// If the role's disk layout uses platform labels (device names not starting with '/'),
-    /// the device must have a platform assigned, and all labels must exist in that platform.
+    /// Validation checks:
+    /// 1. If the role's disk layout uses platform labels, the device must have a platform
+    ///    assigned and all labels must exist in that platform.
+    /// 2. If the role has a `firmware_mode` constraint and the device has a detected
+    ///    `boot_mode`, they must match. Devices without a detected `boot_mode` are allowed
+    ///    through with a warning (device-scan may not have run yet).
     pub async fn assign_role_to_device(
         &self,
         device_uuid: &Uuid,
         role_id: i64,
     ) -> anyhow::Result<()> {
-        // Get the role to check its disk layout
+        // Get the role to check its disk layout and firmware constraint
         let role = roles::store::get(self.conn, role_id).await?;
+
+        // Get device (needed for label validation and firmware check)
+        let device = store::get_device(self.conn, device_uuid).await?;
 
         // Check if disk layout uses labels
         if crate::disk_layout::layout_uses_labels(&role.disk_layout) {
-            // Get device to check platform
-            let device = store::get_device(self.conn, device_uuid).await?;
-
             let platform_id = device.platform_id.ok_or_else(|| {
                 anyhow::anyhow!(
                     "Cannot assign role '{}': disk layout uses platform labels but device has no platform assigned",
@@ -631,6 +636,31 @@ impl<'a> Director<'a> {
                 &platform.attributes,
             )?;
         }
+
+        // Validate firmware mode compatibility
+        if let Some(required_firmware) = role.firmware_mode {
+            match device.attributes.boot_mode {
+                Some(actual_mode) if actual_mode != required_firmware => {
+                    return Err(anyhow::anyhow!(
+                        "Firmware mismatch: role '{}' requires {} but device has {}",
+                        role.name,
+                        required_firmware,
+                        actual_mode
+                    ));
+                }
+                None => {
+                    // Device scan not yet run — warn but allow assignment
+                    log::warn!(
+                        "Assigning role '{}' (firmware_mode={}) to device {} with no detected boot_mode (device-scan may not have run yet)",
+                        role.name,
+                        required_firmware,
+                        device_uuid
+                    );
+                }
+                Some(_) => {} // Modes match — proceed
+            }
+        }
+
         store::assign_role_to_device(self.conn, device_uuid, role_id).await
     }
 
@@ -1637,7 +1667,7 @@ mod tests {
             }],
             memory_gib: 32,
         };
-        crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
+        crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs, None)
             .await
             .unwrap();
 
@@ -1763,7 +1793,7 @@ mod tests {
             memory_gib: 0,
         };
         let platform =
-            crate::platforms::store::create(&conn, "Manual Platform", None, &platform_attrs)
+            crate::platforms::store::create(&conn, "Manual Platform", None, &platform_attrs, None)
                 .await
                 .unwrap();
 
@@ -1982,7 +2012,7 @@ mod tests {
             memory_gib: 0,
         };
         let manual_platform =
-            crate::platforms::store::create(&conn, "Manual Override", None, &platform_attrs)
+            crate::platforms::store::create(&conn, "Manual Override", None, &platform_attrs, None)
                 .await
                 .unwrap();
 
@@ -2026,9 +2056,17 @@ mod tests {
             zfs_pools: None,
         };
         let role =
-            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None)
-                .await
-                .unwrap();
+            crate::roles::store::create(
+                &conn,
+                "label-role",
+                None,
+                os.id.unwrap(),
+                &layout,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Assign role should fail - labels used but no platform
         let result = director
@@ -2067,7 +2105,7 @@ mod tests {
             memory_gib: 32,
         };
         let platform =
-            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
+            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs, None)
                 .await
                 .unwrap();
         director
@@ -2094,6 +2132,7 @@ mod tests {
             None,
             os.id.unwrap(),
             &layout,
+            None,
             None,
         )
         .await
@@ -2131,7 +2170,7 @@ mod tests {
             memory_gib: 32,
         };
         let platform =
-            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
+            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs, None)
                 .await
                 .unwrap();
         director
@@ -2153,9 +2192,17 @@ mod tests {
             zfs_pools: None,
         };
         let role =
-            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None)
-                .await
-                .unwrap();
+            crate::roles::store::create(
+                &conn,
+                "label-role",
+                None,
+                os.id.unwrap(),
+                &layout,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Assign should succeed - label matches platform
         let result = director
@@ -2190,11 +2237,158 @@ mod tests {
             zfs_pools: None,
         };
         let role =
-            crate::roles::store::create(&conn, "path-role", None, os.id.unwrap(), &layout, None)
-                .await
-                .unwrap();
+            crate::roles::store::create(
+                &conn,
+                "path-role",
+                None,
+                os.id.unwrap(),
+                &layout,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Assign should succeed - no labels, no platform needed
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_firmware_mismatch_fails() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440066").unwrap();
+
+        // Register device and set its boot_mode to BIOS via attribute update
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let mut attrs = serde_json::Map::new();
+        attrs.insert("boot_mode".to_string(), serde_json::json!("bios"));
+        // Update only attributes (not hardware discovery fields, to avoid platform detection)
+        crate::director::store::update_attributes(&conn, &test_uuid, attrs)
+            .await
+            .unwrap();
+
+        // Create a UEFI-only role
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = crate::roles::store::create(
+            &conn,
+            "uefi-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        // Assign should fail — device is BIOS, role requires UEFI
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Firmware mismatch"),
+            "Expected 'Firmware mismatch' in error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_firmware_match_succeeds() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440067").unwrap();
+
+        // Register device and set its boot_mode to UEFI
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let mut attrs = serde_json::Map::new();
+        attrs.insert("boot_mode".to_string(), serde_json::json!("uefi"));
+        crate::director::store::update_attributes(&conn, &test_uuid, attrs)
+            .await
+            .unwrap();
+
+        // Create a UEFI-only role
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = crate::roles::store::create(
+            &conn,
+            "uefi-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        // Assign should succeed — both are UEFI
+        let result = director
+            .assign_role_to_device(&test_uuid, role.id.unwrap())
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assign_role_firmware_constrained_role_no_device_boot_mode_warns_and_proceeds() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440068").unwrap();
+
+        // Register device (no boot_mode set — device-scan not yet run)
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Create a UEFI-constrained role
+        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let layout = common::disk_layout::DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let role = crate::roles::store::create(
+            &conn,
+            "uefi-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        // Assign should succeed (with a warning) — device has no boot_mode yet
         let result = director
             .assign_role_to_device(&test_uuid, role.id.unwrap())
             .await;

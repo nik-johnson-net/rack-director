@@ -36,6 +36,7 @@ async fn create_role(
         req.os_id,
         &req.disk_layout,
         req.config_template.as_ref(),
+        req.firmware_mode,
     )
     .await?;
 
@@ -83,6 +84,7 @@ async fn update_role(
         req.os_id,
         req.disk_layout.as_ref(),
         req.config_template.as_ref(),
+        req.firmware_mode,
     )
     .await?;
 

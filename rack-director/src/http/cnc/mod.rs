@@ -1488,7 +1488,7 @@ mod tests {
             zfs_pools: None,
         };
         let role =
-            crate::roles::store::create(&conn, "test-role", None, os.id.unwrap(), &layout, None)
+            crate::roles::store::create(&conn, "test-role", None, os.id.unwrap(), &layout, None, None)
                 .await
                 .unwrap();
 
@@ -1583,7 +1583,7 @@ mod tests {
             memory_gib: 32,
         };
         let platform =
-            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs)
+            crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs, None)
                 .await
                 .unwrap();
         director
@@ -1638,7 +1638,7 @@ mod tests {
             zfs_pools: None,
         };
         let role =
-            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None)
+            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None, None)
                 .await
                 .unwrap();
         director

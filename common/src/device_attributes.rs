@@ -1,3 +1,4 @@
+use crate::firmware_mode::FirmwareMode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -125,6 +126,11 @@ pub struct DeviceAttributes {
     /// Legacy field - static IP (prefer network_interfaces)
     #[serde(default)]
     pub static_ip: Option<String>,
+
+    /// Firmware mode detected at device intake (x86/x86_64 only).
+    /// None means not applicable (non-x86) or not yet detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_mode: Option<FirmwareMode>,
 
     /// Catch-all for unknown/custom fields
     /// This ensures backward compatibility with existing JSON data
@@ -901,6 +907,70 @@ mod tests {
         let attrs: DeviceAttributes = serde_json::from_value(json).unwrap();
         assert_eq!(attrs.hostname, Some("test-server".to_string()));
         assert!(attrs.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_boot_mode_none_not_included_in_json() {
+        let attrs = DeviceAttributes::default();
+        let json = serde_json::to_value(&attrs).unwrap();
+        // boot_mode = None should not appear in the JSON output
+        assert!(json.get("boot_mode").is_none());
+    }
+
+    #[test]
+    fn test_boot_mode_uefi_serializes_correctly() {
+        let attrs = DeviceAttributes {
+            boot_mode: Some(FirmwareMode::Uefi),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&attrs).unwrap();
+        assert_eq!(json.get("boot_mode").unwrap().as_str().unwrap(), "uefi");
+    }
+
+    #[test]
+    fn test_boot_mode_bios_serializes_correctly() {
+        let attrs = DeviceAttributes {
+            boot_mode: Some(FirmwareMode::Bios),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&attrs).unwrap();
+        assert_eq!(json.get("boot_mode").unwrap().as_str().unwrap(), "bios");
+    }
+
+    #[test]
+    fn test_boot_mode_backward_compat_old_json_without_boot_mode() {
+        // Old JSON without boot_mode should deserialize with boot_mode = None
+        let json = serde_json::json!({
+            "hostname": "old-server",
+            "manufacturer": "Dell"
+        });
+        let attrs: DeviceAttributes = serde_json::from_value(json).unwrap();
+        assert_eq!(attrs.hostname, Some("old-server".to_string()));
+        assert!(attrs.boot_mode.is_none());
+    }
+
+    #[test]
+    fn test_boot_mode_roundtrip_uefi() {
+        let attrs = DeviceAttributes {
+            boot_mode: Some(FirmwareMode::Uefi),
+            hostname: Some("server".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&attrs).unwrap();
+        let deserialized: DeviceAttributes = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.boot_mode, Some(FirmwareMode::Uefi));
+        assert_eq!(deserialized.hostname, Some("server".to_string()));
+    }
+
+    #[test]
+    fn test_boot_mode_roundtrip_bios() {
+        let attrs = DeviceAttributes {
+            boot_mode: Some(FirmwareMode::Bios),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&attrs).unwrap();
+        let deserialized: DeviceAttributes = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.boot_mode, Some(FirmwareMode::Bios));
     }
 
     #[test]

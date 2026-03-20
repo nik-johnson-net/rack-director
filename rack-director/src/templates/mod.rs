@@ -22,6 +22,8 @@ pub struct NetworkInfo {
 pub struct DeviceInfo {
     pub uuid: Uuid,
     pub hostname: Option<String>,
+    /// Firmware mode detected during device scan. None if not yet detected.
+    pub boot_mode: Option<common::FirmwareMode>,
 }
 
 /// Context for a single partition in the install script template.
@@ -129,6 +131,9 @@ pub fn build_disk_layout_context(
 /// - {{ device.gateway }} - Network gateway
 /// - {{ device.dns_servers }} - DNS servers (space-separated)
 /// - {{ device.netmask }} - Network netmask
+/// - {{ device.boot_mode }} - Firmware mode ("bios", "uefi", or "" if not detected)
+/// - {{ device.is_uefi }} - Boolean true if UEFI firmware
+/// - {{ device.is_bios }} - Boolean true if BIOS firmware
 /// - {{ role.name }} - Role name
 /// - {{ role.disk_layout }} - Disk layout as JSON (raw, unresolved)
 /// - {{ os.name }} - OS name
@@ -151,6 +156,17 @@ pub fn render_install_script(
 
     let (partitions, logical_volumes) = build_disk_layout_context(disk_layout);
 
+    // Build firmware mode template variables
+    let boot_mode_str = device
+        .boot_mode
+        .map(|m| match m {
+            common::FirmwareMode::Bios => "bios",
+            common::FirmwareMode::Uefi => "uefi",
+        })
+        .unwrap_or("");
+    let is_uefi = device.boot_mode == Some(common::FirmwareMode::Uefi);
+    let is_bios = device.boot_mode == Some(common::FirmwareMode::Bios);
+
     // Build context with all available variables
     let context = json!({
         "device": {
@@ -162,6 +178,9 @@ pub fn render_install_script(
             "dns_servers": network.dns_servers.join(" "),
             "netmask": network.netmask,
             "prefix_length": network.prefix_length,
+            "boot_mode": boot_mode_str,
+            "is_uefi": is_uefi,
+            "is_bios": is_bios,
         },
         "role": {
             "name": role.name,
@@ -210,6 +229,7 @@ mod tests {
         DeviceInfo {
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             hostname: Some("server01".to_string()),
+            boot_mode: None,
         }
     }
 
@@ -221,6 +241,7 @@ mod tests {
             os_id: 1,
             disk_layout,
             config_template: None,
+            firmware_mode: None,
             created_at: None,
             updated_at: None,
         }
@@ -306,6 +327,7 @@ network:
             config_template: Some(json!({
                 "packages": ["nginx", "postgresql", "redis"]
             })),
+            firmware_mode: None,
             created_at: None,
             updated_at: None,
         };
@@ -333,6 +355,7 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         let device = DeviceInfo {
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             hostname: Some("debian-server".to_string()),
+            boot_mode: None,
         };
         let network = NetworkInfo {
             mac_address: "00:11:22:33:44:55".to_string(),
@@ -747,5 +770,125 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
         .unwrap();
 
         assert!(result.contains("/dev/vg0/root /"));
+    }
+
+    #[test]
+    fn test_render_boot_mode_uefi() {
+        let template = "{{ device.boot_mode }}";
+        let device = DeviceInfo {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            hostname: Some("server01".to_string()),
+            boot_mode: Some(common::FirmwareMode::Uefi),
+        };
+        let result = render_install_script(
+            template,
+            &device,
+            &make_role(empty_disk_layout()),
+            &make_os(),
+            &make_network(),
+            &empty_disk_layout(),
+        )
+        .unwrap();
+        assert_eq!(result, "uefi");
+    }
+
+    #[test]
+    fn test_render_boot_mode_bios() {
+        let template = "{{ device.boot_mode }}";
+        let device = DeviceInfo {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            hostname: Some("server01".to_string()),
+            boot_mode: Some(common::FirmwareMode::Bios),
+        };
+        let result = render_install_script(
+            template,
+            &device,
+            &make_role(empty_disk_layout()),
+            &make_os(),
+            &make_network(),
+            &empty_disk_layout(),
+        )
+        .unwrap();
+        assert_eq!(result, "bios");
+    }
+
+    #[test]
+    fn test_render_boot_mode_unknown() {
+        let template = "{{ device.boot_mode }}";
+        let device = DeviceInfo {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            hostname: Some("server01".to_string()),
+            boot_mode: None,
+        };
+        let result = render_install_script(
+            template,
+            &device,
+            &make_role(empty_disk_layout()),
+            &make_os(),
+            &make_network(),
+            &empty_disk_layout(),
+        )
+        .unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_render_is_uefi_true() {
+        let template = "{{#if device.is_uefi}}UEFI{{else}}NOT_UEFI{{/if}}";
+        let device = DeviceInfo {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            hostname: Some("server01".to_string()),
+            boot_mode: Some(common::FirmwareMode::Uefi),
+        };
+        let result = render_install_script(
+            template,
+            &device,
+            &make_role(empty_disk_layout()),
+            &make_os(),
+            &make_network(),
+            &empty_disk_layout(),
+        )
+        .unwrap();
+        assert_eq!(result, "UEFI");
+    }
+
+    #[test]
+    fn test_render_is_bios_true() {
+        let template = "{{#if device.is_bios}}BIOS{{else}}NOT_BIOS{{/if}}";
+        let device = DeviceInfo {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            hostname: Some("server01".to_string()),
+            boot_mode: Some(common::FirmwareMode::Bios),
+        };
+        let result = render_install_script(
+            template,
+            &device,
+            &make_role(empty_disk_layout()),
+            &make_os(),
+            &make_network(),
+            &empty_disk_layout(),
+        )
+        .unwrap();
+        assert_eq!(result, "BIOS");
+    }
+
+    #[test]
+    fn test_render_is_uefi_false_when_bios() {
+        let template = "{{#if device.is_uefi}}UEFI{{else}}NOT_UEFI{{/if}}";
+        let device = DeviceInfo {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            hostname: Some("server01".to_string()),
+            boot_mode: Some(common::FirmwareMode::Bios),
+        };
+        let result = render_install_script(
+            template,
+            &device,
+            &make_role(empty_disk_layout()),
+            &make_os(),
+            &make_network(),
+            &empty_disk_layout(),
+        )
+        .unwrap();
+        assert_eq!(result, "NOT_UEFI");
     }
 }
