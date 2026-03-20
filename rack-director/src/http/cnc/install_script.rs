@@ -115,9 +115,12 @@ pub async fn render_for_device(
             let platform = crate::platforms::store::get(conn, platform_id)
                 .await
                 .map_err(Error::ServerInternalError)?;
-            owned_layout =
-                crate::disk_layout::resolve_disk_layout(&role.disk_layout, &platform.attributes)
-                    .map_err(Error::ServerInternalError)?;
+            owned_layout = crate::disk_layout::resolve_disk_layout(
+                &role.disk_layout,
+                &platform.attributes,
+                &device.attributes,
+            )
+            .map_err(Error::ServerInternalError)?;
             &owned_layout
         } else {
             &role.disk_layout
