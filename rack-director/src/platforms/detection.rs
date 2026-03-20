@@ -9,7 +9,7 @@ use common::device_attributes::{CpuInfo, DiskInfo, MemoryInfo, NetworkInterface}
 ///
 /// This function:
 /// 1. Converts device hardware attributes to platform format
-/// 2. Attempts to find an existing matching platform
+/// 2. Attempts to find an existing matching platform (considering firmware mode)
 /// 3. If no match found, creates a new platform with auto-generated name
 /// 4. Assigns labels to disks and NICs based on heuristics
 ///
@@ -20,6 +20,7 @@ pub async fn detect_or_create_platform(
     nics: &[NetworkInterface],
     cpus: &[CpuInfo],
     memory: &[MemoryInfo],
+    boot_mode: Option<common::FirmwareMode>,
 ) -> Result<i64> {
     // Convert device hardware to platform attributes
     let mut platform_attrs = convert_device_hardware_to_platform(disks, nics, cpus, memory);
@@ -29,7 +30,7 @@ pub async fn detect_or_create_platform(
     assign_nic_labels(&mut platform_attrs.nics);
 
     // Try to find existing matching platform
-    if let Some(platform_id) = find_matching_platform(conn, &platform_attrs).await? {
+    if let Some(platform_id) = find_matching_platform(conn, &platform_attrs, boot_mode).await? {
         log::info!("Found matching platform ID: {}", platform_id);
         return Ok(platform_id);
     }
@@ -43,6 +44,7 @@ pub async fn detect_or_create_platform(
         &platform_name,
         Some("Auto-detected platform"),
         &platform_attrs,
+        None, // Auto-created platforms have no firmware constraint
     )
     .await?;
 
@@ -50,18 +52,30 @@ pub async fn detect_or_create_platform(
 }
 
 /// Find a matching platform based on hardware attributes
-/// Used for auto-detection during hardware discovery
-/// Returns platform ID if a match is found
+///
+/// Firmware mode matching: if the platform has a `firmware_mode` constraint and the device
+/// has a detected `boot_mode`, they must match. If either is `None`, firmware is not used
+/// as a discriminator for that comparison.
+///
+/// Returns platform ID if a match is found.
 pub async fn find_matching_platform(
     conn: &Connection,
     device_attrs: &PlatformAttributes,
+    device_boot_mode: Option<common::FirmwareMode>,
 ) -> Result<Option<i64>> {
     let platforms = super::store::list(conn).await?;
 
     for platform in platforms {
-        if is_platform_match(&platform.attributes, device_attrs) {
-            return Ok(platform.id);
+        if !is_platform_match(&platform.attributes, device_attrs) {
+            continue;
         }
+        // Check firmware mode constraint if both sides have a value
+        if let (Some(required), Some(actual)) = (platform.firmware_mode, device_boot_mode)
+            && required != actual
+        {
+            continue;
+        }
+        return Ok(platform.id);
     }
 
     Ok(None)
@@ -603,13 +617,16 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
-            .await
-            .unwrap();
+        let platform =
+            crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs, None)
+                .await
+                .unwrap();
 
         // Search with exact same attributes
         let device_attrs = sample_platform_attributes();
-        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert_eq!(found, platform.id);
     }
@@ -619,16 +636,19 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
-            .await
-            .unwrap();
+        let platform =
+            crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs, None)
+                .await
+                .unwrap();
 
         // Device with slightly different disk size (within 5% tolerance)
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks[0].size_gb = 475; // 480 - 5 = within 5%
         device_attrs.disks[1].size_gb = 2050; // 2000 + 50 = within 5%
 
-        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert_eq!(found, platform.id);
     }
@@ -638,15 +658,18 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
-            .await
-            .unwrap();
+        let platform =
+            crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs, None)
+                .await
+                .unwrap();
 
         // Device with slightly different memory (within 1 GiB tolerance)
         let mut device_attrs = sample_platform_attributes();
         device_attrs.memory_gib = 33; // 32 + 1 = within tolerance
 
-        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert_eq!(found, platform.id);
     }
@@ -656,7 +679,7 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs, None)
             .await
             .unwrap();
 
@@ -664,7 +687,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks.pop();
 
-        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
@@ -674,7 +699,7 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs, None)
             .await
             .unwrap();
 
@@ -682,7 +707,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks[0].disk_type = DiskType::Nvme;
 
-        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
@@ -692,7 +719,7 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs, None)
             .await
             .unwrap();
 
@@ -700,7 +727,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.nics.pop();
 
-        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
@@ -710,7 +739,7 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs)
+        crate::platforms::store::create(&db, "Test Platform", None::<&str>, &attrs, None)
             .await
             .unwrap();
 
@@ -718,7 +747,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.cpus[0].cores = 8;
 
-        let found = find_matching_platform(&db, &device_attrs).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
@@ -944,7 +975,7 @@ mod tests {
             part_number: None,
         }];
 
-        let platform_id = detect_or_create_platform(&db, &disks, &nics, &cpus, &memory)
+        let platform_id = detect_or_create_platform(&db, &disks, &nics, &cpus, &memory, None)
             .await
             .unwrap();
 
@@ -959,5 +990,108 @@ mod tests {
         assert_eq!(disk.disk_type, DiskType::Ssd);
         // label is assigned by assign_disk_labels
         assert_eq!(disk.label, Some("ROOT".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_find_matching_platform_firmware_mode_constraint_matches() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = crate::platforms::store::create(
+            &db,
+            "UEFI Platform",
+            None::<&str>,
+            &attrs,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        // Device with matching UEFI boot mode should match
+        let device_attrs = sample_platform_attributes();
+        let found = find_matching_platform(&db, &device_attrs, Some(common::FirmwareMode::Uefi))
+            .await
+            .unwrap();
+
+        assert_eq!(found, platform.id);
+    }
+
+    #[tokio::test]
+    async fn test_find_matching_platform_firmware_mode_constraint_mismatch() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        crate::platforms::store::create(
+            &db,
+            "UEFI Platform",
+            None::<&str>,
+            &attrs,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        // Device with BIOS boot mode should NOT match a UEFI-constrained platform
+        let device_attrs = sample_platform_attributes();
+        let found = find_matching_platform(&db, &device_attrs, Some(common::FirmwareMode::Bios))
+            .await
+            .unwrap();
+
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_matching_platform_no_constraint_matches_any_firmware() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform =
+            crate::platforms::store::create(&db, "Any Platform", None::<&str>, &attrs, None)
+                .await
+                .unwrap();
+
+        // Platform has no firmware constraint — should match BIOS device
+        let device_attrs = sample_platform_attributes();
+        let found = find_matching_platform(&db, &device_attrs, Some(common::FirmwareMode::Bios))
+            .await
+            .unwrap();
+        assert_eq!(found, platform.id);
+
+        // And should also match UEFI device
+        let found = find_matching_platform(&db, &device_attrs, Some(common::FirmwareMode::Uefi))
+            .await
+            .unwrap();
+        assert_eq!(found, platform.id);
+
+        // And should match when device firmware mode is unknown
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
+        assert_eq!(found, platform.id);
+    }
+
+    #[tokio::test]
+    async fn test_find_matching_platform_device_unknown_firmware_ignores_constraint() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = crate::platforms::store::create(
+            &db,
+            "UEFI Platform",
+            None::<&str>,
+            &attrs,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        // Device with unknown firmware mode (None) should still match a constrained platform
+        // because we can't rule it out
+        let device_attrs = sample_platform_attributes();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
+
+        assert_eq!(found, platform.id);
     }
 }

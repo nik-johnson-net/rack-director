@@ -16,6 +16,11 @@ pub struct Role {
     pub os_id: i64,
     pub disk_layout: DiskLayout,
     pub config_template: Option<serde_json::Value>,
+    /// Required firmware mode for devices assigned to this role.
+    /// If set, only devices with the matching boot_mode can be assigned this role.
+    /// None means no firmware constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_mode: Option<common::FirmwareMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,6 +34,13 @@ impl FromRow for Role {
         let config_json: Option<String> = row.get("config_template")?;
         let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
 
+        let firmware_mode_str: Option<String> = row.get("firmware_mode")?;
+        let firmware_mode = firmware_mode_str.and_then(|s| match s.as_str() {
+            "bios" => Some(common::FirmwareMode::Bios),
+            "uefi" => Some(common::FirmwareMode::Uefi),
+            _ => None,
+        });
+
         Ok(Role {
             id: row.get("id")?,
             name: row.get("name")?,
@@ -36,6 +48,7 @@ impl FromRow for Role {
             os_id: row.get("os_id")?,
             disk_layout,
             config_template,
+            firmware_mode,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -50,6 +63,7 @@ pub struct CreateRoleRequest {
     pub os_id: i64,
     pub disk_layout: DiskLayout,
     pub config_template: Option<serde_json::Value>,
+    pub firmware_mode: Option<common::FirmwareMode>,
 }
 
 /// Request to update a role
@@ -60,6 +74,7 @@ pub struct UpdateRoleRequest {
     pub os_id: Option<i64>,
     pub disk_layout: Option<DiskLayout>,
     pub config_template: Option<serde_json::Value>,
+    pub firmware_mode: Option<common::FirmwareMode>,
 }
 
 /// Request to assign a role to a device

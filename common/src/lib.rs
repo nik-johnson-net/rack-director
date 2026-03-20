@@ -1,8 +1,10 @@
 pub mod device_attributes;
 pub mod disk_layout;
+pub mod firmware_mode;
 pub mod poll_action;
 mod subnet;
 
+pub use firmware_mode::FirmwareMode;
 pub use subnet::Ipv4Subnet;
 pub use subnet::Ipv4SubnetError;
 

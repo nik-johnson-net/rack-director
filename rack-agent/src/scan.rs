@@ -574,6 +574,19 @@ pub async fn device_scan(client: &RackDirector, scan_args: &DeviceScanArgs) -> R
     result
 }
 
+/// Detect the firmware mode of the current boot environment.
+///
+/// Detection is based on the presence of `/sys/firmware/efi`: if the directory
+/// exists, the system booted via UEFI; otherwise it booted via legacy BIOS.
+/// This is the standard Linux detection method and works for x86/x86_64.
+fn detect_firmware_mode() -> common::FirmwareMode {
+    if std::path::Path::new("/sys/firmware/efi").exists() {
+        common::FirmwareMode::Uefi
+    } else {
+        common::FirmwareMode::Bios
+    }
+}
+
 async fn perform_scan_and_upload(
     client: &RackDirector,
     uuid: &str,
@@ -589,6 +602,7 @@ async fn perform_scan_and_upload(
         bios_vendor: hardware_info.bios_vendor.clone(),
         cpus: hardware_info.cpus.clone(),
         memory: hardware_info.memory.clone(),
+        boot_mode: Some(detect_firmware_mode()),
         ..Default::default()
     };
 

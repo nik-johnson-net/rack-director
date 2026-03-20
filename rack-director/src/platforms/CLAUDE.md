@@ -35,6 +35,15 @@ A good source of this information is to run `lshw -json` and search for classes 
 a platform can be used however, it's disks and NICs must be labeled so the provisioning process can use them. Labels are arbitrary,
 but common labels are "ROOT", "DATA1", "DATA2", "NIC1", "NIC2", etc.
 
+## Firmware Mode
+
+Platforms have an optional `firmware_mode` field (`"bios"` or `"uefi"`) that constrains which devices auto-match the platform:
+
+- If `firmware_mode` is set on a platform, only devices whose detected `boot_mode` matches will auto-match it.
+- If `firmware_mode` is `null`/absent, firmware mode is ignored during matching (backward compatible).
+
+This matters because BIOS+GPT requires a `bios_grub` partition, while UEFI+GPT requires an ESP partition.
+
 ## Auto Detection
 
 Platforms are autodetected by the rack-agent during discovery. The rack-agent will discover platform attributes with lshw and

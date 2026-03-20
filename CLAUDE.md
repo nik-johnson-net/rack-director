@@ -24,7 +24,7 @@ The iPXE config is dynamic and will be constructed based on what the machine sho
 Devices are any server under the control of rack-director. Devices belong to a Platform, and may belong to a Role if provisioned. Devices have a lifecycle state: New, Unprovisioned, Provisioned, Broken, and Decommissioned. Devices contain attributes collected via the device-scan action in addition to user-defined configuration like kernel cmdline overrides.
 
 ## Platforms
-Platforms group similar physical devices together, representing common hardware configurations (disks, NICs, CPUs, memory). They provide labels (ROOT, DATA1, NIC1) that Roles reference in disk layouts and templates. Devices are auto-assigned a Platform after hardware discovery based on matching hardware attributes.
+Platforms group similar physical devices together, representing common hardware configurations (disks, NICs, CPUs, memory). They provide labels (ROOT, DATA1, NIC1) that Roles reference in disk layouts and templates. Devices are auto-assigned a Platform after hardware discovery based on matching hardware attributes. Platforms may optionally declare a `firmware_mode` (bios/uefi) that constrains which devices match them.
 
 **Key Features:**
 - Auto-detection on hardware discovery (matches by disk count/types/sizes ±5%, NIC count/speeds, CPU config, memory ±1 GiB)
@@ -39,7 +39,7 @@ Platforms group similar physical devices together, representing common hardware 
 See @.claude/docs/platforms.md for detailed platform documentation.
 
 ## Roles
-Roles define how a Device should be configured. They define how the disks should be provisioned, and what operating system should be installed.
+Roles define how a Device should be configured. They define how the disks should be provisioned, and what operating system should be installed. Roles may optionally declare a `firmware_mode` (bios/uefi) that is validated against the device's detected `boot_mode` at role assignment time.
 
 ## Provisioning Workflow
 Devices move through lifecycle states via multi-stage provisioning. The modern provisioning workflow includes:
@@ -48,6 +48,14 @@ Devices move through lifecycle states via multi-stage provisioning. The modern p
 2. **install_os** - Install operating system via PXE boot
 
 See @.claude/docs/actions-reference.md for complete action documentation and workflow details.
+
+## Firmware Mode
+Devices are classified as `bios` or `uefi` based on whether `/sys/firmware/efi` exists at boot time (x86/x86_64 only). This is stored as `device.boot_mode` and flows through:
+- **Device**: `boot_mode` attribute detected during `device-scan` (x86 only; None for other architectures)
+- **Platform**: optional `firmware_mode` field — if set, only devices with a matching `boot_mode` will auto-match
+- **Role**: optional `firmware_mode` field — if set, validated against device `boot_mode` at role assignment time
+
+Install script templates can use `{{ device.boot_mode }}`, `{{ device.is_uefi }}`, `{{ device.is_bios }}`.
 
 ## Disk Layouts
 Disk partition layouts are defined at the Role level and applied during the `partition_disks` action. Supports:

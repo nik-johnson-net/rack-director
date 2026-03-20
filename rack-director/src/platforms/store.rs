@@ -54,17 +54,20 @@ pub async fn create(
     name: &str,
     description: Option<&str>,
     attributes: &PlatformAttributes,
+    firmware_mode: Option<common::FirmwareMode>,
 ) -> Result<Platform> {
     let now = Utc::now();
     let attributes_json = serde_json::to_string(attributes)?;
+    let firmware_mode_val = firmware_mode.map(|m| m.as_db_str());
 
     conn.execute(
-        "INSERT INTO platforms (name, description, attributes, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO platforms (name, description, attributes, firmware_mode, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         (
             name.to_string(),
             description.map(|s| s.to_string()),
             attributes_json,
+            firmware_mode_val,
             now,
             now,
         ),
@@ -79,6 +82,7 @@ pub async fn create(
         name: name.to_string(),
         description: description.map(|s| s.to_string()),
         attributes: attributes.clone(),
+        firmware_mode,
         created_at: Some(now),
         updated_at: Some(now),
     })
@@ -88,7 +92,7 @@ pub async fn create(
 pub async fn get(conn: &Connection, id: i64) -> Result<Platform> {
     let platform = conn
         .query_one(
-            "SELECT id, name, description, attributes, created_at, updated_at
+            "SELECT id, name, description, attributes, firmware_mode, created_at, updated_at
              FROM platforms WHERE id = ?1",
             (id,),
             Platform::from_row,
@@ -103,7 +107,7 @@ pub async fn get(conn: &Connection, id: i64) -> Result<Platform> {
 pub async fn list(conn: &Connection) -> Result<Vec<Platform>> {
     let platforms = conn
         .query(
-            "SELECT id, name, description, attributes, created_at, updated_at
+            "SELECT id, name, description, attributes, firmware_mode, created_at, updated_at
              FROM platforms ORDER BY name",
             (),
             Platform::from_row,
@@ -120,6 +124,7 @@ pub async fn update(
     name: Option<&str>,
     description: Option<&str>,
     attributes: Option<&PlatformAttributes>,
+    firmware_mode: Option<common::FirmwareMode>,
 ) -> Result<Platform> {
     let now = Utc::now();
 
@@ -138,6 +143,10 @@ pub async fn update(
         updates.push("attributes = ?");
         let json = serde_json::to_string(attributes)?;
         values.push(rusqlite::types::Value::Text(json));
+    }
+    if let Some(mode) = firmware_mode {
+        updates.push("firmware_mode = ?");
+        values.push(rusqlite::types::Value::Text(mode.as_db_str().to_string()));
     }
 
     if updates.is_empty() {
@@ -321,7 +330,7 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "PowerEdge R640", Some("Dell server"), &attrs)
+        let platform = create(&db, "PowerEdge R640", Some("Dell server"), &attrs, None)
             .await
             .unwrap();
 
@@ -343,8 +352,8 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        create(&db, "Platform 1", None, &attrs).await.unwrap();
-        create(&db, "Platform 2", None, &attrs).await.unwrap();
+        create(&db, "Platform 1", None, &attrs, None).await.unwrap();
+        create(&db, "Platform 2", None, &attrs, None).await.unwrap();
 
         let platforms = list(&db).await.unwrap();
         assert_eq!(platforms.len(), 2);
@@ -355,13 +364,16 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Original Name", None, &attrs).await.unwrap();
+        let platform = create(&db, "Original Name", None, &attrs, None)
+            .await
+            .unwrap();
 
         let updated = update(
             &db,
             platform.id.unwrap(),
             Some("Updated Name"),
             Some("New description"),
+            None,
             None,
         )
         .await
@@ -376,7 +388,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
 
         delete(&db, platform.id.unwrap()).await.unwrap();
         assert!(get(&db, platform.id.unwrap()).await.is_err());
@@ -388,7 +402,9 @@ mod tests {
 
         // Create platform
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
 
         // Create device and assign platform
         let device_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
@@ -417,7 +433,9 @@ mod tests {
 
         // Create platform
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
         let platform_id = platform.id.unwrap();
 
         // Create device (without assigning platform yet)
@@ -496,7 +514,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
         let id = platform.id.unwrap();
 
         let updated = update_disk_label(&db, id, 1, Some("CACHE")).await.unwrap();
@@ -517,7 +537,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
         let id = platform.id.unwrap();
 
         let updated = update_disk_label(&db, id, 0, None).await.unwrap();
@@ -532,7 +554,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
         let id = platform.id.unwrap();
 
         // Setting "ROOT" on index 0 again is a no-op and must not error
@@ -545,7 +569,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
         let id = platform.id.unwrap();
 
         // "ROOT" already belongs to disk 0; assigning it to disk 1 must fail
@@ -563,7 +589,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
         let id = platform.id.unwrap();
 
         let result = update_disk_label(&db, id, 99, Some("EXTRA")).await;
@@ -586,5 +614,86 @@ mod tests {
             msg.contains("Platform not found"),
             "Expected not-found error, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_platform_with_firmware_mode() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(
+            &db,
+            "UEFI Platform",
+            None,
+            &attrs,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(platform.firmware_mode, Some(common::FirmwareMode::Uefi));
+
+        let retrieved = get(&db, platform.id.unwrap()).await.unwrap();
+        assert_eq!(retrieved.firmware_mode, Some(common::FirmwareMode::Uefi));
+    }
+
+    #[tokio::test]
+    async fn test_create_platform_with_bios_firmware_mode() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(
+            &db,
+            "BIOS Platform",
+            None,
+            &attrs,
+            Some(common::FirmwareMode::Bios),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(platform.firmware_mode, Some(common::FirmwareMode::Bios));
+
+        let retrieved = get(&db, platform.id.unwrap()).await.unwrap();
+        assert_eq!(retrieved.firmware_mode, Some(common::FirmwareMode::Bios));
+    }
+
+    #[tokio::test]
+    async fn test_create_platform_without_firmware_mode() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(&db, "No Firmware Mode", None, &attrs, None)
+            .await
+            .unwrap();
+
+        assert!(platform.firmware_mode.is_none());
+
+        let retrieved = get(&db, platform.id.unwrap()).await.unwrap();
+        assert!(retrieved.firmware_mode.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_platform_firmware_mode() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(&db, "Platform", None, &attrs, None).await.unwrap();
+
+        let updated = update(
+            &db,
+            platform.id.unwrap(),
+            None,
+            None,
+            None,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.firmware_mode, Some(common::FirmwareMode::Uefi));
+
+        let retrieved = get(&db, platform.id.unwrap()).await.unwrap();
+        assert_eq!(retrieved.firmware_mode, Some(common::FirmwareMode::Uefi));
     }
 }

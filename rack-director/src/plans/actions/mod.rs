@@ -262,6 +262,7 @@ mod tests {
             os_id,
             &disk_layout,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -387,6 +388,7 @@ mod tests {
             Some("Database server role"),
             os_id,
             &disk_layout,
+            None,
             None,
         )
         .await
