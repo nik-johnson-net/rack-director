@@ -167,7 +167,7 @@ Example disk layout with labels:
       "flags": ["esp", "boot"]
     },
     {
-      "device": "DATA1",  // Will resolve to /dev/sda
+      "device": "DATA1",  // Will resolve to /dev/disk/by-path/... (stable path)
       "size": "rest",
       "filesystem": "xfs",
       "mount_point": "/data",

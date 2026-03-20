@@ -114,7 +114,7 @@ cmdline: rackdirector.url=http://<server>/cnc rackdirector.action=daemon
 {
   "disks": [
     {
-      "device": "/dev/sda",
+      "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
       "partition_table": "gpt",
       "partitions": [
         {
@@ -138,7 +138,7 @@ cmdline: rackdirector.url=http://<server>/cnc rackdirector.action=daemon
 
 **Disk Layout Fields:**
 - **disks** (required): Array of disk configurations
-  - **device**: Device path (`"/dev/sda"`) or platform label (`"ROOT"`)
+  - **device**: Device path (`"/dev/disk/by-path/pci-0000:00:1f.2-ata-1"`) or platform label (`"ROOT"`)
   - **partition_table**: `"gpt"` (default) or `"msdos"`
   - **partitions**: Array of partition configurations
     - **label**: GPT partition name

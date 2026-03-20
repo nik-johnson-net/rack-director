@@ -4,7 +4,7 @@ description = "LVM layout with ROOT label, single VG, and logical volumes"
 timeout_seconds = 1800
 
 [vm]
-memory_mb = 2048
+memory_mb = 4096
 disks = [{ size_gb = 20 }]
 
 [[rack_director.roles]]
@@ -21,10 +21,18 @@ size = "1MiB"
 flags = ["bios_grub"]
 
 [[rack_director.roles.disk_layout.disks.partitions]]
+label = "boot"
+size = "512MiB"
+filesystem = "xfs"
+flags = ["boot"]
+mount_point = "/boot"
+
+[[rack_director.roles.disk_layout.disks.partitions]]
 label = "efi"
 size = "512MiB"
 filesystem = "vfat"
 flags = ["esp", "boot"]
+mount_point = "/boot/efi"
 
 [[rack_director.roles.disk_layout.disks.partitions]]
 label = "lvm"
@@ -39,11 +47,13 @@ name = "vg0"
 name = "root"
 size = "10GiB"
 filesystem = "ext4"
+mount_point = "/"
 
 [[rack_director.roles.disk_layout.volume_groups.logical_volumes]]
 name = "data"
 size = "rest"
 filesystem = "xfs"
+mount_point = "/data"
 
 [[lifecycle.steps]]
 from = "unprovisioned"

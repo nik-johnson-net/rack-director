@@ -100,12 +100,41 @@ pub async fn render_for_device(
         hostname,
     };
 
-    // Render template with device context
-    let rendered =
-        templates::render_install_script(&template, &device_info, &role, &os, &network_info)
-            .map_err(|e| {
-                Error::ServerInternalError(anyhow::anyhow!("Template rendering failed: {}", e))
+    // Get resolved disk layout for template context.
+    // If the layout uses platform labels, resolve them to actual device paths
+    // using the device's assigned platform attributes.
+    let owned_layout;
+    let resolved_disk_layout: &common::disk_layout::DiskLayout =
+        if crate::disk_layout::layout_uses_labels(&role.disk_layout) {
+            let platform_id = device.platform_id.ok_or_else(|| {
+                Error::BadRequest(
+                    "Disk layout uses platform labels but device has no platform assigned"
+                        .to_string(),
+                )
             })?;
+            let platform = crate::platforms::store::get(conn, platform_id)
+                .await
+                .map_err(Error::ServerInternalError)?;
+            owned_layout =
+                crate::disk_layout::resolve_disk_layout(&role.disk_layout, &platform.attributes)
+                    .map_err(Error::ServerInternalError)?;
+            &owned_layout
+        } else {
+            &role.disk_layout
+        };
+
+    // Render template with device context
+    let rendered = templates::render_install_script(
+        &template,
+        &device_info,
+        &role,
+        &os,
+        &network_info,
+        resolved_disk_layout,
+    )
+    .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Template rendering failed: {}", e)))?;
+
+    log::debug!("Rendered install script for {}:\n{}", device_uuid, rendered);
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -137,6 +166,7 @@ async fn get_device_network_info_with_db(
             gateway: network.gateway,
             dns_servers,
             netmask: subnet.netmask().to_string(),
+            prefix_length: subnet.subnet(),
         })
     } else {
         Err(Error::NotFound("Device has no DHCP lease".to_string()))
@@ -276,6 +306,7 @@ mod tests {
         assert_eq!(network_info.ip_address, "10.0.0.100");
         assert_eq!(network_info.gateway, "10.0.0.1");
         assert_eq!(network_info.netmask, "255.255.255.0");
+        assert_eq!(network_info.prefix_length, 24);
     }
 
     #[tokio::test]

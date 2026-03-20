@@ -54,7 +54,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
   - h3: Subsection titles (text-base font-medium)
 - **Visual Weight**: Use size, font-weight, and color to create hierarchy
 - **Labels**: Always descriptive, never ambiguous
-- **Placeholders**: Provide examples (e.g., "e.g., /dev/sda1" not just "Device path")
+- **Placeholders**: Provide examples (e.g., "e.g., /dev/disk/by-path/pci-0000:00:1f.2-ata-1" not just "Device path")
 - **Empty States**: Use `EmptyState` component with:
   - Large icon (muted color)
   - Clear heading explaining the empty state
