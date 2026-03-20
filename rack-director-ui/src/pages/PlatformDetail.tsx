@@ -261,7 +261,6 @@ function PlatformDetail() {
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="border-b">
-                    <th className="text-left py-2 pr-4 font-medium text-xs text-muted-foreground">Path</th>
                     <th className="text-left py-2 pr-4 font-medium text-xs text-muted-foreground">Size</th>
                     <th className="text-left py-2 pr-4 font-medium text-xs text-muted-foreground">Type</th>
                     <th className="text-left py-2 font-medium text-xs text-muted-foreground">Label</th>
@@ -270,7 +269,6 @@ function PlatformDetail() {
                 <tbody>
                   {disks.map((disk, index) => (
                     <tr key={index} className="border-b last:border-0">
-                      <td className="py-2 pr-4 font-mono text-xs">{disk.path}</td>
                       <td className="py-2 pr-4 text-xs">{disk.size_gb} GB</td>
                       <td className="py-2 pr-4 text-xs uppercase">{disk.disk_type}</td>
                       <td className="py-2">

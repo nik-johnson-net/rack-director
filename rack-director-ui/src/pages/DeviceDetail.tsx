@@ -212,6 +212,10 @@ function DeviceDetail() {
     navigate('/devices');
   };
 
+  if (!uuid) {
+    return <div className="p-4">Invalid device URL</div>;
+  }
+
   if (loading) {
     return <div className="p-4">Loading device...</div>;
   }
@@ -246,7 +250,7 @@ function DeviceDetail() {
             hostname={device.attributes?.hostname || device.uuid}
             onHostnameChange={async () => {
               // Refresh device data to get the updated hostname
-              const updatedDevice = await getDevice(uuid!);
+              const updatedDevice = await getDevice(uuid);
               setDevice(updatedDevice);
             }}
             onError={(errorMsg) => setError(errorMsg)}
@@ -266,7 +270,7 @@ function DeviceDetail() {
 
       {/* Device Warnings */}
       <DeviceWarnings
-        uuid={uuid!}
+        uuid={uuid}
         onError={(errorMsg) => setError(errorMsg)}
       />
 
@@ -431,7 +435,7 @@ function DeviceDetail() {
         </Card>
 
         <PlatformAssignment
-          uuid={uuid!}
+          uuid={uuid}
           device={device}
           assignedPlatform={assignedPlatform}
           availablePlatforms={availablePlatforms}
@@ -453,7 +457,7 @@ function DeviceDetail() {
 
       {/* Disk Label Overrides */}
       <DiskLabelOverrides
-        uuid={uuid!}
+        uuid={uuid}
         device={device}
         onDeviceUpdate={(updatedDevice) => setDevice(updatedDevice)}
         onError={(errorMsg) => setError(errorMsg)}

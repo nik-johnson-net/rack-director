@@ -8,7 +8,6 @@ import { Trash2, Plus } from "lucide-react";
 import {
   putDeviceLabelOverride,
   deleteDeviceLabelOverride,
-  getDevice,
   type Device,
 } from "@/lib/client";
 
@@ -25,13 +24,26 @@ export function DiskLabelOverrides({
   onDeviceUpdate,
   onError,
 }: DiskLabelOverridesProps) {
-  const overrides = device.attributes?.disk_label_overrides ?? {};
+  const [overrides, setOverrides] = useState<Record<string, string>>(
+    device.attributes?.disk_label_overrides ?? {}
+  );
   const overrideEntries = Object.entries(overrides);
 
   const [newLabel, setNewLabel] = useState("");
   const [newPath, setNewPath] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [removing, setRemoving] = useState<Set<string>>(new Set());
+
+  const applyOverrides = (updated: Record<string, string>) => {
+    setOverrides(updated);
+    onDeviceUpdate({
+      ...device,
+      attributes: {
+        ...device.attributes,
+        disk_label_overrides: updated,
+      },
+    });
+  };
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,8 +55,7 @@ export function DiskLabelOverrides({
     onError("");
     try {
       await putDeviceLabelOverride(uuid, { label, path });
-      const updated = await getDevice(uuid);
-      onDeviceUpdate(updated);
+      applyOverrides({ ...overrides, [label]: path });
       setNewLabel("");
       setNewPath("");
     } catch (err) {
@@ -59,8 +70,9 @@ export function DiskLabelOverrides({
     onError("");
     try {
       await deleteDeviceLabelOverride(uuid, label);
-      const updated = await getDevice(uuid);
-      onDeviceUpdate(updated);
+      const updated = { ...overrides };
+      delete updated[label];
+      applyOverrides(updated);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to remove label override");
     } finally {
