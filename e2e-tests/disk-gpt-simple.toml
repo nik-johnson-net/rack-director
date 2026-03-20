@@ -21,15 +21,24 @@ size = "1MiB"
 flags = ["bios_grub"]
 
 [[rack_director.roles.disk_layout.disks.partitions]]
+label = "boot"
+size = "512MiB"
+filesystem = "xfs"
+flags = ["boot"]
+mount_point = "/boot"
+
+[[rack_director.roles.disk_layout.disks.partitions]]
 label = "efi"
 size = "512MiB"
 filesystem = "vfat"
 flags = ["esp", "boot"]
+mount_point = "/boot/efi"
 
 [[rack_director.roles.disk_layout.disks.partitions]]
 label = "root"
 size = "rest"
 filesystem = "ext4"
+mount_point = "/"
 
 [[lifecycle.steps]]
 from = "unprovisioned"

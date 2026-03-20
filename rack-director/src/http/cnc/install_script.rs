@@ -134,6 +134,8 @@ pub async fn render_for_device(
     )
     .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Template rendering failed: {}", e)))?;
 
+    log::debug!("Rendered install script for {}:\n{}", device_uuid, rendered);
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/plain")
