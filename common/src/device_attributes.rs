@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
@@ -83,6 +84,19 @@ pub struct DeviceAttributes {
     /// Disk drives detected on the device
     #[serde(default)]
     pub disks: Vec<DiskInfo>,
+
+    /// Operator-specified overrides mapping platform labels to specific disk by-path values.
+    ///
+    /// When a platform label (e.g. "ROOT") resolves to the wrong disk due to unusual slot
+    /// assignments, an operator can pin the label to a specific `/dev/disk/by-path/…` path.
+    /// The agent and provisioning code use this map in preference to the canonical
+    /// position-based resolution when a matching entry is present.
+    ///
+    /// Stale entries (where the referenced by-path no longer appears in `disks`) are
+    /// automatically removed by the director during hardware-scan updates and a
+    /// `DeviceWarning` with code `LABEL_OVERRIDE_DROPPED` is created.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub disk_label_overrides: HashMap<String, String>,
 
     /// CPUs detected on the device
     #[serde(default)]

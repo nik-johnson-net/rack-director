@@ -142,6 +142,27 @@ impl<'a> Director<'a> {
         Ok(())
     }
 
+    /// Overwrite the stored attributes for a device with a fully-constructed
+    /// `DeviceAttributes` value.
+    ///
+    /// Unlike [`update_attributes`], this does **not** trigger platform
+    /// auto-detection or stale-override cleanup.  It is intended for API
+    /// handlers that have already computed the final attribute state and just
+    /// need to persist it.
+    pub async fn update_attributes_raw(
+        &self,
+        uuid: &Uuid,
+        attrs: &common::device_attributes::DeviceAttributes,
+    ) -> anyhow::Result<()> {
+        self.conn
+            .execute(
+                "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
+                (serde_json::to_string(attrs)?, *uuid),
+            )
+            .await?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub async fn create_plan(&self, plan: &Plan) -> anyhow::Result<i64> {
         crate::plans::store::create_plan(self.conn, plan).await

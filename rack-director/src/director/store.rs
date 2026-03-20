@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::database::{Connection, FromRow};
+use crate::device_warnings;
 use crate::lifecycle::DeviceLifecycle;
 use crate::operating_systems::Architecture;
 use common::device_attributes::{DeviceAttributes, NetworkInterface};
@@ -131,6 +132,10 @@ pub async fn update_attributes(
     uuid: &Uuid,
     attributes: serde_json::Map<String, serde_json::Value>,
 ) -> Result<()> {
+    // Detect hardware scan updates before consuming the attributes map.
+    // A disk scan is identified by the presence of the `disks` key.
+    let is_disk_scan = attributes.contains_key("disks");
+
     let device = get_device(conn, uuid).await?;
 
     let mut existing_json = serde_json::to_value(&device.attributes)?;
@@ -140,7 +145,20 @@ pub async fn update_attributes(
         existing_map.insert(key, value);
     }
 
-    let merged: DeviceAttributes = serde_json::from_value(existing_json)?;
+    let mut merged: DeviceAttributes = serde_json::from_value(existing_json)?;
+
+    // When the incoming update contains a `disks` list (i.e. a hardware scan), validate
+    // that every disk label override still references a path present on the device.
+    // Stale overrides are removed and a DeviceWarning is created for each one.
+    if is_disk_scan {
+        let stale = collect_stale_overrides(&merged);
+        if !stale.is_empty() {
+            let device_id = device_warnings::get_device_id_by_uuid(conn, uuid).await?;
+            if let Some(device_id) = device_id {
+                drop_stale_overrides(conn, &mut merged, &stale, device_id).await?;
+            }
+        }
+    }
 
     conn.execute(
         "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
@@ -148,6 +166,44 @@ pub async fn update_attributes(
     )
     .await?;
 
+    Ok(())
+}
+
+/// Identify labels whose override path is no longer present in the disk list.
+///
+/// Returns a `Vec` of `(label, path)` pairs that should be dropped.
+fn collect_stale_overrides(attrs: &DeviceAttributes) -> Vec<(String, String)> {
+    let current_paths: std::collections::HashSet<&str> = attrs
+        .disks
+        .iter()
+        .filter_map(|d| d.path.as_deref())
+        .collect();
+
+    attrs
+        .disk_label_overrides
+        .iter()
+        .filter(|(_, path)| !current_paths.contains(path.as_str()))
+        .map(|(label, path)| (label.clone(), path.clone()))
+        .collect()
+}
+
+/// Remove stale label overrides from `attrs` and create a `DeviceWarning` for each one.
+async fn drop_stale_overrides(
+    conn: &Connection,
+    attrs: &mut DeviceAttributes,
+    stale: &[(String, String)],
+    device_id: i64,
+) -> Result<()> {
+    for (label, path) in stale {
+        attrs.disk_label_overrides.remove(label);
+        let message = format!(
+            "Label override '{}' references missing disk path '{}', override removed",
+            label, path
+        );
+        device_warnings::create_warning(conn, device_id, "LABEL_OVERRIDE_DROPPED", &message)
+            .await?;
+        log::warn!("device id={}: {}", device_id, message);
+    }
     Ok(())
 }
 
@@ -1870,5 +1926,168 @@ mod tests {
             "Deleting a Device must delete pending records. {:?}",
             exists
         );
+    }
+
+    /// Override is preserved when the referenced disk path still exists in the new scan.
+    #[tokio::test]
+    async fn test_update_attributes_preserves_valid_override() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x57);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set an existing override pointing to a path we will include in the scan
+        let path = "/dev/disk/by-path/pci-0000:00:1f.2-ata-1";
+        let mut initial_attrs = serde_json::Map::new();
+        let mut overrides = serde_json::Map::new();
+        overrides.insert("ROOT".to_string(), serde_json::Value::String(path.to_string()));
+        initial_attrs.insert(
+            "disk_label_overrides".to_string(),
+            serde_json::Value::Object(overrides),
+        );
+        update_attributes(&db, &uuid, initial_attrs).await.unwrap();
+
+        // Submit a hardware scan that includes the same path
+        let disks = serde_json::json!([{
+            "name": "sda",
+            "path": path,
+            "size": 480,
+            "disk_type": "ssd"
+        }]);
+        let mut scan_attrs = serde_json::Map::new();
+        scan_attrs.insert("disks".to_string(), disks);
+        update_attributes(&db, &uuid, scan_attrs).await.unwrap();
+
+        let device = get_device(&db, &uuid).await.unwrap();
+        assert_eq!(
+            device.attributes.disk_label_overrides.get("ROOT").map(|s| s.as_str()),
+            Some(path),
+            "override for ROOT should be preserved when path still present"
+        );
+
+        // No warning should have been created
+        let device_id: i64 = db
+            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| r.get(0))
+            .await
+            .unwrap();
+        let warning_count: i64 = db
+            .query_one(
+                "SELECT COUNT(*) FROM device_warnings WHERE device_id = ?1",
+                (device_id,),
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(warning_count, 0, "no warnings should exist for valid override");
+    }
+
+    /// Override is dropped and a warning is created when the referenced path disappears.
+    #[tokio::test]
+    async fn test_update_attributes_drops_stale_override_and_creates_warning() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x58);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Set an override pointing to a path that will NOT appear in the new scan
+        let stale_path = "/dev/disk/by-path/pci-0000:00:1f.2-ata-old";
+        let mut initial_attrs = serde_json::Map::new();
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(
+            "ROOT".to_string(),
+            serde_json::Value::String(stale_path.to_string()),
+        );
+        initial_attrs.insert(
+            "disk_label_overrides".to_string(),
+            serde_json::Value::Object(overrides),
+        );
+        update_attributes(&db, &uuid, initial_attrs).await.unwrap();
+
+        // Submit a hardware scan with a *different* path
+        let new_path = "/dev/disk/by-path/pci-0000:00:1f.2-ata-new";
+        let disks = serde_json::json!([{
+            "name": "sda",
+            "path": new_path,
+            "size": 480,
+            "disk_type": "ssd"
+        }]);
+        let mut scan_attrs = serde_json::Map::new();
+        scan_attrs.insert("disks".to_string(), disks);
+        update_attributes(&db, &uuid, scan_attrs).await.unwrap();
+
+        let device = get_device(&db, &uuid).await.unwrap();
+        assert!(
+            device.attributes.disk_label_overrides.get("ROOT").is_none(),
+            "stale override for ROOT should have been removed"
+        );
+
+        // A LABEL_OVERRIDE_DROPPED warning must have been created
+        let device_id: i64 = db
+            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| r.get(0))
+            .await
+            .unwrap();
+        let warnings = crate::device_warnings::list_warnings(&db, device_id)
+            .await
+            .unwrap();
+        assert_eq!(warnings.len(), 1, "exactly one warning should exist");
+        assert_eq!(warnings[0].code, "LABEL_OVERRIDE_DROPPED");
+        assert!(
+            warnings[0].message.contains("ROOT"),
+            "warning message should mention the label"
+        );
+        assert!(
+            warnings[0].message.contains(stale_path),
+            "warning message should mention the stale path"
+        );
+    }
+
+    /// Confirms that `collect_stale_overrides` correctly identifies stale entries.
+    #[test]
+    fn test_collect_stale_overrides_detects_missing_paths() {
+        use common::device_attributes::DiskInfo;
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "ROOT".to_string(),
+            "/dev/disk/by-path/good-path".to_string(),
+        );
+        overrides.insert(
+            "DATA1".to_string(),
+            "/dev/disk/by-path/gone-path".to_string(),
+        );
+
+        let attrs = DeviceAttributes {
+            disks: vec![DiskInfo {
+                name: "sda".to_string(),
+                path: Some("/dev/disk/by-path/good-path".to_string()),
+                size: Some(480),
+                disk_type: None,
+                model: None,
+                serial: None,
+                vendor: None,
+                uuid: None,
+            }],
+            disk_label_overrides: overrides,
+            ..Default::default()
+        };
+
+        let stale = collect_stale_overrides(&attrs);
+        assert_eq!(stale.len(), 1, "only DATA1 should be stale");
+        assert_eq!(stale[0].0, "DATA1");
+        assert_eq!(stale[0].1, "/dev/disk/by-path/gone-path");
+    }
+
+    /// Confirms that `collect_stale_overrides` returns an empty list when no overrides exist.
+    #[test]
+    fn test_collect_stale_overrides_empty_when_no_overrides() {
+        let attrs = DeviceAttributes {
+            disks: vec![],
+            ..Default::default()
+        };
+        assert!(collect_stale_overrides(&attrs).is_empty());
     }
 }

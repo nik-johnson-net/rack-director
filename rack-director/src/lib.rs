@@ -1,5 +1,6 @@
 mod boot_files;
 mod database;
+mod device_warnings;
 mod dhcp;
 mod director;
 mod disk_layout;
