@@ -1942,7 +1942,10 @@ mod tests {
         let path = "/dev/disk/by-path/pci-0000:00:1f.2-ata-1";
         let mut initial_attrs = serde_json::Map::new();
         let mut overrides = serde_json::Map::new();
-        overrides.insert("ROOT".to_string(), serde_json::Value::String(path.to_string()));
+        overrides.insert(
+            "ROOT".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
         initial_attrs.insert(
             "disk_label_overrides".to_string(),
             serde_json::Value::Object(overrides),
@@ -1962,14 +1965,20 @@ mod tests {
 
         let device = get_device(&db, &uuid).await.unwrap();
         assert_eq!(
-            device.attributes.disk_label_overrides.get("ROOT").map(|s| s.as_str()),
+            device
+                .attributes
+                .disk_label_overrides
+                .get("ROOT")
+                .map(|s| s.as_str()),
             Some(path),
             "override for ROOT should be preserved when path still present"
         );
 
         // No warning should have been created
         let device_id: i64 = db
-            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| r.get(0))
+            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| {
+                r.get(0)
+            })
             .await
             .unwrap();
         let warning_count: i64 = db
@@ -1980,7 +1989,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(warning_count, 0, "no warnings should exist for valid override");
+        assert_eq!(
+            warning_count, 0,
+            "no warnings should exist for valid override"
+        );
     }
 
     /// Override is dropped and a warning is created when the referenced path disappears.
@@ -2027,7 +2039,9 @@ mod tests {
 
         // A LABEL_OVERRIDE_DROPPED warning must have been created
         let device_id: i64 = db
-            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| r.get(0))
+            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| {
+                r.get(0)
+            })
             .await
             .unwrap();
         let warnings = crate::device_warnings::list_warnings(&db, device_id)

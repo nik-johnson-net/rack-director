@@ -340,6 +340,9 @@ mod tests {
             }
             Err(Error::ValidationError(_)) => panic!("Expected NotFound but got ValidationError"),
             Err(Error::BadRequest(_)) => panic!("Expected NotFound but got BadRequest"),
+            Err(Error::UnprocessableEntity(_)) => {
+                panic!("Expected NotFound but got UnprocessableEntity")
+            }
         }
     }
 }

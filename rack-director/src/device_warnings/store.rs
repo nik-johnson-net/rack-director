@@ -132,11 +132,9 @@ mod tests {
         .await
         .unwrap();
         let device_id: i64 = conn
-            .query_one(
-                "SELECT id FROM devices WHERE uuid = ?1",
-                (uuid,),
-                |r| r.get(0),
-            )
+            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| {
+                r.get(0)
+            })
             .await
             .unwrap();
         (conn, device_id)
@@ -223,11 +221,9 @@ mod tests {
         .await
         .unwrap();
         let device_id_2: i64 = conn
-            .query_one(
-                "SELECT id FROM devices WHERE uuid = ?1",
-                (uuid2,),
-                |r| r.get(0),
-            )
+            .query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid2,), |r| {
+                r.get(0)
+            })
             .await
             .unwrap();
 

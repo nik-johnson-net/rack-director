@@ -112,6 +112,75 @@ pub async fn update(
     get(conn, id).await
 }
 
+/// Update the label on a single disk by zero-based index.
+///
+/// Loads the current platform attributes, validates that the requested label
+/// does not already exist on a *different* disk (setting the same label on the
+/// same disk is a no-op and is permitted), persists the change, and returns
+/// the updated platform.
+///
+/// # Errors
+///
+/// * Returns `"Platform not found"` if `id` does not match any platform.
+/// * Returns `"Disk index out of bounds"` if `index >= disks.len()`.
+/// * Returns `"Label already exists on another disk"` if `label` is already
+///   assigned to a different disk within this platform.
+pub async fn update_disk_label(
+    conn: &Connection,
+    id: i64,
+    index: usize,
+    label: Option<&str>,
+) -> Result<Platform> {
+    let platform = get(conn, id).await.context("Platform not found")?;
+
+    let mut attributes = platform.attributes.clone();
+
+    if index >= attributes.disks.len() {
+        return Err(anyhow!("Disk index out of bounds"));
+    }
+
+    validate_label_uniqueness(&attributes, index, label)?;
+
+    attributes.disks[index].label = label.map(|s| s.to_string());
+
+    let now = Utc::now();
+    let attributes_json = serde_json::to_string(&attributes)?;
+
+    conn.execute(
+        "UPDATE platforms SET attributes = ?1, updated_at = ?2 WHERE id = ?3",
+        (attributes_json, now, id),
+    )
+    .await
+    .context("Failed to update disk label")?;
+
+    get(conn, id).await
+}
+
+/// Check that `label` is not already assigned to a disk at a different index.
+///
+/// A `None` label (clearing) is always valid. Setting the same label on the
+/// same index is also valid (idempotent update).
+fn validate_label_uniqueness(
+    attributes: &PlatformAttributes,
+    target_index: usize,
+    label: Option<&str>,
+) -> Result<()> {
+    let Some(new_label) = label else {
+        return Ok(());
+    };
+
+    for (i, disk) in attributes.disks.iter().enumerate() {
+        if i == target_index {
+            continue;
+        }
+        if disk.label.as_deref() == Some(new_label) {
+            return Err(anyhow!("Label already exists on another disk"));
+        }
+    }
+
+    Ok(())
+}
+
 /// Delete a platform.
 ///
 /// Returns an error if devices are assigned to this platform.
@@ -372,5 +441,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_update_disk_label_renames_label() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let id = platform.id.unwrap();
+
+        let updated = update_disk_label(&db, id, 1, Some("CACHE")).await.unwrap();
+        assert_eq!(updated.attributes.disks[1].label, Some("CACHE".to_string()));
+        // Other disks must be unchanged
+        assert_eq!(updated.attributes.disks[0].label, Some("ROOT".to_string()));
+
+        // Persisted to DB
+        let reloaded = get(&db, id).await.unwrap();
+        assert_eq!(
+            reloaded.attributes.disks[1].label,
+            Some("CACHE".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_disk_label_clears_label() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let id = platform.id.unwrap();
+
+        let updated = update_disk_label(&db, id, 0, None).await.unwrap();
+        assert_eq!(updated.attributes.disks[0].label, None);
+
+        let reloaded = get(&db, id).await.unwrap();
+        assert_eq!(reloaded.attributes.disks[0].label, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_disk_label_same_label_on_same_disk_is_allowed() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let id = platform.id.unwrap();
+
+        // Setting "ROOT" on index 0 again is a no-op and must not error
+        let updated = update_disk_label(&db, id, 0, Some("ROOT")).await.unwrap();
+        assert_eq!(updated.attributes.disks[0].label, Some("ROOT".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_disk_label_duplicate_on_other_disk_is_rejected() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let id = platform.id.unwrap();
+
+        // "ROOT" already belongs to disk 0; assigning it to disk 1 must fail
+        let result = update_disk_label(&db, id, 1, Some("ROOT")).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Label already exists"),
+            "Expected duplicate-label error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_disk_label_index_out_of_bounds() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(&db, "Test Platform", None, &attrs).await.unwrap();
+        let id = platform.id.unwrap();
+
+        let result = update_disk_label(&db, id, 99, Some("EXTRA")).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("out of bounds"),
+            "Expected out-of-bounds error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_disk_label_platform_not_found() {
+        let db = setup_db(test_database_path!()).await;
+
+        let result = update_disk_label(&db, 9999, 0, Some("ROOT")).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Platform not found"),
+            "Expected not-found error, got: {msg}"
+        );
     }
 }
