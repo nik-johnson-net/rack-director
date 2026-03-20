@@ -1,0 +1,179 @@
+# CNC Reference
+
+This document describes the CNC endpoints available.
+
+## Install Script Template Variables
+
+Install scripts are Handlebars templates served to the OS installer via `GET /cnc/install_script?uuid={uuid}`. The following variables are available:
+
+### Device Information
+
+| Variable | Description |
+|---|---|
+| `{{ device.uuid }}` | Device UUID |
+| `{{ device.hostname }}` | Device hostname |
+| `{{ device.mac_address }}` | Primary MAC address |
+| `{{ device.ip_address }}` | IP address from DHCP lease |
+| `{{ device.gateway }}` | Network gateway |
+| `{{ device.dns_servers }}` | Space-separated DNS servers |
+| `{{ device.netmask }}` | Network netmask |
+| `{{ device.prefix_length }}` | Network prefix length (e.g. `24` for a /24 subnet) |
+
+### Role & OS
+
+| Variable | Description |
+|---|---|
+| `{{ role.name }}` | Role name |
+| `{{ role.disk_layout }}` | Disk layout as raw JSON (unresolved) |
+| `{{ os.name }}` | OS name |
+| `{{ os.version }}` | OS version |
+| `{{ config.* }}` | Any key from `role.config_template` JSON |
+
+### Disk Layout (resolved, post-partitioning)
+
+These variables are populated from the device's resolved disk layout — platform labels (e.g. `ROOT`, `DATA1`) are already resolved to actual device paths. They reflect the partitions created by the `partition_disks` action.
+
+#### `{{ partitions }}` — list of all partitions
+
+Iterate with `{{#each partitions}}`. Each item has:
+
+| Field | Description |
+|---|---|
+| `{{ this.disk }}` | Disk device path (e.g. `/dev/disk/by-path/pci-0000:00:03.0-nvme-1`) |
+| `{{ this.device }}` | Partition device path including `/dev/` prefix |
+| `{{ this.device_name }}` | Partition path without `/dev/` prefix — use for Kickstart `--onpart=` |
+| `{{ this.label }}` | GPT partition label (e.g. `"efi"`, `"root"`) |
+| `{{ this.size }}` | Partition size string (e.g. `"512MiB"`, `"rest"`) |
+| `{{ this.filesystem }}` | Filesystem type, `null` for LVM/ZFS partitions |
+| `{{ this.mount_point }}` | Mount point, `null` if not directly mounted |
+| `{{ this.flags }}` | Array of partition flags (e.g. `["esp"]`, `["lvm"]`) |
+| `{{ this.volume_group }}` | LVM VG name for PV partitions, `null` for regular partitions |
+
+#### `{{ logical_volumes }}` — list of LVM logical volumes
+
+Iterate with `{{#each logical_volumes}}`. Each item has:
+
+| Field | Description |
+|---|---|
+| `{{ this.device }}` | LV device path (e.g. `/dev/vg0/root`) |
+| `{{ this.device_name }}` | LV path without `/dev/` prefix (e.g. `vg0/root`) |
+| `{{ this.vg_name }}` | Volume group name |
+| `{{ this.lv_name }}` | Logical volume name |
+| `{{ this.size }}` | LV size string |
+| `{{ this.filesystem }}` | Filesystem type |
+| `{{ this.mount_point }}` | Mount point, `null` if not mounted |
+
+### Example: Kickstart (RHEL/Anaconda)
+
+```kickstart
+# Network
+network --bootproto=static --ip={{ device.ip_address }} --netmask={{ device.netmask }} --gateway={{ device.gateway }} --nameserver={{ device.dns_servers }} --hostname={{ device.hostname }}
+
+# Partitions (pre-existing, created by partition_disks action)
+{{#each partitions}}{{#if this.mount_point}}{{#unless this.volume_group}}
+part {{this.mount_point}} --fstype="{{this.filesystem}}" --onpart={{this.device_name}}
+{{/unless}}{{/if}}{{/each}}
+
+# LVM logical volumes
+{{#each logical_volumes}}{{#if this.mount_point}}
+logvol {{this.mount_point}} --vgname={{this.vg_name}} --name={{this.lv_name}} --fstype={{this.filesystem}}
+{{/if}}{{/each}}
+
+# Packages from role config
+%packages
+{{#each config.packages}}
+{{this}}
+{{/each}}
+%end
+```
+
+### Example: Ubuntu Autoinstall (cloud-init)
+
+```yaml
+autoinstall:
+  version: 1
+  identity:
+    hostname: {{ device.hostname }}
+  network:
+    network:
+      version: 2
+      ethernets:
+        primary:
+          match:
+            macaddress: "{{ device.mac_address }}"
+          addresses: ["{{ device.ip_address }}/24"]
+          gateway4: {{ device.gateway }}
+          nameservers:
+            addresses: [{{ device.dns_servers }}]
+  storage:
+    layout:
+      name: direct
+```
+
+### Example: Debian Preseed
+
+```
+d-i netcfg/get_hostname string {{ device.hostname }}
+d-i netcfg/get_ipaddress string {{ device.ip_address }}
+d-i netcfg/get_netmask string {{ device.netmask }}
+d-i netcfg/get_gateway string {{ device.gateway }}
+d-i netcfg/get_nameservers string {{ device.dns_servers }}
+```
+
+---
+
+## Disk Layout Configuration
+
+Disk layouts are configured at the role level and applied by the `partition_disks` action.
+
+Supported partition flags: `esp`, `boot`, `lvm`, `bios_grub`.
+
+- `esp` — EFI System Partition (UEFI boot)
+- `boot` — marks the boot partition
+- `lvm` — marks a Physical Volume for LVM
+- `bios_grub` — GRUB BIOS boot partition on GPT disks (BIOS/legacy boot only, no filesystem needed)
+
+```toml
+# Simple GPT layout for UEFI with EFI and root partition
+[disk_layout]
+disks = [
+  { device = "ROOT", partition_table = "gpt", partitions = [
+    { label = "efi", size = "600MiB", filesystem = "vfat", mount_point = "/boot/efi", flags = ["esp"] },
+    { label = "boot", size = "1GiB", filesystem = "ext4", mount_point = "/boot" },
+    { label = "root", size = "rest", filesystem = "xfs", mount_point = "/" }
+  ]}
+]
+```
+
+```toml
+# Simple GPT layout for BIOS/legacy boot
+[disk_layout]
+disks = [
+  { device = "ROOT", partition_table = "gpt", partitions = [
+    { label = "biosboot", size = "2MiB", flags = ["bios_grub"] },
+    { label = "boot", size = "1GiB", filesystem = "ext4", mount_point = "/boot", flags = ["boot"] },
+    { label = "root", size = "rest", filesystem = "xfs", mount_point = "/" }
+  ]}
+]
+```
+
+```toml
+# LVM layout
+[disk_layout]
+disks = [
+  { device = "ROOT", partition_table = "gpt", partitions = [
+    { label = "boot", size = "1GiB", filesystem = "ext4", mount_point = "/boot", flags = ["boot"] },
+    { label = "lvm", size = "rest", volume_group = "vg0", flags = ["lvm"] }
+  ]}
+]
+
+[[disk_layout.volume_groups]]
+name = "vg0"
+logical_volumes = [
+  { name = "root", size = "50G", filesystem = "ext4", mount_point = "/" },
+  { name = "swap", size = "8G", filesystem = "swap" },
+  { name = "home", size = "100%FREE", filesystem = "ext4", mount_point = "/home" }
+]
+```
+
+Platform labels (`ROOT`, `DATA1`, `DATA2`, etc.) are resolved to actual device paths using the device's assigned platform before being sent to the agent.
