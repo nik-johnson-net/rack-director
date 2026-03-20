@@ -90,7 +90,7 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=device-scan
 - Memory information (size, speed, manufacturer, part number)
 - Network interfaces (MAC addresses, IP addresses, link speed)
 - BMC information (MAC address, IP, IP source)
-- Disk information (name, size, type, model, serial, path)
+- Disk information (name, size, type, model, path, serial, vendor, uuid/WWN)
 
 **Output:** Uploads device attributes to `/cnc/update_attributes`
 
@@ -116,11 +116,29 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=device-scan
       "size": "1TB",
       "disk_type": "ssd",
       "model": "Samsung 970 EVO",
-      "path": "/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_1TB_..."
+      "path": "/dev/disk/by-path/pci-0000:00:1f.2-nvme-1",
+      "serial": "S1234ABCD",
+      "vendor": "Samsung",
+      "uuid": "eui.002538b311b2399a"
     }
   ]
 }
 ```
+
+**Disk scan fields:**
+
+| Field | Source |
+|-------|--------|
+| `name` | `/sys/block/` enumeration |
+| `size` | `lsblk` |
+| `disk_type` | `lsblk` rotational flag |
+| `model` | `lsblk` |
+| `path` | `/dev/disk/by-path/` symlink |
+| `serial` | `/sys/block/{name}/device/serial` (trimmed) |
+| `vendor` | `/sys/block/{name}/device/vendor` (trimmed) |
+| `uuid` | `/dev/disk/by-id/wwn-*` symlink or udevadm `ID_WWN` |
+
+All disk fields except `name` are `Option` — absent for virtual or unusual devices.
 
 **Implementation:** `rack-agent/src/scan.rs::device_scan()`
 

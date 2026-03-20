@@ -176,4 +176,18 @@ logical_volumes = [
 ]
 ```
 
-Platform labels (`ROOT`, `DATA1`, `DATA2`, etc.) are resolved to actual device paths using the device's assigned platform before being sent to the agent.
+### Disk Label Resolution
+
+Platform labels (`ROOT`, `DATA1`, `DATA2`, etc.) are resolved to actual device paths using a two-level override system before being sent to the agent:
+
+1. **Device override wins:** If the device has an entry in `disk_label_overrides` for that label (e.g., `{"ROOT": "/dev/disk/by-path/pci-0000:04:00.0-nvme-1"}`), that path is used directly.
+
+2. **Canonical position matching (fallback):** Platform disks and device disks are each sorted by `(disk_type priority, size_gb)`. The index of the platform disk whose label matches is used to pick the corresponding device disk by position. This is robust across devices with different PCIe bus topologies.
+
+3. **Error** if the label is not found in the platform's disk list.
+
+Note: `PlatformDisk` does **not** have a `path` field. The path used for provisioning always comes from the device's own disk scan (`DiskInfo.path`).
+
+#### `LABEL_OVERRIDE_DROPPED` Warning
+
+When the agent submits a hardware re-scan, existing device label overrides are validated against the incoming disk list. If a by-path stored in an override no longer appears in the new `disks` list (e.g., the disk was replaced or moved), the override is dropped and a `DeviceWarning` is created with code `LABEL_OVERRIDE_DROPPED`. The warning surfaces on the device detail page in the UI.
