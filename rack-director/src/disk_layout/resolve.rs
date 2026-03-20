@@ -64,11 +64,11 @@ fn sort_device_disks_canonical(disks: &mut [DiskInfo]) {
 /// Returns `ResolveError::LabelNotFound` if the label does not appear in the platform,
 /// or `ResolveError::DiskPathMissing` if the device has fewer disks than needed or the
 /// disk at the matching position carries no path.
-fn resolve_label<'a>(
+fn resolve_label(
     label: &str,
     overrides: &std::collections::HashMap<String, String>,
     sorted_platform_disks: &[crate::platforms::PlatformDisk],
-    sorted_device_disks: &'a [DiskInfo],
+    sorted_device_disks: &[DiskInfo],
 ) -> std::result::Result<String, ResolveError> {
     // Device-level override wins unconditionally.
     if let Some(path) = overrides.get(label) {
@@ -122,9 +122,13 @@ pub fn resolve_disk_layout(
 
     for disk in &mut resolved.disks {
         if !disk.device.starts_with('/') {
-            disk.device =
-                resolve_label(&disk.device, overrides, &sorted_platform_disks, &sorted_device_disks)
-                    .map_err(|e| anyhow!("{}", e))?;
+            disk.device = resolve_label(
+                &disk.device,
+                overrides,
+                &sorted_platform_disks,
+                &sorted_device_disks,
+            )
+            .map_err(|e| anyhow!("{}", e))?;
         }
     }
 
@@ -132,9 +136,13 @@ pub fn resolve_disk_layout(
         for pool in pools {
             for device_ref in &mut pool.devices {
                 if !device_ref.starts_with('/') {
-                    *device_ref =
-                        resolve_label(device_ref, overrides, &sorted_platform_disks, &sorted_device_disks)
-                            .map_err(|e| anyhow!("{}", e))?;
+                    *device_ref = resolve_label(
+                        device_ref,
+                        overrides,
+                        &sorted_platform_disks,
+                        &sorted_device_disks,
+                    )
+                    .map_err(|e| anyhow!("{}", e))?;
                 }
             }
         }

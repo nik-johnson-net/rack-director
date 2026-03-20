@@ -4,6 +4,50 @@ use chrono::Utc;
 
 use crate::database::{Connection, FromRow};
 
+/// Typed error returned by [`update_disk_label`].
+///
+/// Using a typed error allows callers to branch on error kind without fragile
+/// string matching on the error message.
+#[derive(Debug)]
+pub enum UpdateDiskLabelError {
+    /// No platform with the given ID exists.
+    PlatformNotFound,
+    /// The supplied disk index is out of bounds for this platform's disk list.
+    IndexOutOfBounds,
+    /// The requested label is already assigned to a different disk in this platform.
+    DuplicateLabel,
+    /// An unexpected database or serialization error occurred.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for UpdateDiskLabelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateDiskLabelError::PlatformNotFound => write!(f, "Platform not found"),
+            UpdateDiskLabelError::IndexOutOfBounds => write!(f, "Disk index out of bounds"),
+            UpdateDiskLabelError::DuplicateLabel => {
+                write!(f, "Label already exists on another disk")
+            }
+            UpdateDiskLabelError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for UpdateDiskLabelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            UpdateDiskLabelError::Other(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl From<anyhow::Error> for UpdateDiskLabelError {
+    fn from(e: anyhow::Error) -> Self {
+        UpdateDiskLabelError::Other(e)
+    }
+}
+
 /// Create a new platform.
 pub async fn create(
     conn: &Connection,
@@ -121,30 +165,34 @@ pub async fn update(
 ///
 /// # Errors
 ///
-/// * Returns `"Platform not found"` if `id` does not match any platform.
-/// * Returns `"Disk index out of bounds"` if `index >= disks.len()`.
-/// * Returns `"Label already exists on another disk"` if `label` is already
-///   assigned to a different disk within this platform.
+/// * Returns [`UpdateDiskLabelError::PlatformNotFound`] if `id` does not match any platform.
+/// * Returns [`UpdateDiskLabelError::IndexOutOfBounds`] if `index >= disks.len()`.
+/// * Returns [`UpdateDiskLabelError::DuplicateLabel`] if `label` is already assigned to a
+///   different disk within this platform.
+/// * Returns [`UpdateDiskLabelError::Other`] for unexpected database or serialization errors.
 pub async fn update_disk_label(
     conn: &Connection,
     id: i64,
     index: usize,
     label: Option<&str>,
-) -> Result<Platform> {
-    let platform = get(conn, id).await.context("Platform not found")?;
+) -> std::result::Result<Platform, UpdateDiskLabelError> {
+    let platform = get(conn, id)
+        .await
+        .map_err(|_| UpdateDiskLabelError::PlatformNotFound)?;
 
     let mut attributes = platform.attributes.clone();
 
     if index >= attributes.disks.len() {
-        return Err(anyhow!("Disk index out of bounds"));
+        return Err(UpdateDiskLabelError::IndexOutOfBounds);
     }
 
-    validate_label_uniqueness(&attributes, index, label)?;
+    validate_label_uniqueness(&attributes, index, label)
+        .map_err(|_| UpdateDiskLabelError::DuplicateLabel)?;
 
     attributes.disks[index].label = label.map(|s| s.to_string());
 
     let now = Utc::now();
-    let attributes_json = serde_json::to_string(&attributes)?;
+    let attributes_json = serde_json::to_string(&attributes).map_err(anyhow::Error::from)?;
 
     conn.execute(
         "UPDATE platforms SET attributes = ?1, updated_at = ?2 WHERE id = ?3",
@@ -153,7 +201,7 @@ pub async fn update_disk_label(
     .await
     .context("Failed to update disk label")?;
 
-    get(conn, id).await
+    get(conn, id).await.map_err(Into::into)
 }
 
 /// Check that `label` is not already assigned to a disk at a different index.

@@ -3,6 +3,9 @@ mod cnc;
 mod error;
 mod ui;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -11,6 +11,11 @@ use common::device_attributes::{DeviceAttributes, NetworkInterface};
 
 #[derive(Debug, Clone)]
 pub struct Device {
+    /// Integer primary key from the `devices` table.
+    ///
+    /// Used internally when creating device warnings (which reference `device_id`).
+    /// Not exposed in HTTP responses.
+    pub id: i64,
     pub uuid: Uuid,
     pub architecture: Architecture,
     pub lifecycle: Option<DeviceLifecycle>,
@@ -24,6 +29,7 @@ pub struct Device {
 
 impl FromRow for Device {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        let id: i64 = row.get("id")?;
         let uuid = row.get("uuid")?;
         let architecture_str: String = row.get("architecture")?;
         let lifecycle_str: Option<String> = row.get("lifecycle")?;
@@ -49,6 +55,7 @@ impl FromRow for Device {
         let lifecycle = lifecycle_str.map(DeviceLifecycle::from);
 
         Ok(Device {
+            id,
             uuid,
             architecture,
             lifecycle,
@@ -153,10 +160,7 @@ pub async fn update_attributes(
     if is_disk_scan {
         let stale = collect_stale_overrides(&merged);
         if !stale.is_empty() {
-            let device_id = device_warnings::get_device_id_by_uuid(conn, uuid).await?;
-            if let Some(device_id) = device_id {
-                drop_stale_overrides(conn, &mut merged, &stale, device_id).await?;
-            }
+            drop_stale_overrides(conn, &mut merged, &stale, device.id).await?;
         }
     }
 
@@ -210,7 +214,7 @@ async fn drop_stale_overrides(
 pub async fn get_device(conn: &Connection, uuid: &Uuid) -> Result<Device> {
     let device = conn
         .query_one(
-            "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
+            "SELECT id, uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
             (*uuid,),
             Device::from_row,
         )
@@ -222,7 +226,7 @@ pub async fn get_device(conn: &Connection, uuid: &Uuid) -> Result<Device> {
 pub async fn get_all_devices(conn: &Connection) -> Result<Vec<Device>> {
     let devices = conn
         .query(
-            "SELECT uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
+            "SELECT id, uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
             (),
             Device::from_row,
         )

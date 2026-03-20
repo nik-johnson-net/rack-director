@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use crate::{
     http::{AppState, error::Error as HttpError},
-    platforms::Platform,
+    platforms::{Platform, store::UpdateDiskLabelError},
 };
 
 // ---------------------------------------------------------------------------
@@ -80,18 +80,16 @@ async fn update_disk_label(
 // ---------------------------------------------------------------------------
 
 /// Map store errors from `update_disk_label` to the appropriate HTTP error.
-fn map_update_disk_label_error(e: anyhow::Error, id: i64, index: usize) -> HttpError {
-    let msg = e.to_string();
-    if msg.contains("Platform not found") {
-        HttpError::NotFound(format!("Platform {id} not found"))
-    } else if msg.contains("out of bounds") {
-        HttpError::NotFound(format!(
+fn map_update_disk_label_error(e: UpdateDiskLabelError, id: i64, index: usize) -> HttpError {
+    match e {
+        UpdateDiskLabelError::PlatformNotFound => {
+            HttpError::NotFound(format!("Platform {id} not found"))
+        }
+        UpdateDiskLabelError::IndexOutOfBounds => HttpError::NotFound(format!(
             "Disk index {index} is out of bounds for platform {id}"
-        ))
-    } else if msg.contains("Label already exists") {
-        HttpError::UnprocessableEntity(msg)
-    } else {
-        HttpError::ServerInternalError(e)
+        )),
+        UpdateDiskLabelError::DuplicateLabel => HttpError::UnprocessableEntity(e.to_string()),
+        UpdateDiskLabelError::Other(e) => HttpError::ServerInternalError(e),
     }
 }
 
@@ -129,30 +127,8 @@ mod tests {
         (app, migration_conn)
     }
 
-    /// Build a minimal `AppState` for handler tests.
     fn build_test_state(conn_factory: Arc<dyn database::ConnectionFactory>) -> Arc<AppState> {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let agent_images_path = temp_dir.path().join("agent-image");
-        std::fs::create_dir_all(&agent_images_path).unwrap();
-        let boot_files_path = temp_dir.path().join("boot");
-        std::fs::create_dir_all(&boot_files_path).unwrap();
-        let boot_file_provider =
-            Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
-        let image_store =
-            crate::storage::ImageStore::new(crate::storage::ImageStoreConfig::Memory {
-                base_url: "http://localhost/images".into(),
-            })
-            .unwrap();
-        // Leak TempDir so paths remain valid for the test duration.
-        std::mem::forget(temp_dir);
-        Arc::new(AppState {
-            connection_factory: conn_factory,
-            image_store: image_store.into(),
-            agent_images_path,
-            boot_file_provider,
-            dhcp: crate::dhcp::DhcpControl::noop(),
-            unprovisioned_sleep_secs: 0,
-        })
+        crate::http::test_helpers::build_test_state(conn_factory)
     }
 
     fn sample_attributes() -> PlatformAttributes {
