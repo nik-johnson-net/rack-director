@@ -387,7 +387,11 @@ fn read_disk_serial(device_name: &str) -> Option<String> {
     match std::fs::read_to_string(&serial_path) {
         Ok(content) => {
             let serial = content.trim().to_string();
-            if serial.is_empty() { None } else { Some(serial) }
+            if serial.is_empty() {
+                None
+            } else {
+                Some(serial)
+            }
         }
         Err(e) => {
             debug!("Failed to read serial for {}: {}", device_name, e);
@@ -405,7 +409,11 @@ fn read_disk_vendor(device_name: &str) -> Option<String> {
     match std::fs::read_to_string(&vendor_path) {
         Ok(content) => {
             let vendor = content.trim().to_string();
-            if vendor.is_empty() { None } else { Some(vendor) }
+            if vendor.is_empty() {
+                None
+            } else {
+                Some(vendor)
+            }
         }
         Err(e) => {
             debug!("Failed to read vendor for {}: {}", device_name, e);
@@ -1710,7 +1718,11 @@ mod tests {
     fn test_read_disk_serial_present() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let device_name = "sda";
-        let sysfs_path = temp_dir.path().join("block").join(device_name).join("device");
+        let sysfs_path = temp_dir
+            .path()
+            .join("block")
+            .join(device_name)
+            .join("device");
         std::fs::create_dir_all(&sysfs_path).unwrap();
         std::fs::write(sysfs_path.join("serial"), "  ABC123XYZ  \n").unwrap();
 

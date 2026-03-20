@@ -3,38 +3,58 @@ use common::disk_layout::DiskLayout;
 
 use crate::platforms::PlatformAttributes;
 
-/// Resolve platform labels in a DiskLayout to actual device paths
+/// Resolve platform labels in a DiskLayout to actual device paths.
 ///
 /// For each DiskConfig, if `device` doesn't start with `/`, treat it as a platform label
-/// and look up the corresponding disk path from platform attributes.
-/// Also resolves ZFS pool device references.
+/// and verify it exists in the platform attributes. Also resolves ZFS pool device references.
 ///
-/// Returns a new DiskLayout with all labels replaced by device paths.
+/// # Note on path resolution (Phase 4 TODO)
+///
+/// `PlatformDisk` no longer stores a `path` field. Device-path resolution from platform
+/// labels to actual by-path strings is now delegated to the agent at provisioning time,
+/// where the agent can enumerate the disks present on the specific machine and match them
+/// to platform labels by hardware class (disk type + size). Until Phase 4 implements
+/// agent-side resolution, this function verifies that all labels exist in the platform but
+/// returns an error if any unresolved label is present, because it cannot substitute a
+/// path.
+///
+/// Returns a new DiskLayout with all labels replaced by device paths (if fully resolved),
+/// or an error if any label cannot be resolved.
 pub fn resolve_disk_layout(
     layout: &DiskLayout,
     platform_attrs: &PlatformAttributes,
 ) -> Result<DiskLayout> {
     let mut resolved = layout.clone();
 
-    // Resolve disk device labels
+    // Verify and resolve disk device labels
     for disk in &mut resolved.disks {
         if !disk.device.starts_with('/') {
             let label = &disk.device;
             let platform_disk = platform_attrs
                 .disks
                 .iter()
-                .find(|d| d.label.as_deref() == Some(label))
+                .find(|d| d.label.as_deref() == Some(label.as_str()))
                 .ok_or_else(|| {
                     anyhow!(
                         "Platform label '{}' not found in platform attributes",
                         label
                     )
                 })?;
-            disk.device = platform_disk.path.clone();
+            // TODO(Phase 4): PlatformDisk no longer carries a path. Agent-side label
+            // resolution will replace this with the actual by-path device string discovered
+            // on the target machine. For now, return an error to prevent silent misresolution.
+            return Err(anyhow!(
+                "Platform label '{}' cannot be resolved to a device path: \
+                 path resolution is not yet implemented (Phase 4). \
+                 The platform disk has size_gb={} disk_type={:?}.",
+                label,
+                platform_disk.size_gb,
+                platform_disk.disk_type
+            ));
         }
     }
 
-    // Resolve ZFS pool device references
+    // Verify and resolve ZFS pool device references
     if let Some(ref mut pools) = resolved.zfs_pools {
         for pool in pools {
             for device_ref in &mut pool.devices {
@@ -51,7 +71,16 @@ pub fn resolve_disk_layout(
                                 pool.name
                             )
                         })?;
-                    *device_ref = platform_disk.path.clone();
+                    // TODO(Phase 4): same as above — path not available on PlatformDisk.
+                    return Err(anyhow!(
+                        "Platform label '{}' in ZFS pool '{}' cannot be resolved to a device path: \
+                         path resolution is not yet implemented (Phase 4). \
+                         The platform disk has size_gb={} disk_type={:?}.",
+                        label,
+                        pool.name,
+                        platform_disk.size_gb,
+                        platform_disk.disk_type
+                    ));
                 }
             }
         }
@@ -131,25 +160,22 @@ mod tests {
     use super::*;
     use crate::platforms::{PlatformCpu, PlatformDisk, PlatformNic};
     use common::device_attributes::DiskType;
-    use common::disk_layout::{DiskConfig, PartitionConfig, ZfsDataset, ZfsPool};
+    use common::disk_layout::{DiskConfig, PartitionConfig, ZfsPool};
 
     fn make_test_platform() -> PlatformAttributes {
         PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:03:00.0-nvme-1".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Nvme,
                     label: Some("DATA1".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:04:00.0-nvme-1".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Nvme,
                     label: Some("DATA2".to_string()),
@@ -169,12 +195,13 @@ mod tests {
         }
     }
 
+    /// Resolving a layout with an absolute device path (no label) should succeed unchanged.
     #[test]
-    fn test_resolve_disk_layout_success() {
+    fn test_resolve_disk_layout_absolute_path_unchanged() {
         let platform = make_test_platform();
         let layout = DiskLayout {
             disks: vec![DiskConfig {
-                device: "ROOT".to_string(),
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
                 partitions: vec![PartitionConfig {
                     label: "root".to_string(),
@@ -191,9 +218,35 @@ mod tests {
 
         let resolved = resolve_disk_layout(&layout, &platform).unwrap();
 
+        // Absolute path passes through unchanged
         assert_eq!(
             resolved.disks[0].device,
             "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        );
+    }
+
+    /// Resolving a layout that uses a platform label returns a Phase 4 TODO error because
+    /// `PlatformDisk` no longer stores a path.
+    #[test]
+    fn test_resolve_disk_layout_label_returns_phase4_error() {
+        let platform = make_test_platform();
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+
+        let result = resolve_disk_layout(&layout, &platform);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ROOT") && err.contains("Phase 4"),
+            "Error should mention label 'ROOT' and Phase 4, got: {}",
+            err
         );
     }
 
@@ -220,8 +273,11 @@ mod tests {
         );
     }
 
+    /// A layout mixing a label and an absolute path fails with the Phase 4 error on the label.
+    ///
+    /// Absolute paths pass through, but label resolution requires Phase 4 agent-side work.
     #[test]
-    fn test_resolve_disk_layout_mixed_labels_and_paths() {
+    fn test_resolve_disk_layout_mixed_labels_and_paths_errors_on_label() {
         let platform = make_test_platform();
         let layout = DiskLayout {
             disks: vec![
@@ -240,66 +296,23 @@ mod tests {
             zfs_pools: None,
         };
 
-        let resolved = resolve_disk_layout(&layout, &platform).unwrap();
-
-        assert_eq!(
-            resolved.disks[0].device,
-            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
-        );
-        assert_eq!(
-            resolved.disks[1].device,
-            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        let result = resolve_disk_layout(&layout, &platform);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ROOT") && err.contains("Phase 4"),
+            "Error should mention label 'ROOT' and Phase 4, got: {}",
+            err
         );
     }
 
+    /// A ZFS layout that references labels returns the Phase 4 error when the disk device
+    /// is a label. Absolute paths in ZFS pool device lists also trigger the Phase 4 error
+    /// if disk devices are labels.
     #[test]
-    fn test_resolve_disk_layout_with_zfs() {
+    fn test_resolve_disk_layout_with_zfs_label_errors() {
         let platform = make_test_platform();
-        let _layout = DiskLayout {
-            disks: vec![
-                DiskConfig {
-                    device: "DATA1".to_string(),
-                    partition_table: "gpt".to_string(),
-                    partitions: vec![PartitionConfig {
-                        label: "zfs1".to_string(),
-                        size: "rest".to_string(),
-                        filesystem: None,
-                        mount_point: None,
-                        flags: None,
-                        volume_group: None,
-                    }],
-                },
-                DiskConfig {
-                    device: "DATA2".to_string(),
-                    partition_table: "gpt".to_string(),
-                    partitions: vec![PartitionConfig {
-                        label: "zfs2".to_string(),
-                        size: "rest".to_string(),
-                        filesystem: None,
-                        mount_point: None,
-                        flags: None,
-                        volume_group: None,
-                    }],
-                },
-            ],
-            volume_groups: None,
-            zfs_pools: Some(vec![ZfsPool {
-                name: "tank".to_string(),
-                vdev_type: "mirror".to_string(),
-                devices: vec!["DATA1-zfs1".to_string(), "DATA2-zfs2".to_string()],
-                datasets: vec![ZfsDataset {
-                    name: "tank/data".to_string(),
-                    mount_point: Some("/data".to_string()),
-                    properties: None,
-                    zvol_size: None,
-                }],
-                properties: None,
-            }]),
-        };
-
-        // This should fail because DATA1-zfs1 is a partition reference, not a label
-        // Let me create a test with actual labels
-        let layout_with_labels = DiskLayout {
+        let layout = DiskLayout {
             disks: vec![
                 DiskConfig {
                     device: "DATA1".to_string(),
@@ -322,23 +335,51 @@ mod tests {
             }]),
         };
 
-        let resolved = resolve_disk_layout(&layout_with_labels, &platform).unwrap();
+        let result = resolve_disk_layout(&layout, &platform);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Phase 4"),
+            "Error should mention Phase 4, got: {}",
+            err
+        );
+    }
 
-        assert_eq!(
-            resolved.disks[0].device,
-            "/dev/disk/by-path/pci-0000:03:00.0-nvme-1"
-        );
-        assert_eq!(
-            resolved.disks[1].device,
-            "/dev/disk/by-path/pci-0000:04:00.0-nvme-1"
-        );
-        assert_eq!(
-            resolved.zfs_pools.as_ref().unwrap()[0].devices[0],
-            "/dev/disk/by-path/pci-0000:03:00.0-nvme-1"
-        );
-        assert_eq!(
-            resolved.zfs_pools.as_ref().unwrap()[0].devices[1],
-            "/dev/disk/by-path/pci-0000:04:00.0-nvme-1"
+    /// A ZFS layout where disk devices are absolute paths but pool device references are
+    /// labels should still fail with the Phase 4 error on the pool label.
+    #[test]
+    fn test_resolve_disk_layout_zfs_pool_label_errors() {
+        let platform = make_test_platform();
+        let layout = DiskLayout {
+            disks: vec![
+                DiskConfig {
+                    device: "/dev/disk/by-path/pci-0000:03:00.0-nvme-1".to_string(),
+                    partition_table: "gpt".to_string(),
+                    partitions: vec![],
+                },
+                DiskConfig {
+                    device: "/dev/disk/by-path/pci-0000:04:00.0-nvme-1".to_string(),
+                    partition_table: "gpt".to_string(),
+                    partitions: vec![],
+                },
+            ],
+            volume_groups: None,
+            zfs_pools: Some(vec![ZfsPool {
+                name: "tank".to_string(),
+                vdev_type: "mirror".to_string(),
+                devices: vec!["DATA1".to_string(), "DATA2".to_string()],
+                datasets: vec![],
+                properties: None,
+            }]),
+        };
+
+        let result = resolve_disk_layout(&layout, &platform);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Phase 4") && err.contains("tank"),
+            "Error should mention Phase 4 and pool name 'tank', got: {}",
+            err
         );
     }
 
@@ -451,10 +492,10 @@ mod tests {
         assert!(layout_uses_labels(&layout));
     }
 
-    /// Resolve a layout that uses DATA1 and DATA2 labels against a platform that has those labels.
-    /// Verifies that each label resolves to its correct device path.
+    /// Attempting to resolve DATA1 and DATA2 labels returns the Phase 4 error because
+    /// `PlatformDisk` no longer stores a path; agent-side resolution is required.
     #[test]
-    fn test_resolve_disk_layout_with_data_labels() {
+    fn test_resolve_disk_layout_with_data_labels_returns_phase4_error() {
         let platform = make_test_platform();
         let layout = DiskLayout {
             disks: vec![
@@ -487,15 +528,13 @@ mod tests {
             zfs_pools: None,
         };
 
-        let resolved = resolve_disk_layout(&layout, &platform).unwrap();
-
-        assert_eq!(
-            resolved.disks[0].device, "/dev/disk/by-path/pci-0000:03:00.0-nvme-1",
-            "DATA1 should resolve to the first NVMe path"
-        );
-        assert_eq!(
-            resolved.disks[1].device, "/dev/disk/by-path/pci-0000:04:00.0-nvme-1",
-            "DATA2 should resolve to the second NVMe path"
+        let result = resolve_disk_layout(&layout, &platform);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Phase 4"),
+            "Error should mention Phase 4, got: {}",
+            err
         );
     }
 

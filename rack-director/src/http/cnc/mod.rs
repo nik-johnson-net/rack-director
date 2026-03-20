@@ -1551,9 +1551,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Phase 4 TODO: label-to-path resolution is not yet implemented.
+    ///
+    /// Until the agent-side label resolution (Phase 4) is complete, requesting the disk
+    /// layout for a device whose role uses platform labels returns a 500 Internal Server
+    /// Error, because `PlatformDisk` no longer stores a device path.
     #[tokio::test]
-    async fn test_get_disk_layout_labels_resolved_with_platform() {
-        // Device with role that uses labels AND has platform assigned -> labels resolved
+    async fn test_get_disk_layout_labels_returns_error_until_phase4() {
         let (state, _temp_dir) = setup_test_state().await;
         let test_uuid = test_uuid(0x74);
 
@@ -1565,10 +1569,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Create platform with ROOT label
+        // Create platform with ROOT label (no path — Phase 4 will provide that)
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("ROOT".to_string()),
@@ -1622,16 +1625,8 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let result: common::disk_layout::DiskLayout = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            result.disks[0].device,
-            "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
-        ); // Label resolved to path
+        // Phase 4 not yet implemented: label resolution returns an internal error
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     /// Verify that `image_store_handler` sets a `Content-Length` header so that iPXE does not

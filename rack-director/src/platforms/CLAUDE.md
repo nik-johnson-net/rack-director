@@ -12,18 +12,24 @@ A Platform contains many attributes:
 
 ```yaml
 disks:
-  - path: {from /dev/disk/by-path/}
-    size_gb: {size_gb}
-    type: {nvme, ssd, hdd}
+  - size_gb: {size_gb}
+    disk_type: {nvme, ssd, hdd}
+    label: {ROOT, DATA1, DATA2, ...}
 nics:
   - logical: eno1
     speed_mbps: {speed in Mbps}
+    label: {NIC1, NIC2, ...}
 cpus:
   - brand: intel
     model: E3-1240 v3
     cores: 8
 memory_gib: 32
 ```
+
+**Note:** `PlatformDisk` does **not** store a device path. Paths vary by PCIe bus topology,
+so two identical servers in different physical slots would otherwise resolve labels to the
+wrong disks. Path resolution from platform labels to actual by-path strings is delegated
+to the agent at provisioning time (Phase 4).
 
 A good source of this information is to run `lshw -json` and search for classes of network, memory, cpu, disk, volume. Before
 a platform can be used however, it's disks and NICs must be labeled so the provisioning process can use them. Labels are arbitrary,

@@ -76,14 +76,8 @@ fn validate_platform_attributes(attrs: &PlatformAttributes, errors: &mut Validat
         errors.add_error("disks", "At least one disk is required".to_string());
     }
 
-    // Validate disk types
+    // Validate disk fields
     for (i, disk) in attrs.disks.iter().enumerate() {
-        if disk.path.is_empty() {
-            errors.add_error(
-                &format!("disks[{}].path", i),
-                "Disk path is required".to_string(),
-            );
-        }
         if disk.size_gb == 0 {
             errors.add_error(
                 &format!("disks[{}].size_gb", i),
@@ -316,13 +310,11 @@ mod tests {
         PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Hdd,
                     label: Some("DATA1".to_string()),

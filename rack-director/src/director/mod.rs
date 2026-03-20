@@ -1600,7 +1600,6 @@ mod tests {
         // Create a platform first
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("ROOT".to_string()),
@@ -2038,7 +2037,6 @@ mod tests {
         // Create platform without the label the role needs
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("DATA1".to_string()), // Has DATA1, not ROOT
@@ -2103,7 +2101,6 @@ mod tests {
         // Create platform with ROOT label
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("ROOT".to_string()),

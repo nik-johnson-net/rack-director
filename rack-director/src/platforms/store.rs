@@ -168,13 +168,11 @@ mod tests {
         PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Hdd,
                     label: Some("DATA1".to_string()),

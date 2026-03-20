@@ -175,12 +175,6 @@ fn convert_device_hardware_to_platform(
     let platform_disks = disks
         .iter()
         .filter_map(|disk| {
-            // Use path if available, otherwise fallback to /dev/name
-            let path = disk
-                .path
-                .clone()
-                .unwrap_or_else(|| format!("/dev/{}", disk.name));
-
             // Get size in GB (already parsed as u64 by rack-agent)
             let size_gb = disk.size?;
 
@@ -188,7 +182,6 @@ fn convert_device_hardware_to_platform(
             let disk_type = disk.disk_type?;
 
             Some(PlatformDisk {
-                path,
                 size_gb,
                 disk_type,
                 label: None, // Will be assigned later
@@ -347,13 +340,11 @@ mod tests {
         PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Hdd,
                     label: Some("DATA1".to_string()),
@@ -413,19 +404,16 @@ mod tests {
     fn test_assign_disk_labels() {
         let mut disks = vec![
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 2000,
                 disk_type: DiskType::Hdd,
                 label: None,
             },
             PlatformDisk {
-                path: "/dev/nvme0n1".to_string(),
                 size_gb: 480,
                 disk_type: DiskType::Nvme,
                 label: None,
             },
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                 size_gb: 2000,
                 disk_type: DiskType::Hdd,
                 label: None,
@@ -434,28 +422,24 @@ mod tests {
 
         assign_disk_labels(&mut disks);
 
-        // After sorting by path, order is: /dev/disk/by-path/...-ata-1, /dev/disk/by-path/...-ata-2, /dev/nvme0n1
-        // NVMe disk (smallest + fastest) should be ROOT
-        let nvme_disk = disks.iter().find(|d| d.path == "/dev/nvme0n1").unwrap();
+        // After canonical sort: NVMe (fastest) should be ROOT
+        let nvme_disk = disks
+            .iter()
+            .find(|d| d.disk_type == DiskType::Nvme)
+            .unwrap();
         assert_eq!(nvme_disk.label, Some("ROOT".to_string()));
 
         // HDDs should be DATA1 and DATA2
-        let sda_disk = disks
+        let hdd_disks: Vec<_> = disks
             .iter()
-            .find(|d| d.path == "/dev/disk/by-path/pci-0000:00:1f.2-ata-1")
-            .unwrap();
-        let sdb_disk = disks
-            .iter()
-            .find(|d| d.path == "/dev/disk/by-path/pci-0000:00:1f.2-ata-2")
-            .unwrap();
-        assert!(
-            sda_disk.label == Some("DATA1".to_string())
-                || sda_disk.label == Some("DATA2".to_string())
-        );
-        assert!(
-            sdb_disk.label == Some("DATA1".to_string())
-                || sdb_disk.label == Some("DATA2".to_string())
-        );
+            .filter(|d| d.disk_type == DiskType::Hdd)
+            .collect();
+        assert_eq!(hdd_disks.len(), 2);
+        for hdd in &hdd_disks {
+            assert!(
+                hdd.label == Some("DATA1".to_string()) || hdd.label == Some("DATA2".to_string())
+            );
+        }
     }
 
     #[test]
@@ -486,13 +470,11 @@ mod tests {
         let attrs = PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Hdd,
                     label: Some("DATA1".to_string()),
@@ -508,7 +490,7 @@ mod tests {
         };
 
         let name = generate_platform_name(&attrs);
-        // Expected format: "1x4-core-32GB-1x2000HDD+1x480SSD"
+        // Expected format: "1xE31240v3-32GB-1x2000HDD+1x480SSD"
         // (sorted alphabetically: HDD before SSD)
         assert_eq!(name, "1xE31240v3-32GB-1x2000HDD+1x480SSD");
     }
@@ -517,7 +499,6 @@ mod tests {
     fn test_generate_platform_name_single_disk() {
         let attrs = PlatformAttributes {
             disks: vec![PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: DiskType::Ssd,
                 label: Some("ROOT".to_string()),
@@ -540,13 +521,11 @@ mod tests {
         let attrs = PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/nvme0n1".to_string(),
                     size_gb: 960,
                     disk_type: DiskType::Nvme,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/nvme1n1".to_string(),
                     size_gb: 960,
                     disk_type: DiskType::Nvme,
                     label: Some("DATA1".to_string()),
@@ -587,19 +566,16 @@ mod tests {
         let attrs = PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: Some("ROOT".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                     size_gb: 1000,
                     disk_type: DiskType::Hdd,
                     label: Some("DATA1".to_string()),
                 },
                 PlatformDisk {
-                    path: "/dev/nvme0n1".to_string(),
                     size_gb: 960,
                     disk_type: DiskType::Nvme,
                     label: Some("DATA2".to_string()),
@@ -805,19 +781,16 @@ mod tests {
     fn test_canonical_disk_sorting() {
         let mut disks = vec![
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:02:00.0-ata-1".to_string(),
                 size_gb: 2000,
                 disk_type: DiskType::Hdd,
                 label: None,
             },
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: DiskType::Ssd,
                 label: None,
             },
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:01:00.0-nvme-1".to_string(),
                 size_gb: 1000,
                 disk_type: DiskType::Nvme,
                 label: None,
@@ -835,52 +808,55 @@ mod tests {
         assert_eq!(disks[2].size_gb, 2000);
     }
 
+    /// Two identical hardware configurations with different PCIe bus topologies must still match.
+    ///
+    /// Since `path` is no longer stored in `PlatformDisk`, matching is purely by hardware
+    /// characteristics (disk_type and size_gb), so topology differences are invisible to
+    /// the matching algorithm.
     #[test]
-    fn test_platform_match_different_pci_paths() {
-        // Create two disk configs with identical hardware but different PCI paths
-        let mut platform_disks = vec![
+    fn test_platform_match_identical_hardware_different_topology() {
+        let platform_disks = vec![
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: DiskType::Ssd,
                 label: Some("ROOT".to_string()),
             },
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string(),
                 size_gb: 2000,
                 disk_type: DiskType::Hdd,
                 label: Some("DATA1".to_string()),
             },
         ];
 
-        let mut device_disks = vec![
+        // Identical hardware, but would have been different PCI paths on the old implementation
+        let device_disks = vec![
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:01:00.0-ata-1".to_string(), // Different path!
                 size_gb: 480,
                 disk_type: DiskType::Ssd,
                 label: None,
             },
             PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:01:00.0-ata-2".to_string(), // Different path!
                 size_gb: 2000,
                 disk_type: DiskType::Hdd,
                 label: None,
             },
         ];
 
-        // Manually call the matching logic used in is_platform_match
-        sort_disks_canonical(&mut platform_disks);
-        sort_disks_canonical(&mut device_disks);
+        let platform_attrs = PlatformAttributes {
+            disks: platform_disks,
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 32,
+        };
+        let device_attrs = PlatformAttributes {
+            disks: device_disks,
+            nics: vec![],
+            cpus: vec![],
+            memory_gib: 32,
+        };
 
-        // Should match despite different paths
-        assert_eq!(platform_disks.len(), device_disks.len());
-        for (p_disk, d_disk) in platform_disks.iter().zip(device_disks.iter()) {
-            assert_eq!(p_disk.disk_type, d_disk.disk_type);
-
-            let size_diff = p_disk.size_gb.abs_diff(d_disk.size_gb);
-            let tolerance = (p_disk.size_gb as f64 * 0.05) as u64;
-            assert!(size_diff <= tolerance);
-        }
+        // Should match because hardware class (type + size) is identical
+        assert!(is_platform_match(&platform_attrs, &device_attrs));
     }
 
     #[test]
@@ -888,13 +864,11 @@ mod tests {
         let mut attrs = PlatformAttributes {
             disks: vec![
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:02:00.0-ata-1".to_string(),
                     size_gb: 2000,
                     disk_type: DiskType::Hdd,
                     label: None,
                 },
                 PlatformDisk {
-                    path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                     size_gb: 480,
                     disk_type: DiskType::Ssd,
                     label: None,
@@ -907,7 +881,7 @@ mod tests {
 
         assign_disk_labels(&mut attrs.disks);
 
-        // ROOT should be assigned to the SSD (smallest + fastest), not based on path
+        // ROOT should be assigned to the SSD (smallest + fastest)
         let root_disk = attrs
             .disks
             .iter()
@@ -924,5 +898,66 @@ mod tests {
         assert!(data1_disk.is_some());
         assert_eq!(data1_disk.unwrap().disk_type, DiskType::Hdd);
         assert_eq!(data1_disk.unwrap().size_gb, 2000);
+    }
+
+    /// Verify that platform creation produces PlatformDisk structs with no path field.
+    ///
+    /// This tests the full `detect_or_create_platform` path to confirm that the
+    /// conversion from `DiskInfo` to `PlatformDisk` never stores a path.
+    #[tokio::test]
+    async fn test_detect_or_create_platform_produces_no_path() {
+        use common::device_attributes::{DiskInfo, MemoryInfo, NetworkInterface};
+
+        let db = setup_db(test_database_path!()).await;
+
+        let disks = vec![DiskInfo {
+            name: "sda".to_string(),
+            path: Some("/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string()),
+            size: Some(480),
+            disk_type: Some(DiskType::Ssd),
+            model: None,
+            serial: None,
+            vendor: None,
+            uuid: None,
+        }];
+        let nics = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
+            speed_mbps: Some(1000),
+            ip_address: None,
+            network_id: None,
+            disabled: false,
+            warning_label: None,
+        }];
+        let cpus = vec![CpuInfo {
+            manufacturer: Some("Intel Corporation".to_string()),
+            model: Some("E3-1240 v3".to_string()),
+            cores: Some(4),
+            designation: None,
+            threads: None,
+            speed_mhz: None,
+        }];
+        let memory = vec![MemoryInfo {
+            size_mb: Some(32768),
+            speed_mhz: None,
+            manufacturer: None,
+            part_number: None,
+        }];
+
+        let platform_id = detect_or_create_platform(&db, &disks, &nics, &cpus, &memory)
+            .await
+            .unwrap();
+
+        let platform = crate::platforms::store::get(&db, platform_id)
+            .await
+            .unwrap();
+        assert_eq!(platform.attributes.disks.len(), 1);
+
+        // The created PlatformDisk must carry hardware class only — no path
+        let disk = &platform.attributes.disks[0];
+        assert_eq!(disk.size_gb, 480);
+        assert_eq!(disk.disk_type, DiskType::Ssd);
+        // label is assigned by assign_disk_labels
+        assert_eq!(disk.label, Some("ROOT".to_string()));
     }
 }
