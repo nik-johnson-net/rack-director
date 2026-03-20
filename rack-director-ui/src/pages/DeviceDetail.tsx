@@ -39,6 +39,8 @@ import { TransitionDialog } from "@/components/devices/transition-dialog";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
 import { PlatformAssignment } from "@/components/devices/platform-assignment";
+import { DeviceWarnings } from "@/components/devices/device-warnings";
+import { DiskLabelOverrides } from "@/components/devices/disk-label-overrides";
 import { Label } from "@/components/ui/label";
 
 const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
@@ -262,6 +264,12 @@ function DeviceDetail() {
         </div>
       )}
 
+      {/* Device Warnings */}
+      <DeviceWarnings
+        uuid={uuid!}
+        onError={(errorMsg) => setError(errorMsg)}
+      />
+
       {/* Static IP Dialog */}
       <MakeStaticDialog
         open={staticDialogOpen}
@@ -439,6 +447,14 @@ function DeviceDetail() {
       <BmcConfiguration
         device={device}
         networks={networks}
+        onDeviceUpdate={(updatedDevice) => setDevice(updatedDevice)}
+        onError={(errorMsg) => setError(errorMsg)}
+      />
+
+      {/* Disk Label Overrides */}
+      <DiskLabelOverrides
+        uuid={uuid!}
+        device={device}
         onDeviceUpdate={(updatedDevice) => setDevice(updatedDevice)}
         onError={(errorMsg) => setError(errorMsg)}
       />
