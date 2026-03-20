@@ -10,6 +10,7 @@ pub enum Error {
     #[allow(clippy::enum_variant_names)]
     ValidationError(HashMap<String, String>),
     NotFound(String),
+    UnprocessableEntity(String),
     #[allow(clippy::enum_variant_names)] // ServerInternalError is the HTTP response code name
     ServerInternalError(anyhow::Error),
 }
@@ -32,6 +33,10 @@ impl IntoResponse for Error {
                 .expect("building body"),
             Error::NotFound(reason) => axum::response::Response::builder()
                 .status(404)
+                .body(Body::from(reason))
+                .expect("building body"),
+            Error::UnprocessableEntity(reason) => axum::response::Response::builder()
+                .status(422)
                 .body(Body::from(reason))
                 .expect("building body"),
             Error::ServerInternalError(error) => {

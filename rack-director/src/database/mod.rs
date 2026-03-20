@@ -64,7 +64,7 @@ pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
 }
 
-const LATEST_VERSION: usize = 14;
+const LATEST_VERSION: usize = 16;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -80,6 +80,8 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/12.sql"),
     include_str!("migrations/13.sql"),
     include_str!("migrations/14.sql"),
+    include_str!("migrations/15.sql"),
+    include_str!("migrations/16.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -102,6 +104,8 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
     None,                                                                      // Migration 12
     None,                                                                      // Migration 13
     Some(|conn| migrations::migration_14::convert_disk_layouts(conn).boxed()), // Migration 14
+    Some(|conn| migrations::migration_15::strip_disk_paths(conn).boxed()),     // Migration 15
+    None,                                                                      // Migration 16
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.
@@ -449,5 +453,107 @@ mod tests {
         assert_eq!(partitions.len(), 2);
         assert_eq!(partitions[0].get("size").unwrap().as_str().unwrap(), "512M");
         assert_eq!(partitions[1].get("size").unwrap().as_str().unwrap(), "rest");
+    }
+
+    /// Migration 15 must strip `path` from all disk entries in `platforms.attributes`.
+    ///
+    /// Creates a platform with legacy JSON that includes `path` in each disk entry,
+    /// runs all migrations, and verifies the `path` field is absent after migration.
+    #[tokio::test]
+    async fn test_migration_15_strips_disk_paths() {
+        let conn = Connection::open(test_database_path!()).await.unwrap();
+
+        // Bootstrap to migration 14
+        conn.execute_batch(
+            "CREATE TABLE migrations (version INTEGER);
+             INSERT INTO migrations (version) VALUES (0)",
+        )
+        .await
+        .unwrap();
+
+        for version in 1..=14 {
+            conn.execute_batch(MIGRATIONS[version - 1]).await.unwrap();
+            if let Some(hook) = POST_MIGRATION_HOOKS[version - 1] {
+                hook(&conn).await.unwrap();
+            }
+            conn.execute("UPDATE migrations SET version = ?1", [version])
+                .await
+                .unwrap();
+        }
+
+        // Insert a platform with legacy attributes that still carry `path` on each disk
+        let legacy_attrs = r#"{
+            "disks": [
+                {
+                    "path": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
+                    "size_gb": 480,
+                    "disk_type": "ssd",
+                    "label": "ROOT"
+                },
+                {
+                    "path": "/dev/disk/by-path/pci-0000:00:1f.2-ata-2",
+                    "size_gb": 2000,
+                    "disk_type": "hdd",
+                    "label": "DATA1"
+                }
+            ],
+            "nics": [],
+            "cpus": [],
+            "memory_gib": 32
+        }"#;
+
+        conn.execute(
+            "INSERT INTO platforms (name, attributes) VALUES ('Legacy Platform', ?1)",
+            (legacy_attrs,),
+        )
+        .await
+        .unwrap();
+
+        // Verify path is present before migration
+        let stored: String = conn
+            .query_row(
+                "SELECT attributes FROM platforms WHERE name = 'Legacy Platform'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert!(
+            stored.contains("\"path\""),
+            "path should be present before migration"
+        );
+
+        // Run migration 15
+        let factory = test_connection_factory!();
+        run_migrations(&factory).await.unwrap();
+
+        // Read via the original connection (shared in-memory DB)
+        let stored: String = conn
+            .query_row(
+                "SELECT attributes FROM platforms WHERE name = 'Legacy Platform'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+
+        let attrs: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        let disks = attrs["disks"].as_array().unwrap();
+        assert_eq!(disks.len(), 2, "Both disks should be preserved");
+        assert!(
+            disks[0].get("path").is_none(),
+            "path should be removed from first disk after migration"
+        );
+        assert!(
+            disks[1].get("path").is_none(),
+            "path should be removed from second disk after migration"
+        );
+
+        // Other fields must be preserved
+        assert_eq!(disks[0]["size_gb"], serde_json::json!(480));
+        assert_eq!(disks[0]["disk_type"], serde_json::json!("ssd"));
+        assert_eq!(disks[0]["label"], serde_json::json!("ROOT"));
+        assert_eq!(disks[1]["size_gb"], serde_json::json!(2000));
+        assert_eq!(disks[1]["label"], serde_json::json!("DATA1"));
     }
 }

@@ -6,8 +6,9 @@ import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { deletePlatform, type Platform, type PlatformDeviceInfo, type DeviceLifecycle } from "@/lib/client";
-import { Pencil, Trash2, Server } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { deletePlatform, updatePlatformDiskLabel, type Platform, type PlatformDisk, type PlatformDeviceInfo, type DeviceLifecycle } from "@/lib/client";
+import { Pencil, Trash2, Server, Check, X } from "lucide-react";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 
 interface LoaderData {
@@ -15,11 +16,129 @@ interface LoaderData {
   devices: PlatformDeviceInfo[];
 }
 
+// Inline label editor for a single platform disk row
+interface DiskLabelCellProps {
+  platformId: number;
+  diskIndex: number;
+  disk: PlatformDisk;
+  onLabelChange: (index: number, newLabel: string | null) => void;
+  onError: (msg: string) => void;
+}
+
+function DiskLabelCell({ platformId, diskIndex, disk, onLabelChange, onError }: DiskLabelCellProps) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(disk.label ?? "");
+  const [saving, setSaving] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  const handleEdit = () => {
+    setValue(disk.label ?? "");
+    setValidationError(null);
+    setEditing(true);
+  };
+
+  const handleCancel = () => {
+    setEditing(false);
+    setValidationError(null);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setValidationError(null);
+    const newLabel = value.trim() || null;
+    try {
+      await updatePlatformDiskLabel(platformId, diskIndex, newLabel);
+      onLabelChange(diskIndex, newLabel);
+      setEditing(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to update label";
+      // Show inline validation error for 422-style duplicate label errors
+      setValidationError(msg);
+      onError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1">
+        <div className="space-y-1">
+          <Input
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setValidationError(null);
+            }}
+            placeholder="e.g., ROOT"
+            className={`h-7 w-28 text-xs ${validationError ? "border-destructive" : ""}`}
+            disabled={saving}
+            aria-label="Disk label"
+            aria-invalid={!!validationError}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSave();
+              if (e.key === "Escape") handleCancel();
+            }}
+            autoFocus
+          />
+          {validationError && (
+            <p className="text-xs text-destructive">{validationError}</p>
+          )}
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 text-primary"
+          onClick={handleSave}
+          disabled={saving}
+          aria-label="Save label"
+        >
+          <Check className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 text-muted-foreground"
+          onClick={handleCancel}
+          disabled={saving}
+          aria-label="Cancel edit"
+        >
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1 group">
+      {disk.label ? (
+        <Badge variant="secondary" className="text-xs">{disk.label}</Badge>
+      ) : (
+        <span className="text-muted-foreground text-xs">—</span>
+      )}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+        onClick={handleEdit}
+        aria-label={`Edit label for disk ${diskIndex + 1}`}
+      >
+        <Pencil className="h-3 w-3" />
+      </Button>
+    </div>
+  );
+}
+
 function PlatformDetail() {
-  const { platform, devices } = useLoaderData<LoaderData>();
+  const loaderData = useLoaderData<LoaderData>();
   const navigate = useNavigate();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Local copy of disks so label edits reflect immediately without reload
+  const [disks, setDisks] = useState<PlatformDisk[]>(loaderData.platform.attributes.disks);
+
+  const platform = loaderData.platform;
+  const devices = loaderData.devices;
 
   // Count devices by lifecycle state (excluding "removed")
   const deviceCounts = devices.reduce((acc, device) => {
@@ -40,19 +159,10 @@ function PlatformDetail() {
     }
   };
 
-  const formatDiskSummary = () => {
-    const disks = platform.attributes.disks;
-    if (disks.length === 0) return "No disks";
-
-    return disks.map((disk, index) => (
-      <div key={index} className="text-sm">
-        <span className="font-mono text-xs">{disk.path}</span>
-        <span className="text-muted-foreground ml-2">
-          ({disk.size_gb}GB, {disk.disk_type.toUpperCase()})
-        </span>
-        {disk.label && <Badge variant="secondary" className="ml-2 text-xs">{disk.label}</Badge>}
-      </div>
-    ));
+  const handleDiskLabelChange = (index: number, newLabel: string | null) => {
+    setDisks((prev) =>
+      prev.map((d, i) => (i === index ? { ...d, label: newLabel ?? undefined } : d))
+    );
   };
 
   const formatNicSummary = () => {
@@ -142,10 +252,39 @@ function PlatformDetail() {
         <Card>
           <CardHeader>
             <CardTitle>Disks</CardTitle>
-            <CardDescription>Storage devices</CardDescription>
+            <CardDescription>Storage devices — click the pencil icon to edit a label</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
-            {formatDiskSummary()}
+          <CardContent>
+            {disks.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No disks</p>
+            ) : (
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left py-2 pr-4 font-medium text-xs text-muted-foreground">Size</th>
+                    <th className="text-left py-2 pr-4 font-medium text-xs text-muted-foreground">Type</th>
+                    <th className="text-left py-2 font-medium text-xs text-muted-foreground">Label</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {disks.map((disk, index) => (
+                    <tr key={index} className="border-b last:border-0">
+                      <td className="py-2 pr-4 text-xs">{disk.size_gb} GB</td>
+                      <td className="py-2 pr-4 text-xs uppercase">{disk.disk_type}</td>
+                      <td className="py-2">
+                        <DiskLabelCell
+                          platformId={platform.id!}
+                          diskIndex={index}
+                          disk={disk}
+                          onLabelChange={handleDiskLabelChange}
+                          onError={(msg) => setError(msg)}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </CardContent>
         </Card>
 

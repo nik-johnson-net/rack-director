@@ -1,14 +1,13 @@
-// API module reserved for future external programmatic access
-// Currently, all endpoints are under /ui/ for the web interface
-// Future third-party integrations, CLI tools, or external consumers
-// should use endpoints defined here under the /api/ prefix
+mod devices;
+mod platforms;
 
 use axum::Router;
 use std::sync::Arc;
 
 use crate::http::AppState;
 
-pub fn routes(_state: Arc<AppState>) -> Router {
+pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
-    // No routes defined yet
+        .merge(devices::routes(state.clone()))
+        .merge(platforms::routes(state))
 }

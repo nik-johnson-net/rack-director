@@ -30,7 +30,11 @@ Platforms group similar physical devices together, representing common hardware 
 - Auto-detection on hardware discovery (matches by disk count/types/sizes ±5%, NIC count/speeds, CPU config, memory ±1 GiB)
 - Automatic label assignment (ROOT = smallest+fastest disk, DATA1/DATA2 by bus order, NIC1/NIC2 by bus order)
 - Manual platform assignment/override via UI/API
-- Label resolution in disk layouts and templates
+- Label resolution in disk layouts and templates using a two-level override system:
+  1. Device-level override (`disk_label_overrides` on DeviceAttributes) — highest priority
+  2. Canonical position matching (platform disk index → device disk index, sorted by type+size)
+- Platform disk labels editable via `PUT /api/platforms/{id}/disks/{index}/label`
+- `PlatformDisk` does **not** store a `path` field — paths always come from the device's own disk scan
 
 See @.claude/docs/platforms.md for detailed platform documentation.
 

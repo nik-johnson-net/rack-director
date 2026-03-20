@@ -142,6 +142,27 @@ impl<'a> Director<'a> {
         Ok(())
     }
 
+    /// Overwrite the stored attributes for a device with a fully-constructed
+    /// `DeviceAttributes` value.
+    ///
+    /// Unlike [`update_attributes`], this does **not** trigger platform
+    /// auto-detection or stale-override cleanup.  It is intended for API
+    /// handlers that have already computed the final attribute state and just
+    /// need to persist it.
+    pub async fn update_attributes_raw(
+        &self,
+        uuid: &Uuid,
+        attrs: &common::device_attributes::DeviceAttributes,
+    ) -> anyhow::Result<()> {
+        self.conn
+            .execute(
+                "UPDATE devices SET attributes = ?1 WHERE uuid = ?2",
+                (serde_json::to_string(attrs)?, *uuid),
+            )
+            .await?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub async fn create_plan(&self, plan: &Plan) -> anyhow::Result<i64> {
         crate::plans::store::create_plan(self.conn, plan).await
@@ -1600,7 +1621,6 @@ mod tests {
         // Create a platform first
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("ROOT".to_string()),
@@ -2038,7 +2058,6 @@ mod tests {
         // Create platform without the label the role needs
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("DATA1".to_string()), // Has DATA1, not ROOT
@@ -2103,7 +2122,6 @@ mod tests {
         // Create platform with ROOT label
         let platform_attrs = crate::platforms::PlatformAttributes {
             disks: vec![crate::platforms::PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: crate::platforms::DiskType::Ssd,
                 label: Some("ROOT".to_string()),

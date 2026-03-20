@@ -70,6 +70,7 @@ export type Device = {
     network_interfaces?: NetworkInterface[];
     bmc?: BmcInfo;
     bmc_config?: BmcConfig;
+    disk_label_overrides?: Record<string, string>;
     // Legacy fields
     mac_address?: string;
     static_ip?: string;
@@ -1098,5 +1099,85 @@ export async function getPlatformDevicesWithDetails(
     return response.json();
   } else {
     throw new Error('Failed to fetch platform devices');
+  }
+}
+
+// Device Warnings API
+
+export type DeviceWarning = {
+  id: number;
+  code: string;
+  message: string;
+  created_at?: string;
+}
+
+export async function getDeviceWarnings(uuid: string): Promise<DeviceWarning[]> {
+  const response = await fetch(`/ui/devices/${uuid}/warnings`);
+  if (response.ok) {
+    return response.json();
+  } else {
+    console.error('Error getting device warnings:', response.statusText);
+    throw new Error('Failed to fetch device warnings');
+  }
+}
+
+export async function dismissDeviceWarning(uuid: string, warningId: number): Promise<void> {
+  const response = await fetch(`/ui/devices/${uuid}/warnings/${warningId}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    console.error('Error dismissing device warning:', response.statusText);
+    throw new Error('Failed to dismiss device warning');
+  }
+}
+
+// Device Label Overrides API
+
+export type LabelOverrideRequest = {
+  label: string;
+  path: string;
+}
+
+export async function putDeviceLabelOverride(uuid: string, data: LabelOverrideRequest): Promise<void> {
+  const response = await fetch(`/ui/devices/${uuid}/label-overrides`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    console.error('Error setting label override:', response.statusText);
+    throw new Error('Failed to set label override');
+  }
+}
+
+export async function deleteDeviceLabelOverride(uuid: string, label: string): Promise<void> {
+  const response = await fetch(`/ui/devices/${uuid}/label-overrides/${encodeURIComponent(label)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    console.error('Error removing label override:', response.statusText);
+    throw new Error('Failed to remove label override');
+  }
+}
+
+// Platform Disk Label API
+
+export async function updatePlatformDiskLabel(
+  platformId: number,
+  diskIndex: number,
+  label: string | null
+): Promise<void> {
+  const response = await fetch(`/ui/platforms/${platformId}/disks/${diskIndex}/label`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label }),
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    if (response.status === 422 && errorData && errorData.error) {
+      throw new Error(errorData.error);
+    }
+    console.error('Error updating platform disk label:', response.statusText);
+    throw new Error('Failed to update disk label');
   }
 }

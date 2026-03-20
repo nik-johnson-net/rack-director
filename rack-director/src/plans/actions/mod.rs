@@ -277,6 +277,7 @@ mod tests {
         .unwrap();
 
         let device = Device {
+            id: 0,
             uuid: device_uuid,
             architecture: Architecture::X86_64,
             lifecycle: None,
@@ -320,6 +321,7 @@ mod tests {
 
         // Create device without a role
         let device = Device {
+            id: 0,
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440004").unwrap(),
             architecture: Architecture::X86_64,
             lifecycle: None,
@@ -401,6 +403,7 @@ mod tests {
         .unwrap();
 
         let device = Device {
+            id: 0,
             uuid: device_uuid,
             architecture: Architecture::X86_64,
             lifecycle: None,
@@ -474,6 +477,7 @@ mod tests {
         let conn = setup_test_db(test_connection_factory!()).await;
 
         let device = Device {
+            id: 0,
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440007").unwrap(),
             architecture: Architecture::X86_64,
             lifecycle: None,
@@ -502,6 +506,7 @@ mod tests {
         let conn = setup_test_db(test_connection_factory!()).await;
 
         let device = Device {
+            id: 0,
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440008").unwrap(),
             architecture: Architecture::X86_64,
             lifecycle: None,
@@ -536,6 +541,7 @@ mod tests {
         let conn = setup_test_db(test_connection_factory!()).await;
 
         let device = Device {
+            id: 0,
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440009").unwrap(),
             architecture: Architecture::X86_64,
             lifecycle: None,

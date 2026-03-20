@@ -3,6 +3,7 @@ mod detection;
 pub mod store;
 
 pub use detection::detect_or_create_platform;
+pub(crate) use detection::sort_disks_canonical;
 
 // Re-export types for convenience
 pub use common::device_attributes::DiskType;
@@ -58,11 +59,14 @@ pub struct PlatformAttributes {
     pub memory_gib: u32,
 }
 
-/// Platform disk specification with label
+/// Platform disk specification with label.
+///
+/// Describes disk hardware class only — no device path is stored. Paths vary by PCIe bus
+/// topology, so two identical servers in different physical slots would otherwise resolve
+/// labels to the wrong disks. Label resolution to actual device paths is performed at
+/// provisioning time by the agent (Phase 4).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlatformDisk {
-    /// Device path from hardware (e.g., "/dev/disk/by-path/pci-0000:00:1f.2-ata-1")
-    pub path: String,
     /// Disk size in GB
     pub size_gb: u64,
     /// Disk type (nvme, ssd, hdd)
@@ -123,7 +127,6 @@ mod tests {
     fn test_platform_attributes_serialization() {
         let attrs = PlatformAttributes {
             disks: vec![PlatformDisk {
-                path: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 size_gb: 480,
                 disk_type: DiskType::Ssd,
                 label: Some("ROOT".to_string()),
@@ -148,5 +151,33 @@ mod tests {
         let deserialized: PlatformAttributes = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(deserialized, attrs);
+    }
+
+    /// Old JSON that still contains a `path` field must deserialize without error.
+    ///
+    /// Serde ignores unknown fields by default, so existing database rows that were
+    /// created before `path` was removed will continue to load cleanly.
+    #[test]
+    fn test_platform_disk_deserializes_with_legacy_path_field() {
+        let legacy_json = r#"{
+            "disks": [
+                {
+                    "path": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
+                    "size_gb": 480,
+                    "disk_type": "ssd",
+                    "label": "ROOT"
+                }
+            ],
+            "nics": [],
+            "cpus": [],
+            "memory_gib": 32
+        }"#;
+
+        let attrs: PlatformAttributes = serde_json::from_str(legacy_json).unwrap();
+
+        assert_eq!(attrs.disks.len(), 1);
+        assert_eq!(attrs.disks[0].size_gb, 480);
+        assert_eq!(attrs.disks[0].disk_type, DiskType::Ssd);
+        assert_eq!(attrs.disks[0].label, Some("ROOT".to_string()));
     }
 }

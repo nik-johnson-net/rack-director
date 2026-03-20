@@ -39,6 +39,8 @@ import { TransitionDialog } from "@/components/devices/transition-dialog";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
 import { PlatformAssignment } from "@/components/devices/platform-assignment";
+import { DeviceWarnings } from "@/components/devices/device-warnings";
+import { DiskLabelOverrides } from "@/components/devices/disk-label-overrides";
 import { Label } from "@/components/ui/label";
 
 const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
@@ -210,6 +212,10 @@ function DeviceDetail() {
     navigate('/devices');
   };
 
+  if (!uuid) {
+    return <div className="p-4">Invalid device URL</div>;
+  }
+
   if (loading) {
     return <div className="p-4">Loading device...</div>;
   }
@@ -244,7 +250,7 @@ function DeviceDetail() {
             hostname={device.attributes?.hostname || device.uuid}
             onHostnameChange={async () => {
               // Refresh device data to get the updated hostname
-              const updatedDevice = await getDevice(uuid!);
+              const updatedDevice = await getDevice(uuid);
               setDevice(updatedDevice);
             }}
             onError={(errorMsg) => setError(errorMsg)}
@@ -261,6 +267,12 @@ function DeviceDetail() {
           {error}
         </div>
       )}
+
+      {/* Device Warnings */}
+      <DeviceWarnings
+        uuid={uuid}
+        onError={(errorMsg) => setError(errorMsg)}
+      />
 
       {/* Static IP Dialog */}
       <MakeStaticDialog
@@ -423,7 +435,7 @@ function DeviceDetail() {
         </Card>
 
         <PlatformAssignment
-          uuid={uuid!}
+          uuid={uuid}
           device={device}
           assignedPlatform={assignedPlatform}
           availablePlatforms={availablePlatforms}
@@ -439,6 +451,14 @@ function DeviceDetail() {
       <BmcConfiguration
         device={device}
         networks={networks}
+        onDeviceUpdate={(updatedDevice) => setDevice(updatedDevice)}
+        onError={(errorMsg) => setError(errorMsg)}
+      />
+
+      {/* Disk Label Overrides */}
+      <DiskLabelOverrides
+        uuid={uuid}
+        device={device}
         onDeviceUpdate={(updatedDevice) => setDevice(updatedDevice)}
         onError={(errorMsg) => setError(errorMsg)}
       />

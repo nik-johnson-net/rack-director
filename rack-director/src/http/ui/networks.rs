@@ -454,6 +454,7 @@ mod tests {
         bmc: Option<BmcInfo>,
     ) -> Device {
         Device {
+            id: 0,
             uuid,
             architecture: Architecture::X86_64,
             lifecycle: None,
