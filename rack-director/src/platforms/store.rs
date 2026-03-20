@@ -364,7 +364,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Original Name", None, &attrs, None).await.unwrap();
+        let platform = create(&db, "Original Name", None, &attrs, None)
+            .await
+            .unwrap();
 
         let updated = update(
             &db,
@@ -386,7 +388,9 @@ mod tests {
         let db = setup_db(test_database_path!()).await;
 
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs, None).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
 
         delete(&db, platform.id.unwrap()).await.unwrap();
         assert!(get(&db, platform.id.unwrap()).await.is_err());
@@ -398,7 +402,9 @@ mod tests {
 
         // Create platform
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs, None).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
 
         // Create device and assign platform
         let device_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
@@ -427,7 +433,9 @@ mod tests {
 
         // Create platform
         let attrs = sample_platform_attributes();
-        let platform = create(&db, "Test Platform", None, &attrs, None).await.unwrap();
+        let platform = create(&db, "Test Platform", None, &attrs, None)
+            .await
+            .unwrap();
         let platform_id = platform.id.unwrap();
 
         // Create device (without assigning platform yet)

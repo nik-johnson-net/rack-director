@@ -79,12 +79,14 @@ async fn update_role(
     let role = crate::roles::store::update(
         &conn,
         id,
-        req.name.as_deref(),
-        req.description.as_deref(),
-        req.os_id,
-        req.disk_layout.as_ref(),
-        req.config_template.as_ref(),
-        req.firmware_mode,
+        crate::roles::store::UpdateRoleParams {
+            name: req.name.as_deref(),
+            description: req.description.as_deref(),
+            os_id: req.os_id,
+            disk_layout: req.disk_layout.as_ref(),
+            config_template: req.config_template.as_ref(),
+            firmware_mode: req.firmware_mode,
+        },
     )
     .await?;
 

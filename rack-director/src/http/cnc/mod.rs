@@ -1487,10 +1487,17 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let role =
-            crate::roles::store::create(&conn, "test-role", None, os.id.unwrap(), &layout, None, None)
-                .await
-                .unwrap();
+        let role = crate::roles::store::create(
+            &conn,
+            "test-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Assign role to device
         director
@@ -1637,10 +1644,17 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let role =
-            crate::roles::store::create(&conn, "label-role", None, os.id.unwrap(), &layout, None, None)
-                .await
-                .unwrap();
+        let role = crate::roles::store::create(
+            &conn,
+            "label-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         director
             .assign_role_to_device(&test_uuid, role.id.unwrap())
             .await

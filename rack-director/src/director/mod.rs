@@ -2055,18 +2055,17 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let role =
-            crate::roles::store::create(
-                &conn,
-                "label-role",
-                None,
-                os.id.unwrap(),
-                &layout,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let role = crate::roles::store::create(
+            &conn,
+            "label-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Assign role should fail - labels used but no platform
         let result = director
@@ -2191,18 +2190,17 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let role =
-            crate::roles::store::create(
-                &conn,
-                "label-role",
-                None,
-                os.id.unwrap(),
-                &layout,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let role = crate::roles::store::create(
+            &conn,
+            "label-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Assign should succeed - label matches platform
         let result = director
@@ -2236,18 +2234,17 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let role =
-            crate::roles::store::create(
-                &conn,
-                "path-role",
-                None,
-                os.id.unwrap(),
-                &layout,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        let role = crate::roles::store::create(
+            &conn,
+            "path-role",
+            None,
+            os.id.unwrap(),
+            &layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Assign should succeed - no labels, no platform needed
         let result = director

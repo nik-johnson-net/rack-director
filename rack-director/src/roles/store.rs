@@ -4,6 +4,16 @@ use chrono::Utc;
 
 use crate::database::{Connection, FromRow};
 
+/// Parameters for updating a role. All fields are optional; only `Some` values are applied.
+pub struct UpdateRoleParams<'a> {
+    pub name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub os_id: Option<i64>,
+    pub disk_layout: Option<&'a DiskLayout>,
+    pub config_template: Option<&'a serde_json::Value>,
+    pub firmware_mode: Option<common::FirmwareMode>,
+}
+
 /// Create a new role.
 pub async fn create(
     conn: &Connection,
@@ -147,44 +157,35 @@ pub async fn list_with_os(conn: &Connection) -> Result<Vec<RoleWithOs>> {
 }
 
 /// Update a role.
-pub async fn update(
-    conn: &Connection,
-    id: i64,
-    name: Option<&str>,
-    description: Option<&str>,
-    os_id: Option<i64>,
-    disk_layout: Option<&DiskLayout>,
-    config_template: Option<&serde_json::Value>,
-    firmware_mode: Option<common::FirmwareMode>,
-) -> Result<Role> {
+pub async fn update(conn: &Connection, id: i64, params: UpdateRoleParams<'_>) -> Result<Role> {
     let now = Utc::now();
 
     let mut updates = Vec::new();
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
 
-    if let Some(name) = name {
+    if let Some(name) = params.name {
         updates.push("name = ?");
         values.push(rusqlite::types::Value::Text(name.to_string()));
     }
-    if let Some(description) = description {
+    if let Some(description) = params.description {
         updates.push("description = ?");
         values.push(rusqlite::types::Value::Text(description.to_string()));
     }
-    if let Some(os_id) = os_id {
+    if let Some(os_id) = params.os_id {
         updates.push("os_id = ?");
         values.push(rusqlite::types::Value::Integer(os_id));
     }
-    if let Some(disk_layout) = disk_layout {
+    if let Some(disk_layout) = params.disk_layout {
         updates.push("disk_layout = ?");
         let json = serde_json::to_string(disk_layout)?;
         values.push(rusqlite::types::Value::Text(json));
     }
-    if let Some(config_template) = config_template {
+    if let Some(config_template) = params.config_template {
         updates.push("config_template = ?");
         let json = serde_json::to_string(config_template)?;
         values.push(rusqlite::types::Value::Text(json));
     }
-    if let Some(mode) = firmware_mode {
+    if let Some(mode) = params.firmware_mode {
         updates.push("firmware_mode = ?");
         values.push(rusqlite::types::Value::Text(mode.as_db_str().to_string()));
     }
@@ -316,9 +317,17 @@ mod tests {
             zfs_pools: None,
         };
 
-        let role = create(&db, "web-server", None, os.id.unwrap(), &disk_layout, None, None)
-            .await
-            .unwrap();
+        let role = create(
+            &db,
+            "web-server",
+            None,
+            os.id.unwrap(),
+            &disk_layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let role_with_os = get_with_os(&db, role.id.unwrap()).await.unwrap();
         assert_eq!(role_with_os.os_name, "Ubuntu");
@@ -338,19 +347,29 @@ mod tests {
             zfs_pools: None,
         };
 
-        let role = create(&db, "web-server", None, os.id.unwrap(), &disk_layout, None, None)
-            .await
-            .unwrap();
+        let role = create(
+            &db,
+            "web-server",
+            None,
+            os.id.unwrap(),
+            &disk_layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let updated = update(
             &db,
             role.id.unwrap(),
-            Some("updated-name"),
-            Some("New description"),
-            None,
-            None,
-            None,
-            None,
+            UpdateRoleParams {
+                name: Some("updated-name"),
+                description: Some("New description"),
+                os_id: None,
+                disk_layout: None,
+                config_template: None,
+                firmware_mode: None,
+            },
         )
         .await
         .unwrap();
@@ -372,9 +391,17 @@ mod tests {
             zfs_pools: None,
         };
 
-        let role = create(&db, "web-server", None, os.id.unwrap(), &disk_layout, None, None)
-            .await
-            .unwrap();
+        let role = create(
+            &db,
+            "web-server",
+            None,
+            os.id.unwrap(),
+            &disk_layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         delete(&db, role.id.unwrap()).await.unwrap();
         assert!(get(&db, role.id.unwrap()).await.is_err());
@@ -455,9 +482,17 @@ mod tests {
             zfs_pools: None,
         };
 
-        let role = create(&db, "no-firmware-mode-role", None, os.id.unwrap(), &disk_layout, None, None)
-            .await
-            .unwrap();
+        let role = create(
+            &db,
+            "no-firmware-mode-role",
+            None,
+            os.id.unwrap(),
+            &disk_layout,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(role.firmware_mode.is_none());
 
@@ -485,12 +520,14 @@ mod tests {
         let updated = update(
             &db,
             role.id.unwrap(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(common::FirmwareMode::Uefi),
+            UpdateRoleParams {
+                name: None,
+                description: None,
+                os_id: None,
+                disk_layout: None,
+                config_template: None,
+                firmware_mode: Some(common::FirmwareMode::Uefi),
+            },
         )
         .await
         .unwrap();

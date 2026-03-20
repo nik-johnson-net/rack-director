@@ -112,11 +112,8 @@ mod tests {
 
     #[test]
     fn test_option_firmware_mode_roundtrip() {
-        let cases: Vec<Option<FirmwareMode>> = vec![
-            None,
-            Some(FirmwareMode::Bios),
-            Some(FirmwareMode::Uefi),
-        ];
+        let cases: Vec<Option<FirmwareMode>> =
+            vec![None, Some(FirmwareMode::Bios), Some(FirmwareMode::Uefi)];
         for case in cases {
             let json = serde_json::to_string(&case).unwrap();
             let deserialized: Option<FirmwareMode> = serde_json::from_str(&json).unwrap();

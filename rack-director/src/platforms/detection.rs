@@ -70,10 +70,10 @@ pub async fn find_matching_platform(
             continue;
         }
         // Check firmware mode constraint if both sides have a value
-        if let (Some(required), Some(actual)) = (platform.firmware_mode, device_boot_mode) {
-            if required != actual {
-                continue;
-            }
+        if let (Some(required), Some(actual)) = (platform.firmware_mode, device_boot_mode)
+            && required != actual
+        {
+            continue;
         }
         return Ok(platform.id);
     }
@@ -624,7 +624,9 @@ mod tests {
 
         // Search with exact same attributes
         let device_attrs = sample_platform_attributes();
-        let found = find_matching_platform(&db, &device_attrs, None).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert_eq!(found, platform.id);
     }
@@ -644,7 +646,9 @@ mod tests {
         device_attrs.disks[0].size_gb = 475; // 480 - 5 = within 5%
         device_attrs.disks[1].size_gb = 2050; // 2000 + 50 = within 5%
 
-        let found = find_matching_platform(&db, &device_attrs, None).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert_eq!(found, platform.id);
     }
@@ -663,7 +667,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.memory_gib = 33; // 32 + 1 = within tolerance
 
-        let found = find_matching_platform(&db, &device_attrs, None).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert_eq!(found, platform.id);
     }
@@ -681,7 +687,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks.pop();
 
-        let found = find_matching_platform(&db, &device_attrs, None).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
@@ -699,7 +707,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.disks[0].disk_type = DiskType::Nvme;
 
-        let found = find_matching_platform(&db, &device_attrs, None).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
@@ -717,7 +727,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.nics.pop();
 
-        let found = find_matching_platform(&db, &device_attrs, None).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
@@ -735,7 +747,9 @@ mod tests {
         let mut device_attrs = sample_platform_attributes();
         device_attrs.cpus[0].cores = 8;
 
-        let found = find_matching_platform(&db, &device_attrs, None).await.unwrap();
+        let found = find_matching_platform(&db, &device_attrs, None)
+            .await
+            .unwrap();
 
         assert!(found.is_none());
     }
