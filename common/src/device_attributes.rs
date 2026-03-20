@@ -214,8 +214,20 @@ pub struct DiskInfo {
     pub model: Option<String>,
 
     /// Disk serial number
+    /// Read from /sys/block/{name}/device/serial
     #[serde(default)]
     pub serial: Option<String>,
+
+    /// Disk vendor name
+    /// Read from /sys/block/{name}/device/vendor
+    #[serde(default)]
+    pub vendor: Option<String>,
+
+    /// World Wide Name (WWN) identifier for the disk
+    /// Obtained from a wwn-* symlink in /dev/disk/by-id/ or via udevadm ID_WWN.
+    /// Provides a globally unique, stable identity across reboots and slot changes.
+    #[serde(default)]
+    pub uuid: Option<String>,
 
     /// Stable bus-based device path (e.g., "/dev/disk/by-path/pci-0000:00:1f.2-ata-1")
     /// This path persists across reboots and is used for platform matching.
@@ -433,6 +445,8 @@ mod tests {
             disk_type: Some(DiskType::Ssd),
             model: Some("Samsung 860 EVO".to_string()),
             serial: Some("S3Z9NX0M123456".to_string()),
+            vendor: None,
+            uuid: None,
             path: Some("/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string()),
         };
 
@@ -747,6 +761,8 @@ mod tests {
             disk_type: Some(DiskType::Nvme),
             model: Some("Samsung 970 EVO".to_string()),
             serial: Some("S123456".to_string()),
+            vendor: None,
+            uuid: None,
             path: Some("/dev/disk/by-path/pci-0000:01:00.0-nvme-1".to_string()),
         };
 
@@ -887,5 +903,63 @@ mod tests {
 
         assert_eq!(deserialized.warnings.len(), 1);
         assert_eq!(deserialized.warnings[0], message);
+    }
+
+    #[test]
+    fn test_disk_info_vendor_and_uuid_fields() {
+        let disk = DiskInfo {
+            name: "sda".to_string(),
+            size: Some(480),
+            disk_type: Some(DiskType::Ssd),
+            model: Some("SAMSUNG MZWLL800HEHP".to_string()),
+            serial: Some("S123456789".to_string()),
+            vendor: Some("ATA".to_string()),
+            uuid: Some("0x5002538d41628a5e".to_string()),
+            path: Some("/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string()),
+        };
+
+        let json = serde_json::to_value(&disk).unwrap();
+        assert_eq!(json["vendor"], "ATA");
+        assert_eq!(json["uuid"], "0x5002538d41628a5e");
+
+        let json_str = serde_json::to_string(&disk).unwrap();
+        let deserialized: DiskInfo = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(deserialized.vendor, Some("ATA".to_string()));
+        assert_eq!(deserialized.uuid, Some("0x5002538d41628a5e".to_string()));
+    }
+
+    #[test]
+    fn test_disk_info_vendor_uuid_none_backward_compat() {
+        // Old JSON without vendor/uuid fields should deserialize with None values
+        let json = json!({
+            "name": "sda",
+            "size": 480,
+            "disk_type": "ssd",
+            "serial": "S123456789",
+            "path": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        });
+
+        let disk: DiskInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(disk.name, "sda");
+        assert!(disk.vendor.is_none());
+        assert!(disk.uuid.is_none());
+    }
+
+    #[test]
+    fn test_disk_info_vendor_uuid_null_in_json() {
+        // JSON with explicit null vendor/uuid should also deserialize correctly
+        let json = json!({
+            "name": "nvme0n1",
+            "size": 1000,
+            "disk_type": "nvme",
+            "vendor": null,
+            "uuid": null,
+            "path": "/dev/disk/by-path/pci-0000:01:00.0-nvme-1"
+        });
+
+        let disk: DiskInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(disk.name, "nvme0n1");
+        assert!(disk.vendor.is_none());
+        assert!(disk.uuid.is_none());
     }
 }
