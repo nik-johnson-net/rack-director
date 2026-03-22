@@ -15,7 +15,7 @@ const columns: ColumnDef<RoleWithOs>[] = [
       return (
         <button
           onClick={() => navigate(`/roles/${row.original.id}`)}
-          className="text-blue-600 hover:underline font-medium"
+          className="text-primary hover:underline font-medium"
         >
           {row.getValue("name")}
         </button>
@@ -27,7 +27,7 @@ const columns: ColumnDef<RoleWithOs>[] = [
     header: "Description",
     cell: ({ row }) => {
       const description = row.getValue("description") as string | undefined;
-      return description || <span className="text-gray-400">—</span>;
+      return description || <span className="text-muted-foreground">—</span>;
     },
   },
   {
@@ -42,11 +42,11 @@ const columns: ColumnDef<RoleWithOs>[] = [
     },
   },
   {
-    id: "partitions",
-    header: "Partitions",
+    id: "disks",
+    header: "Disks",
     cell: ({ row }) => {
-      const count = row.original.disk_layout.partitions.length;
-      return <span className="text-sm text-gray-600">{count} partition{count !== 1 ? 's' : ''}</span>;
+      const count = row.original.disk_layout.disks.length;
+      return <span className="text-sm text-muted-foreground">{count} disk{count !== 1 ? 's' : ''}</span>;
     },
   },
   {
