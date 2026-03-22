@@ -160,7 +160,7 @@ mod tests {
     }
 
     async fn create_platform(conn: &database::Connection) -> i64 {
-        crate::platforms::store::create(conn, "Test Platform", None, &sample_attributes())
+        crate::platforms::store::create(conn, "Test Platform", None, &sample_attributes(), None)
             .await
             .unwrap()
             .id
