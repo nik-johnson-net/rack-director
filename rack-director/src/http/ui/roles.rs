@@ -171,6 +171,272 @@ async fn delete_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operating_systems::Architecture;
+    use crate::platforms::{DiskType, PlatformAttributes, PlatformCpu, PlatformDisk, PlatformNic};
+    use crate::{database, test_connection_factory};
+    use common::disk_layout::{DiskConfig, DiskLayout, PartitionConfig};
+    use uuid::Uuid;
+
+    /// Set up a migrated in-memory database, returning a connection that keeps the
+    /// in-memory SQLite alive for the duration of the test.
+    async fn setup_db(factory: database::DatabaseConnectionFactory) -> database::Connection {
+        database::run_migrations(&factory).await.unwrap()
+    }
+
+    /// A deterministic UUID helper so tests produce readable failure messages.
+    fn test_uuid(n: u8) -> Uuid {
+        Uuid::parse_str(&format!("00000000-0000-0000-0000-0000000000{:02x}", n)).unwrap()
+    }
+
+    /// A label-based disk layout that references the "ROOT" platform label.
+    fn label_layout() -> DiskLayout {
+        DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        }
+    }
+
+    /// A label-based layout that references a label ("DATA1") that our test platform
+    /// does NOT define — used to trigger the compatibility failure path.
+    fn incompatible_label_layout() -> DiskLayout {
+        DiskLayout {
+            disks: vec![DiskConfig {
+                device: "DATA1".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "data".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("xfs".to_string()),
+                    mount_point: Some("/data".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        }
+    }
+
+    /// Platform attributes that only declare a "ROOT" disk label — no "DATA1".
+    fn root_only_platform_attrs() -> PlatformAttributes {
+        PlatformAttributes {
+            disks: vec![PlatformDisk {
+                size_gb: 480,
+                disk_type: DiskType::Ssd,
+                label: Some("ROOT".to_string()),
+            }],
+            nics: vec![PlatformNic {
+                logical: "eno1".to_string(),
+                speed_mbps: Some(1000),
+                label: Some("NIC1".to_string()),
+            }],
+            cpus: vec![PlatformCpu {
+                brand: "intel".to_string(),
+                model: "E3-1240 v3".to_string(),
+                cores: 4,
+            }],
+            memory_gib: 16,
+        }
+    }
+
+    /// Create an OS, returning its ID.
+    async fn create_os(conn: &database::Connection) -> i64 {
+        crate::operating_systems::store::create(conn, "Ubuntu", "24.04", None)
+            .await
+            .unwrap()
+            .id
+            .unwrap()
+    }
+
+    /// Create a role with the given disk layout, returning its ID.
+    async fn create_role(conn: &database::Connection, os_id: i64, layout: &DiskLayout) -> i64 {
+        crate::roles::store::create(conn, "test-role", None, os_id, layout, None, None)
+            .await
+            .unwrap()
+            .id
+            .unwrap()
+    }
+
+    /// Register a device and assign it to a role.
+    async fn create_device_with_role(conn: &database::Connection, uuid: Uuid, role_id: i64) {
+        crate::director::store::register_device(conn, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        crate::director::store::assign_role_to_device(conn, &uuid, role_id)
+            .await
+            .unwrap();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Tests for check_platform_compatibility
+    // ---------------------------------------------------------------------------
+
+    /// When no devices are assigned to the role, compatibility always passes regardless
+    /// of the disk layout — there is nothing to validate against.
+    #[tokio::test]
+    async fn test_no_devices_returns_ok() {
+        let conn = setup_db(test_connection_factory!()).await;
+
+        let os_id = create_os(&conn).await;
+        let role_id = create_role(&conn, os_id, &label_layout()).await;
+
+        let result = check_platform_compatibility(&conn, role_id, &label_layout()).await;
+        assert!(result.is_ok());
+    }
+
+    /// When assigned devices have no platform, they are skipped and the check passes.
+    ///
+    /// Devices without a platform will fail at provisioning time, which is handled
+    /// by the provisioning pipeline — the role update must not be blocked here.
+    #[tokio::test]
+    async fn test_devices_without_platform_returns_ok() {
+        let conn = setup_db(test_connection_factory!()).await;
+
+        let os_id = create_os(&conn).await;
+        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        let device_uuid = test_uuid(1);
+        create_device_with_role(&conn, device_uuid, role_id).await;
+        // Device has no platform assigned — platform_id remains NULL.
+
+        let result = check_platform_compatibility(&conn, role_id, &label_layout()).await;
+        assert!(result.is_ok());
+    }
+
+    /// When assigned devices have a platform that defines all labels required by the
+    /// layout, the check passes.
+    #[tokio::test]
+    async fn test_compatible_platform_returns_ok() {
+        let conn = setup_db(test_connection_factory!()).await;
+
+        let os_id = create_os(&conn).await;
+        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        let device_uuid = test_uuid(1);
+        create_device_with_role(&conn, device_uuid, role_id).await;
+
+        // Create a platform that has the "ROOT" label required by label_layout().
+        let platform = crate::platforms::store::create(
+            &conn,
+            "Test Platform",
+            None,
+            &root_only_platform_attrs(),
+            None,
+        )
+        .await
+        .unwrap();
+        let platform_id = platform.id.unwrap();
+
+        crate::director::store::assign_platform_to_device(&conn, &device_uuid, platform_id)
+            .await
+            .unwrap();
+
+        let result = check_platform_compatibility(&conn, role_id, &label_layout()).await;
+        assert!(result.is_ok());
+    }
+
+    /// When an assigned device has a platform that is missing a label referenced by
+    /// the layout, the check returns a ValidationError with the "disk_layout" key and
+    /// the platform name in the error message.
+    #[tokio::test]
+    async fn test_incompatible_platform_returns_validation_error() {
+        let conn = setup_db(test_connection_factory!()).await;
+
+        let os_id = create_os(&conn).await;
+        // The role itself uses a label-based layout — content doesn't affect this check.
+        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        let device_uuid = test_uuid(1);
+        create_device_with_role(&conn, device_uuid, role_id).await;
+
+        // Platform only has "ROOT" — the new layout asks for "DATA1" which is absent.
+        let platform = crate::platforms::store::create(
+            &conn,
+            "Sparse Platform",
+            None,
+            &root_only_platform_attrs(),
+            None,
+        )
+        .await
+        .unwrap();
+        let platform_id = platform.id.unwrap();
+
+        crate::director::store::assign_platform_to_device(&conn, &device_uuid, platform_id)
+            .await
+            .unwrap();
+
+        let result =
+            check_platform_compatibility(&conn, role_id, &incompatible_label_layout()).await;
+
+        match result {
+            Err(HttpError::ValidationError(errors)) => {
+                assert!(
+                    errors.contains_key("disk_layout"),
+                    "expected 'disk_layout' error key, got: {:?}",
+                    errors
+                );
+                let msg = &errors["disk_layout"];
+                assert!(
+                    msg.contains("Sparse Platform"),
+                    "error should mention the platform name, got: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("DATA1"),
+                    "error should mention the missing label, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("expected ValidationError, but got Ok"),
+            Err(_) => panic!("expected ValidationError variant, got a different HttpError variant"),
+        }
+    }
+
+    /// When two devices share the same platform, the platform is validated only once.
+    /// This test also verifies that duplicate platform IDs don't cause spurious errors.
+    #[tokio::test]
+    async fn test_multiple_devices_same_platform_returns_ok() {
+        let conn = setup_db(test_connection_factory!()).await;
+
+        let os_id = create_os(&conn).await;
+        let role_id = create_role(&conn, os_id, &label_layout()).await;
+
+        let platform = crate::platforms::store::create(
+            &conn,
+            "Shared Platform",
+            None,
+            &root_only_platform_attrs(),
+            None,
+        )
+        .await
+        .unwrap();
+        let platform_id = platform.id.unwrap();
+
+        for n in 1..=3u8 {
+            let uuid = test_uuid(n);
+            create_device_with_role(&conn, uuid, role_id).await;
+            crate::director::store::assign_platform_to_device(&conn, &uuid, platform_id)
+                .await
+                .unwrap();
+        }
+
+        let result = check_platform_compatibility(&conn, role_id, &label_layout()).await;
+        assert!(result.is_ok());
+    }
+}
+
 // List all devices with a specific role
 async fn list_role_devices(
     State(state): State<Arc<AppState>>,
