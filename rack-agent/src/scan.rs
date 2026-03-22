@@ -579,6 +579,10 @@ pub async fn device_scan(client: &RackDirector, scan_args: &DeviceScanArgs) -> R
 /// Detection is based on the presence of `/sys/firmware/efi`: if the directory
 /// exists, the system booted via UEFI; otherwise it booted via legacy BIOS.
 /// This is the standard Linux detection method and works for x86/x86_64.
+/// Detect whether the current system booted using BIOS or UEFI firmware.
+///
+/// UEFI systems expose `/sys/firmware/efi`; its absence implies BIOS boot.
+/// This check only makes sense on x86/x86_64 hardware.
 fn detect_firmware_mode() -> common::FirmwareMode {
     if std::path::Path::new("/sys/firmware/efi").exists() {
         common::FirmwareMode::Uefi
