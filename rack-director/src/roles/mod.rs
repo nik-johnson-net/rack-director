@@ -75,6 +75,10 @@ pub struct UpdateRoleRequest {
     pub disk_layout: Option<DiskLayout>,
     pub config_template: Option<serde_json::Value>,
     pub firmware_mode: Option<common::FirmwareMode>,
+    /// When true, clears firmware_mode to NULL regardless of the firmware_mode field.
+    /// Use this to remove a firmware constraint from a role.
+    #[serde(default)]
+    pub clear_firmware_mode: bool,
 }
 
 /// Request to assign a role to a device
