@@ -188,18 +188,16 @@ pub async fn delete(conn: &Connection, id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_database_path;
+    use crate::{database::DatabaseConnectionFactory, test_connection_factory};
     use common::disk_layout::{DiskConfig, DiskLayout, PartitionConfig};
 
-    async fn setup_db(path: String) -> Connection {
-        let factory =
-            crate::database::DatabaseConnectionFactory::new(std::path::PathBuf::from(path));
+    async fn setup_db(factory: DatabaseConnectionFactory) -> Connection {
         crate::database::run_migrations(&factory).await.unwrap()
     }
 
     #[tokio::test]
     async fn test_create_and_get_role() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         // Create OS first
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
@@ -247,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_roles() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -271,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_os() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -301,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_role() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -346,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_role() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -375,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_role_with_uefi_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -406,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_role_with_bios_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -437,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_role_without_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -468,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_role_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -507,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_firmware_mode_sets_null() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -564,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_firmware_mode_takes_precedence_over_firmware_mode_field() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
