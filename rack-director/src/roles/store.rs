@@ -12,6 +12,9 @@ pub struct UpdateRoleParams<'a> {
     pub disk_layout: Option<&'a DiskLayout>,
     pub config_template: Option<&'a serde_json::Value>,
     pub firmware_mode: Option<common::FirmwareMode>,
+    /// When true, sets firmware_mode to NULL regardless of the firmware_mode field.
+    /// Takes precedence over firmware_mode when both are provided.
+    pub clear_firmware_mode: bool,
 }
 
 /// Create a new role.
@@ -72,39 +75,13 @@ pub async fn get_with_os(conn: &Connection, id: i64) -> Result<RoleWithOs> {
     let role = conn
         .query_one(
             "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
-                    r.firmware_mode, r.created_at, r.updated_at, o.name, o.version
+                    r.firmware_mode, r.created_at, r.updated_at,
+                    o.name AS os_name, o.version AS os_version
              FROM roles r
              JOIN operating_systems o ON r.os_id = o.id
              WHERE r.id = ?1",
             (id,),
-            |row| {
-                let disk_layout_json: String = row.get(4)?;
-                let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
-                let config_json: Option<String> = row.get(5)?;
-                let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
-                let firmware_mode_str: Option<String> = row.get(6)?;
-                let firmware_mode = firmware_mode_str.and_then(|s| match s.as_str() {
-                    "bios" => Some(common::FirmwareMode::Bios),
-                    "uefi" => Some(common::FirmwareMode::Uefi),
-                    _ => None,
-                });
-
-                Ok(RoleWithOs {
-                    role: Role {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        description: row.get(2)?,
-                        os_id: row.get(3)?,
-                        disk_layout,
-                        config_template,
-                        firmware_mode,
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                    },
-                    os_name: row.get(9)?,
-                    os_version: row.get(10)?,
-                })
-            },
+            row_to_role_with_os,
         )
         .await
         .context("Role not found")?;
@@ -117,43 +94,29 @@ pub async fn list_with_os(conn: &Connection) -> Result<Vec<RoleWithOs>> {
     let roles = conn
         .query(
             "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
-                    r.firmware_mode, r.created_at, r.updated_at, o.name, o.version
+                    r.firmware_mode, r.created_at, r.updated_at,
+                    o.name AS os_name, o.version AS os_version
              FROM roles r
              JOIN operating_systems o ON r.os_id = o.id
              ORDER BY r.name",
             (),
-            |row| {
-                let disk_layout_json: String = row.get(4)?;
-                let disk_layout: DiskLayout = serde_json::from_str(&disk_layout_json).unwrap();
-                let config_json: Option<String> = row.get(5)?;
-                let config_template = config_json.and_then(|s| serde_json::from_str(&s).ok());
-                let firmware_mode_str: Option<String> = row.get(6)?;
-                let firmware_mode = firmware_mode_str.and_then(|s| match s.as_str() {
-                    "bios" => Some(common::FirmwareMode::Bios),
-                    "uefi" => Some(common::FirmwareMode::Uefi),
-                    _ => None,
-                });
-
-                Ok(RoleWithOs {
-                    role: Role {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        description: row.get(2)?,
-                        os_id: row.get(3)?,
-                        disk_layout,
-                        config_template,
-                        firmware_mode,
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                    },
-                    os_name: row.get(9)?,
-                    os_version: row.get(10)?,
-                })
-            },
+            row_to_role_with_os,
         )
         .await?;
 
     Ok(roles)
+}
+
+/// Map a database row from the roles-joined-with-OS query into a `RoleWithOs`.
+///
+/// Relies on named column access so callers are not sensitive to SELECT column order.
+/// The query must alias `o.name` as `os_name` and `o.version` as `os_version`.
+fn row_to_role_with_os(row: &rusqlite::Row) -> rusqlite::Result<RoleWithOs> {
+    Ok(RoleWithOs {
+        role: Role::from_row(row)?,
+        os_name: row.get("os_name")?,
+        os_version: row.get("os_version")?,
+    })
 }
 
 /// Update a role.
@@ -185,7 +148,9 @@ pub async fn update(conn: &Connection, id: i64, params: UpdateRoleParams<'_>) ->
         let json = serde_json::to_string(config_template)?;
         values.push(rusqlite::types::Value::Text(json));
     }
-    if let Some(mode) = params.firmware_mode {
+    if params.clear_firmware_mode {
+        updates.push("firmware_mode = NULL");
+    } else if let Some(mode) = params.firmware_mode {
         updates.push("firmware_mode = ?");
         values.push(rusqlite::types::Value::Text(mode.as_db_str().to_string()));
     }
@@ -223,18 +188,16 @@ pub async fn delete(conn: &Connection, id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_database_path;
+    use crate::{database::DatabaseConnectionFactory, test_connection_factory};
     use common::disk_layout::{DiskConfig, DiskLayout, PartitionConfig};
 
-    async fn setup_db(path: String) -> Connection {
-        let factory =
-            crate::database::DatabaseConnectionFactory::new(std::path::PathBuf::from(path));
+    async fn setup_db(factory: DatabaseConnectionFactory) -> Connection {
         crate::database::run_migrations(&factory).await.unwrap()
     }
 
     #[tokio::test]
     async fn test_create_and_get_role() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         // Create OS first
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
@@ -282,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_roles() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -306,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_with_os() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -336,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_role() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -369,6 +332,7 @@ mod tests {
                 disk_layout: None,
                 config_template: None,
                 firmware_mode: None,
+                clear_firmware_mode: false,
             },
         )
         .await
@@ -380,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_role() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -409,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_role_with_uefi_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -440,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_role_with_bios_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -471,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_role_without_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -502,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_role_firmware_mode() {
-        let db = setup_db(test_database_path!()).await;
+        let db = setup_db(test_connection_factory!()).await;
 
         let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
             .await
@@ -527,6 +491,7 @@ mod tests {
                 disk_layout: None,
                 config_template: None,
                 firmware_mode: Some(common::FirmwareMode::Uefi),
+                clear_firmware_mode: false,
             },
         )
         .await
@@ -536,5 +501,110 @@ mod tests {
 
         let retrieved = get(&db, role.id.unwrap()).await.unwrap();
         assert_eq!(retrieved.firmware_mode, Some(common::FirmwareMode::Uefi));
+    }
+
+    #[tokio::test]
+    async fn test_clear_firmware_mode_sets_null() {
+        let db = setup_db(test_connection_factory!()).await;
+
+        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+
+        // Create a role that starts with a firmware_mode set.
+        let role = create(
+            &db,
+            "role",
+            None,
+            os.id.unwrap(),
+            &disk_layout,
+            None,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(role.firmware_mode, Some(common::FirmwareMode::Uefi));
+
+        // clear_firmware_mode should set firmware_mode to NULL.
+        let updated = update(
+            &db,
+            role.id.unwrap(),
+            UpdateRoleParams {
+                name: None,
+                description: None,
+                os_id: None,
+                disk_layout: None,
+                config_template: None,
+                firmware_mode: None,
+                clear_firmware_mode: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            updated.firmware_mode.is_none(),
+            "firmware_mode should be cleared to None"
+        );
+
+        let retrieved = get(&db, role.id.unwrap()).await.unwrap();
+        assert!(
+            retrieved.firmware_mode.is_none(),
+            "firmware_mode should be None after clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_firmware_mode_takes_precedence_over_firmware_mode_field() {
+        let db = setup_db(test_connection_factory!()).await;
+
+        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
+            .await
+            .unwrap();
+        let disk_layout = DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+
+        let role = create(
+            &db,
+            "role",
+            None,
+            os.id.unwrap(),
+            &disk_layout,
+            None,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        // When clear_firmware_mode is true, firmware_mode field is ignored.
+        let updated = update(
+            &db,
+            role.id.unwrap(),
+            UpdateRoleParams {
+                name: None,
+                description: None,
+                os_id: None,
+                disk_layout: None,
+                config_template: None,
+                firmware_mode: Some(common::FirmwareMode::Bios),
+                clear_firmware_mode: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            updated.firmware_mode.is_none(),
+            "clear_firmware_mode=true must override the firmware_mode field"
+        );
     }
 }

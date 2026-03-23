@@ -441,17 +441,39 @@ export function getDownloadUrl(osId: number, arch: Architecture, component: stri
 
 // Roles Types
 
-export type Partition = {
-  device: string;
-  size: string;
+export type FirmwareMode = "bios" | "uefi";
+
+export type PartitionConfig = {
+  label: string;
+  size: string;              // "512MiB", "50%", "rest" or "*"
+  filesystem?: string;       // undefined if lvm consumer
+  mount_point?: string;
+  flags?: string[];          // "boot", "esp", "bios_grub", "lvm"
+  volume_group?: string;     // name of VG this partition feeds (when lvm flag set)
+};
+
+export type DiskConfig = {
+  device: string;            // Platform label "ROOT" or raw path (free text)
+  partition_table: string;   // "gpt" or "msdos"
+  partitions: PartitionConfig[];
+};
+
+export type LogicalVolume = {
+  name: string;
+  size: string;              // "50G", "100%FREE"
   filesystem: string;
   mount_point?: string;
-  flags: string[];
-}
+};
+
+export type VolumeGroup = {
+  name: string;
+  logical_volumes: LogicalVolume[];
+};
 
 export type DiskLayout = {
-  partitions: Partition[];
-}
+  disks: DiskConfig[];
+  volume_groups?: VolumeGroup[];
+};
 
 export type Role = {
   id?: number;
@@ -459,6 +481,7 @@ export type Role = {
   description?: string;
   os_id: number;
   disk_layout: DiskLayout;
+  firmware_mode?: FirmwareMode;
   config_template?: any;
   created_at?: string;
   updated_at?: string;
@@ -474,6 +497,7 @@ export type CreateRoleRequest = {
   description?: string;
   os_id: number;
   disk_layout: DiskLayout;
+  firmware_mode?: FirmwareMode;
   config_template?: any;
 }
 
@@ -482,6 +506,8 @@ export type UpdateRoleRequest = {
   description?: string;
   os_id?: number;
   disk_layout?: DiskLayout;
+  firmware_mode?: FirmwareMode;
+  clear_firmware_mode?: boolean;
   config_template?: any;
 }
 
@@ -514,33 +540,27 @@ export async function getRole(id: number): Promise<RoleWithOs> {
 }
 
 export async function createRole(data: CreateRoleRequest): Promise<Role> {
-  return fetch('/ui/roles', {
+  const response = await fetch('/ui/roles', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error creating role:', response.statusText);
-      throw new Error('Failed to create role');
-    }
   });
+  if (response.ok) {
+    return response.json();
+  }
+  return handleApiError(response, 'Failed to create role');
 }
 
 export async function updateRole(id: number, data: UpdateRoleRequest): Promise<Role> {
-  return fetch(`/ui/roles/${id}`, {
+  const response = await fetch(`/ui/roles/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error updating role:', response.statusText);
-      throw new Error('Failed to update role');
-    }
   });
+  if (response.ok) {
+    return response.json();
+  }
+  return handleApiError(response, 'Failed to update role');
 }
 
 export async function deleteRole(id: number): Promise<void> {

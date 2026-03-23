@@ -4,20 +4,30 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { FormField, FormTextareaField, FormSelectField } from "@/components/ui/form-field";
-import PartitionEditor from "@/components/roles/partition-editor";
-import { createRole, getOperatingSystems, type Partition, type OperatingSystem } from "@/lib/client";
+import DiskLayoutEditor from "@/components/roles/disk-layout-editor";
+import { useFieldErrors } from "@/hooks/useFieldErrors";
+import {
+  createRole,
+  getOperatingSystems,
+  ValidationError,
+  type DiskLayout,
+  type FirmwareMode,
+  type OperatingSystem,
+} from "@/lib/client";
 
 function RoleNew() {
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [osId, setOsId] = useState<number | null>(null);
-  const [partitions, setPartitions] = useState<Partition[]>([]);
+  const [diskLayout, setDiskLayout] = useState<DiskLayout>({ disks: [] });
+  const [firmwareMode, setFirmwareMode] = useState<FirmwareMode | undefined>(undefined);
   const [configTemplate, setConfigTemplate] = useState("");
   const [operatingSystems, setOperatingSystems] = useState<OperatingSystem[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadingOs, setLoadingOs] = useState(true);
+  const { fieldErrors, setErrors, clearAllErrors, clearFieldError } = useFieldErrors();
 
   useEffect(() => {
     const fetchOperatingSystems = async () => {
@@ -39,14 +49,10 @@ function RoleNew() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    clearAllErrors();
 
     if (!osId) {
       setError("Please select an operating system");
-      return;
-    }
-
-    if (partitions.length === 0) {
-      setError("Please add at least one partition");
       return;
     }
 
@@ -68,13 +74,19 @@ function RoleNew() {
         name,
         description: description || undefined,
         os_id: osId,
-        disk_layout: { partitions },
+        disk_layout: diskLayout,
+        firmware_mode: firmwareMode || undefined,
         config_template: parsedConfig,
       });
 
       navigate(`/roles/${role.id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create role");
+      if (err instanceof ValidationError) {
+        setErrors(err.errors);
+        setError("Please fix the validation errors below");
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to create role");
+      }
       setIsSubmitting(false);
     }
   };
@@ -95,7 +107,7 @@ function RoleNew() {
         />
         <Card>
           <CardContent className="pt-6">
-            <p className="text-center text-gray-600">
+            <p className="text-center text-muted-foreground">
               No operating systems available. Please create an operating system first.
             </p>
             <div className="flex justify-center mt-4">
@@ -135,8 +147,13 @@ function RoleNew() {
               label="Name"
               required
               value={name}
-              onChange={setName}
+              onChange={(val) => {
+                setName(val);
+                clearFieldError("name");
+              }}
               placeholder="e.g., web-server"
+              error={fieldErrors["name"]}
+              onClearError={() => clearFieldError("name")}
             />
 
             <FormTextareaField
@@ -160,6 +177,19 @@ function RoleNew() {
               }))}
               helperText="Supported architectures will be inferred from the selected OS"
             />
+
+            <FormSelectField
+              id="firmware_mode"
+              label="Firmware Mode"
+              value={firmwareMode || ""}
+              onChange={(val) => setFirmwareMode((val as FirmwareMode) || undefined)}
+              options={[
+                { value: "", label: "— No constraint" },
+                { value: "bios", label: "BIOS" },
+                { value: "uefi", label: "UEFI" },
+              ]}
+              helperText="If set, only devices with this firmware mode can be assigned this role"
+            />
           </CardContent>
         </Card>
 
@@ -172,7 +202,12 @@ function RoleNew() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <PartitionEditor partitions={partitions} onChange={setPartitions} />
+            <DiskLayoutEditor
+              value={diskLayout}
+              onChange={setDiskLayout}
+              errors={fieldErrors}
+              onClearError={clearFieldError}
+            />
           </CardContent>
         </Card>
 
@@ -199,7 +234,7 @@ function RoleNew() {
         </Card>
 
         {error && (
-          <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
+          <div className="bg-destructive/10 border border-destructive text-destructive px-4 py-3 rounded-md">
             {error}
           </div>
         )}

@@ -543,7 +543,12 @@ async fn get_disk_layout(
         .await
         .map_err(Error::ServerInternalError)?;
 
-    let layout = role.disk_layout;
+    let mut layout = role.disk_layout;
+
+    // Inject boot partition into the ROOT disk before label resolution, so that ROOT is
+    // still identifiable by label. After resolution the device field becomes a real path,
+    // making it impossible to determine which disk was ROOT.
+    crate::disk_layout::inject_boot_partition(&mut layout, device.attributes.boot_mode);
 
     // Check if layout uses labels
     if crate::disk_layout::layout_uses_labels(&layout) {

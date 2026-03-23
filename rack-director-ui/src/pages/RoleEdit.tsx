@@ -5,17 +5,21 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { FormField, FormTextareaField, FormSelectField } from "@/components/ui/form-field";
-import PartitionEditor from "@/components/roles/partition-editor";
+import DiskLayoutEditor from "@/components/roles/disk-layout-editor";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
+import { useFieldErrors } from "@/hooks/useFieldErrors";
 import {
   updateRole,
   deleteRole,
   getRoleDevices,
   getOperatingSystems,
+  ValidationError,
   type RoleWithOs,
-  type Partition,
+  type DiskLayout,
+  type FirmwareMode,
   type OperatingSystem,
 } from "@/lib/client";
+import { AlertBanner } from "@/components/ui/alert-banner";
 import { Trash2 } from "lucide-react";
 
 function RoleEdit() {
@@ -28,7 +32,12 @@ function RoleEdit() {
   const [name, setName] = useState(data.name);
   const [description, setDescription] = useState(data.description || "");
   const [osId, setOsId] = useState(data.os_id);
-  const [partitions, setPartitions] = useState<Partition[]>(data.disk_layout.partitions);
+  const [diskLayout, setDiskLayout] = useState<DiskLayout>(
+    data.disk_layout ?? { disks: [] }
+  );
+  const [firmwareMode, setFirmwareMode] = useState<FirmwareMode | undefined>(
+    data.firmware_mode
+  );
   const [configTemplate, setConfigTemplate] = useState(
     data.config_template ? JSON.stringify(data.config_template, null, 2) : ""
   );
@@ -36,7 +45,9 @@ function RoleEdit() {
   const [assignedDevices, setAssignedDevices] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const { fieldErrors, setErrors, clearAllErrors, clearFieldError } = useFieldErrors();
 
   useEffect(() => {
     const fetchData = async () => {
@@ -54,14 +65,15 @@ function RoleEdit() {
     fetchData();
   }, [roleId]);
 
+  useEffect(() => {
+    if (saveSuccess) window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [saveSuccess]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-
-    if (partitions.length === 0) {
-      setError("Please add at least one partition");
-      return;
-    }
+    setSaveSuccess(false);
+    clearAllErrors();
 
     // Validate JSON if provided
     let parsedConfig = undefined;
@@ -81,15 +93,21 @@ function RoleEdit() {
         name,
         description: description || undefined,
         os_id: osId,
-        disk_layout: { partitions },
+        disk_layout: diskLayout,
+        firmware_mode: firmwareMode || undefined,
+        clear_firmware_mode: firmwareMode === undefined ? true : undefined,
         config_template: parsedConfig,
       });
 
-      // Update local state with flattened data
       setData({ ...data, ...updated, os_name: data.os_name, os_version: data.os_version });
-      setError(null);
+      setSaveSuccess(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update role");
+      if (err instanceof ValidationError) {
+        setErrors(err.errors);
+        setError("Please fix the validation errors below");
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to update role");
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -121,11 +139,8 @@ function RoleEdit() {
         }
       />
 
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
-          {error}
-        </div>
-      )}
+      <AlertBanner variant="success" message={saveSuccess ? "Role saved successfully." : null} />
+      <AlertBanner variant="error" message={error} />
 
       {/* Assigned Devices */}
       {assignedDevices.length > 0 && (
@@ -163,7 +178,12 @@ function RoleEdit() {
               label="Name"
               required
               value={name}
-              onChange={setName}
+              onChange={(val) => {
+                setName(val);
+                clearFieldError("name");
+              }}
+              error={fieldErrors["name"]}
+              onClearError={() => clearFieldError("name")}
             />
 
             <FormTextareaField
@@ -186,6 +206,19 @@ function RoleEdit() {
               }))}
               helperText="Supported architectures are inferred from the selected OS"
             />
+
+            <FormSelectField
+              id="firmware_mode"
+              label="Firmware Mode"
+              value={firmwareMode || ""}
+              onChange={(val) => setFirmwareMode((val as FirmwareMode) || undefined)}
+              options={[
+                { value: "", label: "— No constraint" },
+                { value: "bios", label: "BIOS" },
+                { value: "uefi", label: "UEFI" },
+              ]}
+              helperText="If set, only devices with this firmware mode can be assigned this role"
+            />
           </CardContent>
         </Card>
 
@@ -198,7 +231,12 @@ function RoleEdit() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <PartitionEditor partitions={partitions} onChange={setPartitions} />
+            <DiskLayoutEditor
+              value={diskLayout}
+              onChange={setDiskLayout}
+              errors={fieldErrors}
+              onClearError={clearFieldError}
+            />
           </CardContent>
         </Card>
 

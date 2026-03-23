@@ -1,3 +1,7 @@
+New-Item -Name ".\.local-storage" -ItemType "Directory" -Force | Out-Null
+New-Item -Name ".\.local-storage\data" -ItemType "Directory" -Force | Out-Null
+New-Item -Name ".\.local-storage\tftp" -ItemType "Directory" -Force | Out-Null
+
 $rackdirector = Start-Job -Name 'rack-director' -ScriptBlock {
   Write-Host "Starting Rack Director"
   $env:LOG = 'debug'
@@ -6,7 +10,7 @@ $rackdirector = Start-Job -Name 'rack-director' -ScriptBlock {
   Set-Location -Path $using:PWD
   & 'cargo' @(
     'run', '--bin', 'rack-director', '--',
-    '--db-path', '.',
+    '--db-path', './.local-storage',
     '--storage-path', './.local-storage/data',
     '--tftp-path', './.local-storage/tftp',
     '--agent-images-path', './.local-storage/agent-image',
