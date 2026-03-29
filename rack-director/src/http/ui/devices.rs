@@ -13,6 +13,7 @@ use uuid::Uuid;
 use super::validation::validate_hostname;
 
 use crate::{
+    device_warnings,
     director::Director,
     http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
@@ -264,6 +265,11 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/ui/devices/pending", post(create_pending_device))
         .route("/ui/devices/pending", get(get_pending_devices))
         .route("/ui/devices/pending/{id}", delete(delete_pending_device))
+        .route("/ui/devices/{uuid}/warnings", get(get_warnings))
+        .route(
+            "/ui/devices/{uuid}/warnings/{warning_id}",
+            delete(delete_warning),
+        )
         .with_state(state)
 }
 
@@ -2145,5 +2151,48 @@ async fn get_device_role(
         Ok(Json(Some(role)))
     } else {
         Ok(Json(None))
+    }
+}
+
+/// `GET /ui/devices/{uuid}/warnings`
+///
+/// List all warnings for the device.
+async fn get_warnings(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Vec<device_warnings::DeviceWarning>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+
+    let device_id = device_warnings::get_device_id_by_uuid(&conn, &uuid)
+        .await?
+        .ok_or_else(|| HttpError::NotFound(format!("Device {} not found", uuid)))?;
+
+    let warnings = device_warnings::list_warnings(&conn, device_id).await?;
+    Ok(Json(warnings))
+}
+
+/// `DELETE /ui/devices/{uuid}/warnings/{warning_id}`
+///
+/// Dismiss (delete) a single warning by its numeric ID.
+///
+/// Returns `204 No Content` on success, `404` if the device or warning is not found.
+async fn delete_warning(
+    State(state): State<Arc<AppState>>,
+    Path((uuid, warning_id)): Path<(Uuid, i64)>,
+) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+
+    let device_id = device_warnings::get_device_id_by_uuid(&conn, &uuid)
+        .await?
+        .ok_or_else(|| HttpError::NotFound(format!("Device {} not found", uuid)))?;
+
+    let deleted = device_warnings::delete_warning(&conn, warning_id, device_id).await?;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(HttpError::NotFound(format!(
+            "Warning {} not found on device {}",
+            warning_id, uuid
+        )))
     }
 }

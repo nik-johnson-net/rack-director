@@ -37,6 +37,8 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | POST | `/ui/devices/pending` | Create pending device |
 | GET | `/ui/devices/pending` | List pending devices |
 | DELETE | `/ui/devices/pending/{id}` | Delete pending device |
+| GET | `/ui/devices/{uuid}/warnings` | List all warnings for a device |
+| DELETE | `/ui/devices/{uuid}/warnings/{warning_id}` | Dismiss a warning |
 
 ### DHCP Networks, Pools, Reservations (`networks.rs`)
 
