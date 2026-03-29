@@ -287,7 +287,9 @@ async fn main() -> Result<()> {
             let config = Config::load(&config_path)?;
             let server_config = config.get_server(&server)?;
             let state = ServerState::load_or_create(&server, &server_config)?;
-            agent::run(&conn, &state, &output).await?;
+            let cnc =
+                common::cnc::CncClient::new(&format!("http://{}:{}", conn.host, conn.http_port));
+            agent::run(&cnc, &state, &output).await?;
         }
 
         Commands::E2e { command } => match command {

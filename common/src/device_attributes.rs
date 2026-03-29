@@ -139,7 +139,7 @@ pub struct DeviceAttributes {
 }
 
 /// Network interface information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkInterface {
     /// Interface name (e.g., "eth0", "ens0")
     pub interface_name: String,
@@ -184,10 +184,15 @@ pub struct BmcInfo {
     pub ip_address_source: Option<String>,
 }
 
+fn default_ip_source() -> String {
+    "static".to_string()
+}
+
 /// BMC configuration to be applied
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BmcConfig {
     /// IP address source ("dhcp" or "static")
+    #[serde(default = "default_ip_source")]
     pub ip_address_source: String,
 
     /// Static IP address (required if ip_address_source is "static")
@@ -215,7 +220,7 @@ pub struct BmcConfig {
 }
 
 /// Disk drive information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiskInfo {
     /// Disk device name (e.g., "sda", "nvme0n1")
     pub name: String,

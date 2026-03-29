@@ -4,7 +4,7 @@ use common::disk_layout::{
 };
 use log::{debug, info};
 
-use crate::client::RackDirector;
+use common::cnc::CncClient;
 
 /// Partition disks according to the device's role disk layout
 ///
@@ -13,7 +13,7 @@ use crate::client::RackDirector;
 /// 2. Fetches the resolved disk layout from rack-director
 /// 3. Applies the layout using parted, lvm, zfs, and mkfs
 /// 4. Reports success or failure to rack-director
-pub async fn partition_disks(client: &RackDirector) -> Result<()> {
+pub async fn partition_disks(client: &CncClient) -> Result<()> {
     info!("Starting disk partitioning...");
 
     // Get device UUID

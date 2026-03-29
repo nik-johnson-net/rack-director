@@ -5,7 +5,6 @@ use clap::Subcommand;
 use log::{error, info, warn};
 
 mod bmc;
-mod client;
 mod daemon;
 mod partition;
 mod scan;
@@ -50,7 +49,7 @@ async fn main() {
             std::process::exit(1);
         });
 
-    let client = client::RackDirector::new(&director_url);
+    let client = common::cnc::CncClient::new(&director_url);
 
     // Determine which action to run: from CLI, from args.action, or from /proc/cmdline
     let result = if let Some(command) = args.command {

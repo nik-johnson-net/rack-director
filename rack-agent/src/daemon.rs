@@ -1,11 +1,9 @@
 use anyhow::Result;
 use log::{error, info, warn};
 
-use crate::{
-    bmc,
-    client::{PollAction, PollResponse, RackDirector},
-    partition, scan,
-};
+use common::cnc::{CncClient, PollAction, PollResponse};
+
+use crate::{bmc, partition, scan};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -26,7 +24,7 @@ enum LoopControl {
 /// every [`POLL_INTERVAL`] seconds when idle. Dispatches received actions to the
 /// appropriate handler. Exits cleanly on `RebootDevice` or `InstallOs` so that
 /// the caller (e.g. systemd) can handle the reboot.
-pub async fn run_daemon(client: &RackDirector) -> Result<()> {
+pub async fn run_daemon(client: &CncClient) -> Result<()> {
     let uuid = scan::read_dmi_for_uuid()
         .await?
         .ok_or_else(|| anyhow::anyhow!("Could not read device UUID from SMBIOS/DMI tables"))?;
@@ -63,7 +61,7 @@ pub async fn run_daemon(client: &RackDirector) -> Result<()> {
 /// rack-director via [`RackDirector::action_success`] /
 /// [`RackDirector::action_failed`]. The daemon only observes the outcome to
 /// decide whether to poll again immediately or stop.
-async fn dispatch_action(client: &RackDirector, action: &PollAction) -> LoopControl {
+async fn dispatch_action(client: &CncClient, action: &PollAction) -> LoopControl {
     match action {
         PollAction::DiscoverHardware => {
             let args = scan::DeviceScanArgs::new(false);
@@ -120,7 +118,6 @@ async fn dispatch_action(client: &RackDirector, action: &PollAction) -> LoopCont
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::PollAction;
 
     /// Test that `dispatch_action` returns `Exit` for `RebootDevice`.
     ///
@@ -136,7 +133,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = RackDirector::new(&server.url());
+        let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, &PollAction::RebootDevice).await;
 
         assert!(matches!(control, LoopControl::Exit));
@@ -151,7 +148,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = RackDirector::new(&server.url());
+        let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, &PollAction::InstallOs).await;
 
         assert!(matches!(control, LoopControl::Exit));
@@ -172,7 +169,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = RackDirector::new(&server.url());
+        let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, &PollAction::DiscoverHardware).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
@@ -188,7 +185,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = RackDirector::new(&server.url());
+        let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, &PollAction::PartitionDisks).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
@@ -204,7 +201,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = RackDirector::new(&server.url());
+        let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, &PollAction::ConfigureBmc).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));

@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
+use common::cnc::{BmcConfig, CncClient};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
-
-use crate::client::RackDirector;
 
 /// BMC information structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,26 +9,6 @@ pub struct BmcInfo {
     pub mac_address: String,
     pub ip_address: Option<String>,
     pub ip_address_source: String,
-}
-
-/// Default IP source for BMC configuration
-fn default_ip_source() -> String {
-    "static".to_string()
-}
-
-/// BMC configuration structure for setting IP and credentials
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BmcConfiguration {
-    #[serde(default = "default_ip_source")]
-    pub ip_address_source: String, // "static" or "dhcp"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ip_address: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub netmask: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
 }
 
 /// User slot information from ipmitool user list
@@ -238,7 +217,7 @@ fn parse_ipmitool_output(output: &str) -> Option<BmcInfo> {
 /// - IPMI user with specified username and password (with admin privileges)
 ///
 /// Returns an error if ipmitool is not available or if configuration fails.
-async fn configure_bmc(config: &BmcConfiguration, channel: u8) -> Result<()> {
+async fn configure_bmc(config: &BmcConfig, channel: u8) -> Result<()> {
     let ipsrc = config.ip_address_source.to_lowercase();
 
     info!(
@@ -258,30 +237,30 @@ async fn configure_bmc(config: &BmcConfiguration, channel: u8) -> Result<()> {
         // Require static IP fields
         let ip_address = config
             .ip_address
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ip_address required for static BMC configuration"))?;
+            .ok_or_else(|| anyhow::anyhow!("ip_address required for static BMC configuration"))?
+            .to_string();
         let netmask = config
             .netmask
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("netmask required for static BMC configuration"))?;
+            .ok_or_else(|| anyhow::anyhow!("netmask required for static BMC configuration"))?
+            .to_string();
         let gateway = config
             .gateway
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("gateway required for static BMC configuration"))?;
+            .ok_or_else(|| anyhow::anyhow!("gateway required for static BMC configuration"))?
+            .to_string();
 
         info!("Configuring static IP: {}", ip_address);
 
         // Set IP address
         run_ipmitool_command(
             channel,
-            &["lan", "set", &channel.to_string(), "ipaddr", ip_address],
+            &["lan", "set", &channel.to_string(), "ipaddr", &ip_address],
         )
         .await?;
 
         // Set netmask
         run_ipmitool_command(
             channel,
-            &["lan", "set", &channel.to_string(), "netmask", netmask],
+            &["lan", "set", &channel.to_string(), "netmask", &netmask],
         )
         .await?;
 
@@ -294,7 +273,7 @@ async fn configure_bmc(config: &BmcConfiguration, channel: u8) -> Result<()> {
                 &channel.to_string(),
                 "defgw",
                 "ipaddr",
-                gateway,
+                &gateway,
             ],
         )
         .await?;
@@ -515,7 +494,7 @@ async fn configure_ipmi_user(channel: u8, username: &str, password: &str) -> Res
 /// 2. Fetches BMC configuration from rack-director
 /// 3. Applies the configuration using ipmitool (tries detected LAN channels)
 /// 4. Reports success or failure to rack-director
-pub async fn bmc_configure(client: &RackDirector) -> Result<()> {
+pub async fn bmc_configure(client: &CncClient) -> Result<()> {
     info!("Starting BMC configuration...");
 
     // Get device UUID
@@ -551,16 +530,6 @@ pub async fn bmc_configure(client: &RackDirector) -> Result<()> {
         info!("  IP address: {}", ip);
     }
 
-    // Convert client BmcConfig to local BmcConfiguration
-    let config = BmcConfiguration {
-        ip_address_source: bmc_config.ip_address_source,
-        ip_address: bmc_config.ip_address,
-        netmask: bmc_config.netmask,
-        gateway: bmc_config.gateway,
-        username: bmc_config.username,
-        password: bmc_config.password,
-    };
-
     // Check if BMC hardware is actually present before trying to configure it.
     // On VMs (e.g., QEMU) there is no IPMI device, so ipmitool would fail.
     // Treat absence of BMC hardware as a graceful no-op rather than an error.
@@ -577,7 +546,7 @@ pub async fn bmc_configure(client: &RackDirector) -> Result<()> {
 
     for channel in channels {
         info!("Attempting to configure BMC on channel {}", channel);
-        match configure_bmc(&config, channel).await {
+        match configure_bmc(&bmc_config, channel).await {
             Ok(()) => {
                 info!("BMC configured successfully on channel {}", channel);
                 client.action_success(&uuid).await?;
@@ -604,30 +573,30 @@ pub async fn bmc_configure(client: &RackDirector) -> Result<()> {
 mod tests {
     use super::*;
 
-    // Tests for BMC configuration
+    // Tests for BMC configuration (uses common::device_attributes::BmcConfig)
 
-    /// Test BmcConfiguration with static IP configuration
+    /// Test BmcConfig with static IP configuration
     #[test]
     fn test_bmc_configuration_static() {
-        let config = BmcConfiguration {
+        let config = BmcConfig {
             ip_address_source: "static".to_string(),
-            ip_address: Some("192.168.1.100".to_string()),
-            netmask: Some("255.255.255.0".to_string()),
-            gateway: Some("192.168.1.1".to_string()),
+            ip_address: Some("192.168.1.100".parse().unwrap()),
+            netmask: Some("255.255.255.0".parse().unwrap()),
+            gateway: Some("192.168.1.1".parse().unwrap()),
             username: Some("admin".to_string()),
             password: Some("secret".to_string()),
         };
 
         assert_eq!(config.ip_address_source, "static");
-        assert_eq!(config.ip_address, Some("192.168.1.100".to_string()));
-        assert_eq!(config.netmask, Some("255.255.255.0".to_string()));
-        assert_eq!(config.gateway, Some("192.168.1.1".to_string()));
+        assert_eq!(config.ip_address, Some("192.168.1.100".parse().unwrap()));
+        assert_eq!(config.netmask, Some("255.255.255.0".parse().unwrap()));
+        assert_eq!(config.gateway, Some("192.168.1.1".parse().unwrap()));
     }
 
-    /// Test BmcConfiguration with DHCP configuration
+    /// Test BmcConfig with DHCP configuration
     #[test]
     fn test_bmc_configuration_dhcp() {
-        let config = BmcConfiguration {
+        let config = BmcConfig {
             ip_address_source: "dhcp".to_string(),
             ip_address: None,
             netmask: None,
@@ -642,14 +611,14 @@ mod tests {
         assert_eq!(config.gateway, None);
     }
 
-    /// Test BmcConfiguration serialization
+    /// Test BmcConfig serialization
     #[test]
     fn test_bmc_configuration_serialization() {
-        let config = BmcConfiguration {
+        let config = BmcConfig {
             ip_address_source: "static".to_string(),
-            ip_address: Some("192.168.1.100".to_string()),
-            netmask: Some("255.255.255.0".to_string()),
-            gateway: Some("192.168.1.1".to_string()),
+            ip_address: Some("192.168.1.100".parse().unwrap()),
+            netmask: Some("255.255.255.0".parse().unwrap()),
+            gateway: Some("192.168.1.1".parse().unwrap()),
             username: Some("admin".to_string()),
             password: Some("secret".to_string()),
         };
@@ -660,9 +629,12 @@ mod tests {
         assert!(json.contains("255.255.255.0"));
         assert!(json.contains("192.168.1.1"));
 
-        let deserialized: BmcConfiguration = serde_json::from_str(&json).unwrap();
+        let deserialized: BmcConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.ip_address_source, "static");
-        assert_eq!(deserialized.ip_address, Some("192.168.1.100".to_string()));
+        assert_eq!(
+            deserialized.ip_address,
+            Some("192.168.1.100".parse().unwrap())
+        );
     }
 
     // Tests for BMC detection

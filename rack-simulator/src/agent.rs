@@ -1,16 +1,16 @@
 use std::net::Ipv4Addr;
 
 use anyhow::Result;
-use serde_json::{Value, json};
 
-use crate::ConnectionConfig;
 use crate::hardware_profiles::HardwareConfig;
-use crate::http::HttpClient;
 use crate::output::Output;
 use crate::server::ServerState;
-use common::device_attributes::{CpuInfo, MemoryInfo};
+use common::cnc::CncClient;
+use common::device_attributes::{
+    BmcInfo, CpuInfo, DeviceAttributes, DiskInfo, MemoryInfo, NetworkInterface,
+};
 
-pub async fn run(conn: &ConnectionConfig, state: &ServerState, output: &Output) -> Result<()> {
+pub async fn run(cnc: &CncClient, state: &ServerState, output: &Output) -> Result<()> {
     output.step("AGENT SIMULATION");
     output.detail("UUID", &state.uuid);
     output.detail(
@@ -26,58 +26,44 @@ pub async fn run(conn: &ConnectionConfig, state: &ServerState, output: &Output) 
         state.mac_addresses.len()
     ));
 
-    let http = HttpClient::new(conn);
-
     output.info("Building hardware attributes...");
     let attributes = build_attributes(&state.hardware, &state.server_name, state);
 
-    output.info(&format!("Uploading {} attributes...", attributes.len()));
-    http.update_attributes(&state.uuid, attributes, output)
-        .await?;
+    output.info("Uploading hardware attributes...");
+    cnc.update_attributes(&state.uuid, &attributes).await?;
 
     output.info("Reporting action success...");
-    http.action_success(&state.uuid, output).await?;
+    cnc.action_success(&state.uuid).await?;
 
     output.success("Agent simulation complete");
 
     Ok(())
 }
 
+#[allow(clippy::field_reassign_with_default)]
 fn build_attributes(
     hardware: &HardwareConfig,
     server_name: &str,
     state: &ServerState,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut attrs = serde_json::Map::new();
+) -> DeviceAttributes {
+    let mut attributes = DeviceAttributes::default();
 
-    if let Some(manufacturer) = &hardware.manufacturer {
-        attrs.insert("manufacturer".to_string(), json!(manufacturer));
-    }
-
-    if let Some(product_name) = &hardware.product_name {
-        attrs.insert("product_name".to_string(), json!(product_name));
-    }
-
-    let serial = hardware
-        .serial_number
-        .clone()
-        .unwrap_or_else(|| generate_serial(server_name));
-    attrs.insert("serial_number".to_string(), json!(serial));
-
-    if let Some(bios_version) = &hardware.bios_version {
-        attrs.insert("bios_version".to_string(), json!(bios_version));
-    }
-
-    if let Some(bios_vendor) = &hardware.bios_vendor {
-        attrs.insert("bios_vendor".to_string(), json!(bios_vendor));
-    }
+    attributes.manufacturer = hardware.manufacturer.clone();
+    attributes.product_name = hardware.product_name.clone();
+    attributes.serial_number = Some(
+        hardware
+            .serial_number
+            .clone()
+            .unwrap_or_else(|| generate_serial(server_name)),
+    );
+    attributes.bios_version = hardware.bios_version.clone();
+    attributes.bios_vendor = hardware.bios_vendor.clone();
 
     let processor_count = hardware.processor_count.unwrap_or(1);
     let cores = hardware.cores_per_processor.unwrap_or(8);
     let threads = hardware.threads_per_core.unwrap_or(2);
 
-    // Build CPUs using CpuInfo type from common crate
-    let cpus: Vec<CpuInfo> = (0..processor_count)
+    attributes.cpus = (0..processor_count)
         .map(|i| CpuInfo {
             designation: Some(format!("CPU{}", i)),
             manufacturer: hardware.cpu_manufacturer.clone(),
@@ -87,48 +73,47 @@ fn build_attributes(
             speed_mhz: Some(2400),
         })
         .collect();
-    attrs.insert("cpus".to_string(), json!(cpus));
 
     let dimm_count = hardware.memory_dimm_count.unwrap_or(4);
     let dimm_size = hardware.memory_dimm_size_mb.unwrap_or(8192);
     let dimm_speed = hardware.memory_speed_mhz.unwrap_or(2400);
 
-    // Build memory using MemoryInfo type from common crate
-    let memory: Vec<MemoryInfo> = (0..dimm_count)
-        .map(|_i| MemoryInfo {
+    attributes.memory = (0..dimm_count)
+        .map(|_| MemoryInfo {
             size_mb: Some(dimm_size),
             speed_mhz: Some(dimm_speed as u32),
             manufacturer: Some("Samsung".to_string()),
             part_number: Some("M393A2K40DB3-CWE".to_string()),
         })
         .collect();
-    attrs.insert("memory".to_string(), json!(memory));
 
     let total_memory = hardware
         .total_memory_mb
         .unwrap_or((dimm_count as u64) * (dimm_size as u64));
-    attrs.insert("total_memory_mb".to_string(), json!(total_memory));
+    attributes.extra.insert(
+        "total_memory_mb".to_string(),
+        serde_json::json!(total_memory),
+    );
 
-    // Build disks array from hardware profile
-    let disks: Vec<_> = hardware
+    attributes.disks = hardware
         .disks
         .iter()
         .enumerate()
-        .map(|(idx, disk)| {
-            json!({
-                "name": disk.name,
-                "size": disk.size_gb,
-                "disk_type": disk.disk_type,
-                "model": disk.model,
-                "serial": format!("SIM{:08X}", simple_hash(format!("{}-{}", server_name, idx).as_bytes())),
-                "path": generate_disk_path(&disk.name, &disk.disk_type, idx),
-            })
+        .map(|(idx, disk)| DiskInfo {
+            name: disk.name.clone(),
+            size: Some(disk.size_gb),
+            disk_type: Some(disk.disk_type),
+            model: Some(disk.model.clone()),
+            serial: Some(format!(
+                "SIM{:08X}",
+                simple_hash(format!("{}-{}", server_name, idx).as_bytes())
+            )),
+            path: Some(generate_disk_path(&disk.name, &disk.disk_type, idx)),
+            ..Default::default()
         })
         .collect();
-    attrs.insert("disks".to_string(), json!(disks));
 
-    // Build network_interfaces array
-    let network_interfaces: Vec<_> = state
+    attributes.network_interfaces = state
         .mac_addresses
         .iter()
         .enumerate()
@@ -138,48 +123,38 @@ fn build_attributes(
                 .allocated_ips
                 .get(idx)
                 .and_then(|ip| ip.as_ref().map(|i| i.to_string()));
-
-            // Get NIC speed from hardware profile if available
             let speed_mbps = hardware.nics.get(idx).map(|nic| nic.speed_mbps);
 
-            json!({
-                "interface_name": format!("eth{}", idx),
-                "mac_address": mac_string,
-                "ip_address": ip_address,
-                "speed_mbps": speed_mbps,
-            })
+            NetworkInterface {
+                interface_name: format!("eth{}", idx),
+                mac_address: mac_string,
+                ip_address,
+                speed_mbps,
+                ..Default::default()
+            }
         })
         .collect();
-    attrs.insert("network_interfaces".to_string(), json!(network_interfaces));
 
-    // Also set legacy mac_address field for backward compatibility
+    // Legacy mac_address field for backward compatibility
     if let Some(primary_mac) = state.mac_addresses.first() {
-        attrs.insert(
-            "mac_address".to_string(),
-            json!(crate::server::format_mac(primary_mac)),
-        );
+        attributes.mac_address = Some(crate::server::format_mac(primary_mac));
     }
 
-    // Detect BMC
-    if let Some(bmc) = build_bmc(hardware, state) {
-        attrs.insert("bmc".to_owned(), bmc);
-    }
+    attributes.bmc = build_bmc(state);
 
-    attrs
+    attributes
 }
 
-fn build_bmc(_hardware: &HardwareConfig, state: &ServerState) -> Option<Value> {
-    if let Some(bmc) = &state.bmc {
-        let map = json!({
-            "mac_address": crate::server::format_mac(&bmc.mac_address),
-            "ip_address_source": bmc.ip_source,
-            "ip_address": bmc.allocated_ip.as_ref().unwrap_or(&Ipv4Addr::new(0, 0, 0 ,0)),
-            "ip_netmask": bmc.netmask.as_ref().unwrap_or(&Ipv4Addr::new(0, 0, 0, 0)),
-            "ip_gateway": bmc.gateway.as_ref().unwrap_or(&Ipv4Addr::new(0, 0, 0, 0)),
-        });
-        return Some(map);
-    }
-    None
+fn build_bmc(state: &ServerState) -> Option<BmcInfo> {
+    state.bmc.as_ref().map(|bmc| BmcInfo {
+        mac_address: crate::server::format_mac(&bmc.mac_address),
+        ip_address: bmc
+            .allocated_ip
+            .as_ref()
+            .map(|ip| ip.to_string())
+            .or_else(|| Some(Ipv4Addr::new(0, 0, 0, 0).to_string())),
+        ip_address_source: Some(bmc.ip_source.clone()),
+    })
 }
 
 fn generate_serial(seed: &str) -> String {
@@ -209,15 +184,10 @@ fn generate_disk_path(
 
     match disk_type {
         DiskType::Nvme => {
-            // NVMe devices typically appear on their own PCIe bus
-            // Format: pci-0000:01:00.0-nvme-1 (where 01 is bus, nvme-1 is namespace)
-            let bus = index + 1; // Start at bus 1 for first NVMe
+            let bus = index + 1;
             format!("/dev/disk/by-path/pci-0000:{:02x}:00.0-nvme-1", bus)
         }
         DiskType::Ssd | DiskType::Hdd => {
-            // SATA/SAS devices typically appear on a storage controller
-            // Format: pci-0000:00:1f.2-ata-1 (where 00:1f.2 is typical SATA controller)
-            // ATA port number increments per device
             let ata_port = index + 1;
             format!("/dev/disk/by-path/pci-0000:00:1f.2-ata-{}", ata_port)
         }
@@ -251,17 +221,13 @@ mod tests {
 
         let attrs = build_attributes(&state.hardware, &state.server_name, &state);
 
-        // Check network_interfaces
-        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
-        assert_eq!(network_interfaces.len(), 1);
+        assert_eq!(attrs.network_interfaces.len(), 1);
+        let nic0 = &attrs.network_interfaces[0];
+        assert_eq!(nic0.interface_name, "eth0");
+        assert_eq!(nic0.mac_address, "52:54:00:12:34:56");
+        assert_eq!(nic0.ip_address, Some("192.168.1.100".to_string()));
 
-        let nic0 = &network_interfaces[0];
-        assert_eq!(nic0["interface_name"], "eth0");
-        assert_eq!(nic0["mac_address"], "52:54:00:12:34:56");
-        assert_eq!(nic0["ip_address"], "192.168.1.100");
-
-        // Check legacy mac_address field
-        assert_eq!(attrs.get("mac_address").unwrap(), "52:54:00:12:34:56");
+        assert_eq!(attrs.mac_address, Some("52:54:00:12:34:56".to_string()));
     }
 
     #[test]
@@ -275,13 +241,7 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: Architecture::X64Uefi,
             hardware: HardwareConfig::default(),
-            bmc: Some(ResolvedBMC {
-                mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0xFF],
-                source: "DHCP".to_string(),
-                ip_address: None,
-                ip_network: None,
-                gateway: None,
-            }),
+            bmc: None,
         };
         let mut state = ServerState::new("test", &config);
         state.allocated_ips[0] = Some("192.168.1.100".parse().unwrap());
@@ -289,22 +249,18 @@ mod tests {
 
         let attrs = build_attributes(&state.hardware, &state.server_name, &state);
 
-        // Check network_interfaces
-        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
-        assert_eq!(network_interfaces.len(), 2);
+        assert_eq!(attrs.network_interfaces.len(), 2);
+        let nic0 = &attrs.network_interfaces[0];
+        assert_eq!(nic0.interface_name, "eth0");
+        assert_eq!(nic0.mac_address, "52:54:00:12:34:56");
+        assert_eq!(nic0.ip_address, Some("192.168.1.100".to_string()));
 
-        let nic0 = &network_interfaces[0];
-        assert_eq!(nic0["interface_name"], "eth0");
-        assert_eq!(nic0["mac_address"], "52:54:00:12:34:56");
-        assert_eq!(nic0["ip_address"], "192.168.1.100");
+        let nic1 = &attrs.network_interfaces[1];
+        assert_eq!(nic1.interface_name, "eth1");
+        assert_eq!(nic1.mac_address, "52:54:00:12:34:57");
+        assert_eq!(nic1.ip_address, Some("192.168.1.101".to_string()));
 
-        let nic1 = &network_interfaces[1];
-        assert_eq!(nic1["interface_name"], "eth1");
-        assert_eq!(nic1["mac_address"], "52:54:00:12:34:57");
-        assert_eq!(nic1["ip_address"], "192.168.1.101");
-
-        // Check legacy mac_address field (should be first NIC)
-        assert_eq!(attrs.get("mac_address").unwrap(), "52:54:00:12:34:56");
+        assert_eq!(attrs.mac_address, Some("52:54:00:12:34:56".to_string()));
     }
 
     #[test]
@@ -318,28 +274,15 @@ mod tests {
             uuid: "test-uuid".to_string(),
             architecture: Architecture::X64Uefi,
             hardware: HardwareConfig::default(),
-            bmc: Some(ResolvedBMC {
-                mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0xFF],
-                source: "DHCP".to_string(),
-                ip_address: None,
-                ip_network: None,
-                gateway: None,
-            }),
+            bmc: None,
         };
         let state = ServerState::new("test", &config);
 
         let attrs = build_attributes(&state.hardware, &state.server_name, &state);
 
-        // Check network_interfaces
-        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
-        assert_eq!(network_interfaces.len(), 2);
-
-        // IPs should be null when not allocated
-        let nic0 = &network_interfaces[0];
-        assert!(nic0["ip_address"].is_null());
-
-        let nic1 = &network_interfaces[1];
-        assert!(nic1["ip_address"].is_null());
+        assert_eq!(attrs.network_interfaces.len(), 2);
+        assert_eq!(attrs.network_interfaces[0].ip_address, None);
+        assert_eq!(attrs.network_interfaces[1].ip_address, None);
     }
 
     #[test]
@@ -376,27 +319,29 @@ mod tests {
 
         let attrs = build_attributes(&state.hardware, &state.server_name, &state);
 
-        // Check disks
-        let disks = attrs.get("disks").unwrap().as_array().unwrap();
-        assert_eq!(disks.len(), 2);
+        assert_eq!(attrs.disks.len(), 2);
 
-        // Verify NVMe disk
-        let nvme = &disks[0];
-        assert_eq!(nvme["name"], "nvme0n1");
-        assert_eq!(nvme["size"], 960);
-        assert_eq!(nvme["disk_type"], "nvme");
-        assert_eq!(nvme["model"], "Samsung 970 EVO");
-        assert!(nvme["serial"].as_str().unwrap().starts_with("SIM"));
-        assert_eq!(nvme["path"], "/dev/disk/by-path/pci-0000:01:00.0-nvme-1");
+        let nvme = &attrs.disks[0];
+        assert_eq!(nvme.name, "nvme0n1");
+        assert_eq!(nvme.size, Some(960));
+        assert_eq!(nvme.disk_type, Some(DiskType::Nvme));
+        assert_eq!(nvme.model, Some("Samsung 970 EVO".to_string()));
+        assert!(nvme.serial.as_ref().unwrap().starts_with("SIM"));
+        assert_eq!(
+            nvme.path,
+            Some("/dev/disk/by-path/pci-0000:01:00.0-nvme-1".to_string())
+        );
 
-        // Verify SSD disk
-        let ssd = &disks[1];
-        assert_eq!(ssd["name"], "sda");
-        assert_eq!(ssd["size"], 1920);
-        assert_eq!(ssd["disk_type"], "ssd");
-        assert_eq!(ssd["model"], "Samsung 860 EVO");
-        assert!(ssd["serial"].as_str().unwrap().starts_with("SIM"));
-        assert_eq!(ssd["path"], "/dev/disk/by-path/pci-0000:00:1f.2-ata-2");
+        let ssd = &attrs.disks[1];
+        assert_eq!(ssd.name, "sda");
+        assert_eq!(ssd.size, Some(1920));
+        assert_eq!(ssd.disk_type, Some(DiskType::Ssd));
+        assert_eq!(ssd.model, Some("Samsung 860 EVO".to_string()));
+        assert!(ssd.serial.as_ref().unwrap().starts_with("SIM"));
+        assert_eq!(
+            ssd.path,
+            Some("/dev/disk/by-path/pci-0000:00:1f.2-ata-2".to_string())
+        );
     }
 
     #[test]
@@ -424,30 +369,18 @@ mod tests {
 
         let attrs = build_attributes(&state.hardware, &state.server_name, &state);
 
-        // Check network_interfaces
-        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
-        assert_eq!(network_interfaces.len(), 2);
-
-        // Verify first NIC speed
-        let nic0 = &network_interfaces[0];
-        assert_eq!(nic0["interface_name"], "eth0");
-        assert_eq!(nic0["speed_mbps"], 10000);
-
-        // Verify second NIC speed
-        let nic1 = &network_interfaces[1];
-        assert_eq!(nic1["interface_name"], "eth1");
-        assert_eq!(nic1["speed_mbps"], 25000);
+        assert_eq!(attrs.network_interfaces.len(), 2);
+        assert_eq!(attrs.network_interfaces[0].speed_mbps, Some(10000));
+        assert_eq!(attrs.network_interfaces[1].speed_mbps, Some(25000));
     }
 
     #[test]
     fn test_build_attributes_nic_count_mismatch() {
         use crate::hardware_profiles::NicConfig;
 
-        // Hardware profile with only 1 NIC config
         let mut hardware = HardwareConfig::default();
         hardware.nics = vec![NicConfig { speed_mbps: 10000 }];
 
-        // Server with 2 MAC addresses
         let config = ResolvedServer {
             name: "test".to_string(),
             macs: vec![
@@ -463,17 +396,9 @@ mod tests {
 
         let attrs = build_attributes(&state.hardware, &state.server_name, &state);
 
-        // Check network_interfaces
-        let network_interfaces = attrs.get("network_interfaces").unwrap().as_array().unwrap();
-        assert_eq!(network_interfaces.len(), 2);
-
-        // First NIC should have speed from profile
-        let nic0 = &network_interfaces[0];
-        assert_eq!(nic0["speed_mbps"], 10000);
-
-        // Second NIC should have null speed (no config)
-        let nic1 = &network_interfaces[1];
-        assert!(nic1["speed_mbps"].is_null());
+        assert_eq!(attrs.network_interfaces.len(), 2);
+        assert_eq!(attrs.network_interfaces[0].speed_mbps, Some(10000));
+        assert_eq!(attrs.network_interfaces[1].speed_mbps, None);
     }
 
     #[test]
@@ -504,14 +429,12 @@ mod tests {
 
         let profile = hardware_profiles::dell_r640();
 
-        // Verify disk configuration
         assert_eq!(profile.disks.len(), 6);
         assert_eq!(profile.disks[0].name, "nvme0n1");
         assert_eq!(profile.disks[0].size_gb, 960);
         assert_eq!(profile.disks[1].name, "nvme1n1");
         assert_eq!(profile.disks[2].name, "sda");
 
-        // Verify NIC configuration
         assert_eq!(profile.nics.len(), 2);
         assert_eq!(profile.nics[0].speed_mbps, 10000);
         assert_eq!(profile.nics[1].speed_mbps, 10000);

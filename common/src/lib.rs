@@ -1,3 +1,4 @@
+pub mod cnc;
 pub mod device_attributes;
 pub mod disk_layout;
 pub mod firmware_mode;

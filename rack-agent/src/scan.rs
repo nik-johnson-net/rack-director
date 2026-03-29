@@ -5,7 +5,7 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::bmc;
-use crate::client::RackDirector;
+use common::cnc::CncClient;
 
 const SMBIOS_SYSFS: &str = "/sys/firmware/dmi/tables/smbios_entry_point";
 const DMI_SYSFS: &str = "/sys/firmware/dmi/tables/DMI";
@@ -546,7 +546,7 @@ fn extract_udevadm_id_wwn(output: &str, device_name: &str) -> Option<String> {
     None
 }
 
-pub async fn device_scan(client: &RackDirector, scan_args: &DeviceScanArgs) -> Result<()> {
+pub async fn device_scan(client: &CncClient, scan_args: &DeviceScanArgs) -> Result<()> {
     info!("Starting device hardware scan...");
 
     let hardware_info = read_dmi().await?;
@@ -592,7 +592,7 @@ fn detect_firmware_mode() -> common::FirmwareMode {
 }
 
 async fn perform_scan_and_upload(
-    client: &RackDirector,
+    client: &CncClient,
     uuid: &str,
     hardware_info: &HardwareInfo,
     scan_args: &DeviceScanArgs,
@@ -705,7 +705,7 @@ async fn perform_scan_and_upload(
 
     if !scan_args.no_upload {
         info!("Uploading hardware information to Rack Director...");
-        client.update_attributes(uuid, attributes).await?;
+        client.update_attributes(uuid, &attributes).await?;
 
         info!("Reporting discovery action success...");
         client.action_success(uuid).await?;

@@ -2,11 +2,13 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Result, anyhow};
 
+use common::cnc::CncClient;
+
 use crate::ConnectionConfig;
 use crate::agent;
 use crate::config::ResolvedServer;
 use crate::dhcp;
-use crate::http::{HttpClient, parse_ipxe_script};
+use crate::http::parse_ipxe_script;
 use crate::output::Output;
 use crate::server::ServerState;
 use crate::tftp;
@@ -21,6 +23,8 @@ enum BootAction {
     BootAgent,
     /// Boot an OS for installation
     BootOS,
+    /// Reboot Device
+    Reboot,
 }
 
 /// Follows iPXE chain redirects and determines the boot action
@@ -40,7 +44,7 @@ enum BootAction {
 ///
 /// Returns a `BootAction` indicating whether to boot locally, run the agent, or install an OS.
 async fn follow_ipxe_chains(
-    http: &HttpClient,
+    cnc: &CncClient,
     state: &ServerState,
     output: &Output,
 ) -> Result<BootAction> {
@@ -62,9 +66,15 @@ async fn follow_ipxe_chains(
             chain_depth
         ));
 
-        let script = http
-            .get_ipxe_script(uuid_param, mac_param.as_deref(), output)
+        output.info(&format!(
+            "GET /cnc/ipxe (uuid={:?}, mac={:?})",
+            uuid_param,
+            mac_param.as_deref()
+        ));
+        let script = cnc
+            .get_ipxe_script(uuid_param, mac_param.as_deref())
             .await?;
+        output.info(&format!("Response: {} bytes", script.len()));
         let parsed = parse_ipxe_script(&script);
 
         // Check for chain command
@@ -104,6 +114,8 @@ async fn follow_ipxe_chains(
             return Ok(BootAction::Sanboot);
         } else if parsed.is_exit {
             return Ok(BootAction::NextDevice);
+        } else if parsed.is_reboot {
+            return Ok(BootAction::Reboot);
         }
 
         // Check for kernel boot
@@ -111,8 +123,8 @@ async fn follow_ipxe_chains(
             // Verify images are accessible
             if kernel_url.contains("/cnc/agent-images/") {
                 output.info("Verifying agent images are accessible...");
-                let _kernel = http.get_agent_image("vmlinuz", output).await?;
-                let _initrd = http.get_agent_image("initramfs.img", output).await?;
+                let _kernel = cnc.get_agent_image("vmlinuz").await?;
+                let _initrd = cnc.get_agent_image("initramfs.img").await?;
                 output.success("Agent images verified");
 
                 return Ok(BootAction::BootAgent);
@@ -169,7 +181,7 @@ pub async fn full_boot(
     }
 
     let mut state = ServerState::new(&server_config.name, server_config);
-    let http = HttpClient::new(conn);
+    let cnc = CncClient::new(&format!("http://{}:{}", conn.host, conn.http_port));
 
     let mut sanboot_count = 0;
     let mut exit_count = 0;
@@ -221,7 +233,7 @@ pub async fn full_boot(
         output.step("Phase 2: iPXE Boot Script");
         dhcp::request_as_ipxe(conn, &mut state, output)?;
 
-        let boot_action = follow_ipxe_chains(&http, &state, output).await?;
+        let boot_action = follow_ipxe_chains(&cnc, &state, output).await?;
 
         // Phase 3: Act on boot decision
         match boot_action {
@@ -259,7 +271,7 @@ pub async fn full_boot(
             }
             BootAction::BootAgent => {
                 output.step("Phase 3: Agent Execution");
-                agent::run(conn, &state, output).await?;
+                agent::run(&cnc, &state, output).await?;
 
                 output.info("Agent execution complete - simulating reboot...");
                 state.clear_state();
@@ -269,6 +281,10 @@ pub async fn full_boot(
             BootAction::BootOS => {
                 output.info("OS installation boot detected - stopping simulation");
                 output.info("(OS installation is not simulated by rack-simulator)");
+                break;
+            }
+            BootAction::Reboot => {
+                output.success("Reboot detected - Simulation Complete");
                 break;
             }
         }
@@ -295,7 +311,7 @@ pub async fn ipxe_boot(
 
     dhcp::request_as_ipxe(conn, state, output)?;
 
-    let http = HttpClient::new(conn);
+    let cnc = CncClient::new(&format!("http://{}:{}", conn.host, conn.http_port));
 
     // Get primary MAC address for queries
     let mac = if !state.mac_addresses.is_empty() {
@@ -305,7 +321,7 @@ pub async fn ipxe_boot(
     };
 
     output.info("Fetching iPXE script (without UUID)...");
-    let script1 = http.get_ipxe_script(None, mac.as_deref(), output).await?;
+    let script1 = cnc.get_ipxe_script(None, mac.as_deref()).await?;
     let parsed1 = parse_ipxe_script(&script1);
 
     if let Some(chain_url) = &parsed1.chain_url {
@@ -313,8 +329,8 @@ pub async fn ipxe_boot(
     }
 
     output.info("Fetching iPXE script (with UUID)...");
-    let script2 = http
-        .get_ipxe_script(Some(&state.uuid), mac.as_deref(), output)
+    let script2 = cnc
+        .get_ipxe_script(Some(&state.uuid), mac.as_deref())
         .await?;
     let parsed2 = parse_ipxe_script(&script2);
 
@@ -338,8 +354,8 @@ pub async fn ipxe_boot(
             output.info("Boot target: Agent image (discovery)");
 
             output.info("Verifying agent image is accessible...");
-            let _kernel = http.get_agent_image("vmlinuz", output).await?;
-            let _initrd = http.get_agent_image("initramfs.img", output).await?;
+            let _kernel = cnc.get_agent_image("vmlinuz").await?;
+            let _initrd = cnc.get_agent_image("initramfs.img").await?;
 
             output.success("Agent images verified");
         } else {
