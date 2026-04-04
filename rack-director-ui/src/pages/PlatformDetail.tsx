@@ -1,22 +1,27 @@
 import { useState } from "react";
 import { useLoaderData, useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { PageHeader } from "@/components/ui/page-header";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
-import { deletePlatform, updatePlatformDiskLabel, type Platform, type PlatformDisk, type PlatformDeviceInfo, type DeviceLifecycle } from "@/lib/client";
-import { Pencil, Trash2, Server, Check, X } from "lucide-react";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
+import {
+  deletePlatform,
+  updatePlatformDiskLabel,
+  type Platform,
+  type PlatformDisk,
+  type PlatformDeviceInfo,
+  type DeviceLifecycle,
+} from "@/lib/client";
+import { Pencil, Trash2, Server, Check, X } from "lucide-react";
 
 interface LoaderData {
   platform: Platform;
   devices: PlatformDeviceInfo[];
 }
 
-// Inline label editor for a single platform disk row
+// ── Inline disk label editor ──────────────────────────────────────────────────
+
 interface DiskLabelCellProps {
   platformId: number;
   diskIndex: number;
@@ -25,7 +30,13 @@ interface DiskLabelCellProps {
   onError: (msg: string) => void;
 }
 
-function DiskLabelCell({ platformId, diskIndex, disk, onLabelChange, onError }: DiskLabelCellProps) {
+function DiskLabelCell({
+  platformId,
+  diskIndex,
+  disk,
+  onLabelChange,
+  onError,
+}: DiskLabelCellProps) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(disk.label ?? "");
   const [saving, setSaving] = useState(false);
@@ -52,7 +63,6 @@ function DiskLabelCell({ platformId, diskIndex, disk, onLabelChange, onError }: 
       setEditing(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to update label";
-      // Show inline validation error for 422-style duplicate label errors
       setValidationError(msg);
       onError(msg);
     } finally {
@@ -71,7 +81,7 @@ function DiskLabelCell({ platformId, diskIndex, disk, onLabelChange, onError }: 
               setValidationError(null);
             }}
             placeholder="e.g., ROOT"
-            className={`h-7 w-28 text-xs ${validationError ? "border-destructive" : ""}`}
+            className={`h-6 w-24 text-xs ${validationError ? "border-status-broken" : ""}`}
             disabled={saving}
             aria-label="Disk label"
             aria-invalid={!!validationError}
@@ -82,29 +92,25 @@ function DiskLabelCell({ platformId, diskIndex, disk, onLabelChange, onError }: 
             autoFocus
           />
           {validationError && (
-            <p className="text-xs text-destructive">{validationError}</p>
+            <p className="text-xs text-status-broken">{validationError}</p>
           )}
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-primary"
+        <button
           onClick={handleSave}
           disabled={saving}
           aria-label="Save label"
+          className="p-0.5 text-accent hover:text-accent-hover disabled:opacity-50 cursor-pointer"
         >
-          <Check className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-muted-foreground"
+          <Check className="h-3 w-3" />
+        </button>
+        <button
           onClick={handleCancel}
           disabled={saving}
           aria-label="Cancel edit"
+          className="p-0.5 text-text-muted hover:text-text-secondary disabled:opacity-50 cursor-pointer"
         >
-          <X className="h-3.5 w-3.5" />
-        </Button>
+          <X className="h-3 w-3" />
+        </button>
       </div>
     );
   }
@@ -112,47 +118,71 @@ function DiskLabelCell({ platformId, diskIndex, disk, onLabelChange, onError }: 
   return (
     <div className="flex items-center gap-1 group">
       {disk.label ? (
-        <Badge variant="secondary" className="text-xs">{disk.label}</Badge>
+        <span className="text-xs font-semibold text-accent">{disk.label}</span>
       ) : (
-        <span className="text-muted-foreground text-xs">—</span>
+        <span className="text-text-muted text-xs">—</span>
       )}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+      <button
         onClick={handleEdit}
         aria-label={`Edit label for disk ${diskIndex + 1}`}
+        className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 text-text-muted hover:text-text-secondary cursor-pointer"
       >
         <Pencil className="h-3 w-3" />
-      </Button>
+      </button>
     </div>
   );
 }
+
+// ── Card wrapper ──────────────────────────────────────────────────────────────
+
+function SectionCard({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border border-border bg-bg-surface">
+      <div className="px-4 py-3 border-b border-border">
+        <span className="text-sm font-semibold text-text-primary">{title}</span>
+      </div>
+      <div className="px-4 py-4">{children}</div>
+    </div>
+  );
+}
+
+// ── KV row ────────────────────────────────────────────────────────────────────
+
+function KVRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="grid gap-x-4 py-1" style={{ gridTemplateColumns: "140px 1fr" }}>
+      <span className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+        {label}
+      </span>
+      <span className="text-xs text-text-primary">{value}</span>
+    </div>
+  );
+}
+
+// ── Page component ────────────────────────────────────────────────────────────
 
 function PlatformDetail() {
   const loaderData = useLoaderData<LoaderData>();
   const navigate = useNavigate();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Local copy of disks so label edits reflect immediately without reload
-  const [disks, setDisks] = useState<PlatformDisk[]>(loaderData.platform.attributes.disks);
+  const [disks, setDisks] = useState<PlatformDisk[]>(
+    loaderData.platform.attributes.disks
+  );
 
   const platform = loaderData.platform;
   const devices = loaderData.devices;
 
-  // Count devices by lifecycle state (excluding "removed")
-  const deviceCounts = devices.reduce((acc, device) => {
-    const lifecycle = device.lifecycle as DeviceLifecycle | undefined;
-    if (lifecycle && lifecycle !== "removed") {
-      acc[lifecycle] = (acc[lifecycle] || 0) + 1;
-    }
-    return acc;
-  }, {} as Record<DeviceLifecycle, number>);
-
   const handleDelete = async () => {
     try {
       await deletePlatform(platform.id!);
-      navigate('/platforms');
+      navigate("/platforms");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete platform");
       setDeleteDialogOpen(false);
@@ -165,56 +195,30 @@ function PlatformDetail() {
     );
   };
 
-  const formatNicSummary = () => {
-    const nics = platform.attributes.nics;
-    if (nics.length === 0) return "No NICs";
-
-    return nics.map((nic, index) => (
-      <div key={index} className="text-sm">
-        <span className="font-mono text-xs">{nic.logical}</span>
-        {nic.speed_gbps && (
-          <span className="text-muted-foreground ml-2">({nic.speed_gbps} Gbps)</span>
-        )}
-        {nic.label && <Badge variant="secondary" className="ml-2 text-xs">{nic.label}</Badge>}
-      </div>
-    ));
-  };
-
-  const formatCpuSummary = () => {
-    const cpus = platform.attributes.cpus;
-    if (cpus.length === 0) return "No CPUs";
-
-    return cpus.map((cpu, index) => (
-      <div key={index} className="text-sm">
-        {cpu.brand} {cpu.model}
-        <span className="text-muted-foreground ml-2">({cpu.cores} cores)</span>
-      </div>
-    ));
-  };
+  const cpus = platform.attributes.cpus;
+  const nics = platform.attributes.nics;
 
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div>
       <PageHeader
         breadcrumbs={[
+          { label: "Dashboard", href: "/" },
           { label: "Platforms", href: "/platforms" },
-          { label: platform.name }
+          { label: platform.name },
         ]}
         title={platform.name}
         description={platform.description || "Hardware platform configuration"}
         actions={
           <div className="flex gap-2">
             <Button
-              variant="outline"
+              variant="secondary"
               onClick={() => navigate(`/platforms/${platform.id}/edit`)}
             >
-              <Pencil className="h-4 w-4 mr-2" />
+              <Pencil className="h-3.5 w-3.5" />
               Edit
             </Button>
-            <Button
-              variant="destructive"
-              onClick={() => setDeleteDialogOpen(true)}
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
+            <Button variant="danger" onClick={() => setDeleteDialogOpen(true)}>
+              <Trash2 className="h-3.5 w-3.5" />
               Delete
             </Button>
           </div>
@@ -222,56 +226,114 @@ function PlatformDetail() {
       />
 
       {error && (
-        <div className="bg-destructive/10 border border-destructive text-destructive px-4 py-3 rounded-md">
+        <div className="mb-4 px-3 py-2 border border-error-border bg-error-bg text-status-broken text-xs">
           {error}
         </div>
       )}
 
-      {/* Hardware Summary */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle>CPUs</CardTitle>
-            <CardDescription>Processor configuration</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {formatCpuSummary()}
-          </CardContent>
-        </Card>
+      <div className="space-y-4" style={{ maxWidth: 900 }}>
+        {/* Platform info KV */}
+        <SectionCard title="Platform Info">
+          <div className="space-y-0.5">
+            <KVRow label="Name" value={platform.name} />
+            <KVRow
+              label="Description"
+              value={
+                platform.description ? (
+                  platform.description
+                ) : (
+                  <span className="text-text-muted">—</span>
+                )
+              }
+            />
+            <KVRow
+              label="Memory"
+              value={
+                platform.attributes.memory_gib > 0
+                  ? `${platform.attributes.memory_gib} GiB`
+                  : "—"
+              }
+            />
+            <KVRow
+              label="CPUs"
+              value={
+                cpus.length === 0 ? (
+                  <span className="text-text-muted">—</span>
+                ) : (
+                  <div className="space-y-0.5">
+                    {cpus.map((cpu, i) => (
+                      <div key={i} className="text-xs text-text-primary">
+                        {cpu.brand} {cpu.model}{" "}
+                        <span className="text-text-secondary">({cpu.cores} cores)</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              }
+            />
+            <KVRow
+              label="NICs"
+              value={
+                nics.length === 0 ? (
+                  <span className="text-text-muted">—</span>
+                ) : (
+                  <div className="space-y-0.5">
+                    {nics.map((nic, i) => (
+                      <div key={i} className="text-xs text-text-primary">
+                        {nic.logical}
+                        {nic.speed_gbps != null && (
+                          <span className="text-text-secondary ml-2">
+                            ({nic.speed_gbps} Gbps)
+                          </span>
+                        )}
+                        {nic.label && (
+                          <span className="ml-2 text-accent font-semibold">
+                            {nic.label}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )
+              }
+            />
+          </div>
+        </SectionCard>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Memory</CardTitle>
-            <CardDescription>System memory</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{platform.attributes.memory_gib} GiB</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Disks</CardTitle>
-            <CardDescription>Storage devices — click the pencil icon to edit a label</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {disks.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No disks</p>
-            ) : (
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="border-b">
-                    <th className="text-left py-2 pr-4 font-medium text-xs text-muted-foreground">Size</th>
-                    <th className="text-left py-2 pr-4 font-medium text-xs text-muted-foreground">Type</th>
-                    <th className="text-left py-2 font-medium text-xs text-muted-foreground">Label</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {disks.map((disk, index) => (
-                    <tr key={index} className="border-b last:border-0">
-                      <td className="py-2 pr-4 text-xs">{disk.size_gb} GB</td>
-                      <td className="py-2 pr-4 text-xs uppercase">{disk.disk_type}</td>
-                      <td className="py-2">
+        {/* Disks table */}
+        <SectionCard title="Disks">
+          {disks.length === 0 ? (
+            <p className="text-xs text-text-muted">No disks defined.</p>
+          ) : (
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="bg-bg-raised">
+                  {["#", "Size", "Type", "Label"].map((col, i) => (
+                    <th
+                      key={i}
+                      className="text-left text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] px-3 py-2 border-b border-border"
+                    >
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {disks.map((disk, index) => {
+                  const rowBg = index % 2 === 0 ? "bg-bg-surface" : "bg-bg-base";
+                  return (
+                    <tr
+                      key={index}
+                      className={`${rowBg} border-b border-border-muted last:border-b-0`}
+                    >
+                      <td className="px-3 py-2 text-xs text-text-muted">{index + 1}</td>
+                      <td className="px-3 py-2 text-xs text-text-primary">
+                        {disk.size_gb} GB
+                      </td>
+                      <td className="px-3 py-2 text-xs text-text-secondary uppercase">
+                        {disk.disk_type}
+                      </td>
+                      <td className="px-3 py-2">
                         <DiskLabelCell
                           platformId={platform.id!}
                           diskIndex={index}
@@ -281,112 +343,85 @@ function PlatformDetail() {
                         />
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </CardContent>
-        </Card>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </SectionCard>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Network Interfaces</CardTitle>
-            <CardDescription>NICs configuration</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {formatNicSummary()}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Device Count by Lifecycle */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Assigned Devices</CardTitle>
-          <CardDescription>
-            Devices using this platform configuration
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {Object.entries(deviceCounts).map(([lifecycle, count]) => (
-              <div key={lifecycle} className="flex items-center gap-2">
-                <StatusBadge status={lifecycle as DeviceLifecycle} />
-                <span className="text-sm font-medium">{count}</span>
-              </div>
-            ))}
-            {Object.keys(deviceCounts).length === 0 && (
-              <span className="text-muted-foreground text-sm">No devices assigned</span>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Device List */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Device List</CardTitle>
-          <CardDescription>
-            All devices assigned to this platform
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+        {/* Assigned devices table */}
+        <SectionCard title={`Assigned Devices (${devices.length})`}>
           {devices.length === 0 ? (
-            <div className="text-center py-12">
-              <Server className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <h3 className="text-lg font-semibold mb-2">No devices assigned</h3>
-              <p className="text-muted-foreground">
-                Devices will be automatically assigned to this platform when their hardware matches.
+            <div className="flex flex-col items-center justify-center py-8 text-center">
+              <Server className="size-8 text-text-muted mb-3 opacity-50" />
+              <p className="text-sm font-medium text-text-primary mb-1">
+                No devices assigned
+              </p>
+              <p className="text-xs text-text-secondary">
+                Devices will be automatically assigned when their hardware matches.
               </p>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>UUID</TableHead>
-                    <TableHead>Hostname</TableHead>
-                    <TableHead>Lifecycle</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {devices.map((device) => (
-                    <TableRow key={device.uuid}>
-                      <TableCell>
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="bg-bg-raised">
+                  {["UUID", "Hostname", "Lifecycle"].map((col, i) => (
+                    <th
+                      key={i}
+                      className="text-left text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] px-3 py-2 border-b border-border"
+                    >
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {devices.map((device, idx) => {
+                  const rowBg = idx % 2 === 0 ? "bg-bg-surface" : "bg-bg-base";
+                  return (
+                    <tr
+                      key={device.uuid}
+                      className={`${rowBg} hover:bg-bg-raised border-b border-border-muted last:border-b-0 transition-colors`}
+                    >
+                      <td className="px-3 py-2">
                         <button
                           onClick={() => navigate(`/devices/${device.uuid}`)}
-                          className="text-primary hover:underline font-mono text-xs"
+                          className="text-xs font-mono text-accent hover:text-accent-hover transition-colors cursor-pointer"
                         >
                           {device.uuid}
                         </button>
-                      </TableCell>
-                      <TableCell>
-                        {device.hostname || <span className="text-muted-foreground">—</span>}
-                      </TableCell>
-                      <TableCell>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-text-primary">
+                        {device.hostname || (
+                          <span className="text-text-muted">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
                         {device.lifecycle ? (
                           <StatusBadge status={device.lifecycle as DeviceLifecycle} />
                         ) : (
-                          <span className="text-muted-foreground">—</span>
+                          <span className="text-text-muted text-xs">—</span>
                         )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
-        </CardContent>
-      </Card>
+        </SectionCard>
+      </div>
 
-      {/* Delete Confirmation Dialog */}
       <DeleteConfirmationDialog
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}
         title="Delete Platform?"
         description={
           devices.length > 0
-            ? `This platform has ${devices.length} assigned device${devices.length !== 1 ? 's' : ''}. Deleting this platform will remove the platform assignment from these devices. This action cannot be undone.`
+            ? `This platform has ${devices.length} assigned device${
+                devices.length !== 1 ? "s" : ""
+              }. Deleting this platform will remove the platform assignment from these devices. This action cannot be undone.`
             : `Are you sure you want to delete the platform "${platform.name}"? This action cannot be undone.`
         }
         onConfirm={handleDelete}

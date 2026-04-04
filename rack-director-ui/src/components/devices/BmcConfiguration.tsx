@@ -135,10 +135,10 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
          device.attributes.bmc?.ip_address_source &&
          ((device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "static") ||
           (!device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "dhcp")) && (
-          <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+          <div className="p-3 bg-warn-bg border border-warn-border rounded-md">
             <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-yellow-700" />
-              <div className="text-sm text-yellow-800">
+              <Clock className="h-4 w-4 text-status-unprovisioned" />
+              <div className="text-sm text-text-primary">
                 <strong>Configuration Pending:</strong> BMC is currently using{" "}
                 <strong>{device.attributes.bmc.ip_address_source.includes("DHCP") ? "DHCP" : "Static IP"}</strong>,
                 but configured for{" "}
@@ -194,10 +194,10 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
                     }
                   }}
                   placeholder="e.g., 192.168.1.100"
-                  className={`font-mono ${validationErrors["bmc_config.ip_address"] ? "border-red-500" : ""}`}
+                  className={`font-mono ${validationErrors["bmc_config.ip_address"] ? "border-destructive" : ""}`}
                 />
                 {validationErrors["bmc_config.ip_address"] && (
-                  <div className="flex items-center gap-2 text-sm text-red-600">
+                  <div className="flex items-center gap-2 text-sm text-destructive">
                     <AlertCircle className="h-4 w-4" />
                     <span>{validationErrors["bmc_config.ip_address"]}</span>
                   </div>
@@ -221,10 +221,10 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
                     }
                   }}
                   placeholder="e.g., 255.255.255.0"
-                  className={`font-mono ${validationErrors["bmc_config.netmask"] ? "border-red-500" : ""}`}
+                  className={`font-mono ${validationErrors["bmc_config.netmask"] ? "border-destructive" : ""}`}
                 />
                 {validationErrors["bmc_config.netmask"] && (
-                  <div className="flex items-center gap-2 text-sm text-red-600">
+                  <div className="flex items-center gap-2 text-sm text-destructive">
                     <AlertCircle className="h-4 w-4" />
                     <span>{validationErrors["bmc_config.netmask"]}</span>
                   </div>
@@ -248,10 +248,10 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
                     }
                   }}
                   placeholder="e.g., 192.168.1.1"
-                  className={`font-mono ${validationErrors["bmc_config.gateway"] ? "border-red-500" : ""}`}
+                  className={`font-mono ${validationErrors["bmc_config.gateway"] ? "border-destructive" : ""}`}
                 />
                 {validationErrors["bmc_config.gateway"] && (
-                  <div className="flex items-center gap-2 text-sm text-red-600">
+                  <div className="flex items-center gap-2 text-sm text-destructive">
                     <AlertCircle className="h-4 w-4" />
                     <span>{validationErrors["bmc_config.gateway"]}</span>
                   </div>

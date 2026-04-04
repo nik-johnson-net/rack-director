@@ -64,19 +64,19 @@ export function PlatformAssignment({
       </CardHeader>
       <CardContent className="space-y-4">
         {assignedPlatform ? (
-          <div className="p-3 bg-blue-50 rounded border border-blue-200">
-            <div className="font-medium text-blue-900">
+          <div className="p-3 bg-bg-raised rounded border border-border">
+            <div className="font-medium text-text-primary">
               <button
                 onClick={() => navigate(`/platforms/${assignedPlatform.id}`)}
-                className="text-blue-600 hover:underline"
+                className="text-accent hover:underline"
               >
                 {assignedPlatform.name}
               </button>
             </div>
-            <div className="text-xs text-blue-700 mt-1">
+            <div className="text-xs text-text-secondary mt-1">
               {assignedPlatform.description || "No description"}
             </div>
-            <div className="text-xs text-muted-foreground mt-2">
+            <div className="text-xs text-text-muted mt-2">
               {assignedPlatform.attributes.cpus.length > 0 && (
                 <div>
                   {assignedPlatform.attributes.cpus.length}x {assignedPlatform.attributes.cpus[0].cores}-core {assignedPlatform.attributes.cpus[0].brand}
@@ -99,7 +99,7 @@ export function PlatformAssignment({
             id="platform"
             value={selectedPlatformId || ''}
             onChange={(e) => setSelectedPlatformId(e.target.value ? parseInt(e.target.value) : null)}
-            className="w-full border rounded-md px-3 py-2"
+            className="w-full bg-bg-raised border border-border rounded text-text-primary px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
           >
             <option value="">No platform</option>
             {availablePlatforms.map((platform) => (

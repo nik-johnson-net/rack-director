@@ -1,10 +1,7 @@
 import { useState } from "react";
 import type { DhcpPool, CreateDhcpPoolRequest } from "@/lib/client";
 import { createPool, updatePool, deletePool } from "@/lib/client";
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
-import { Button } from "../ui/button";
-import { Pencil, Trash2, Plus } from "lucide-react";
+import { PoolDialog } from "./pool-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,7 +13,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { PoolDialog } from "./pool-dialog";
 
 interface PoolsTableProps {
   networkId: number;
@@ -36,7 +32,6 @@ export default function PoolsTable({ networkId, pools, onPoolsChange }: PoolsTab
 
   const handleEdit = async (pool: CreateDhcpPoolRequest) => {
     if (!editingPool) return;
-
     const updated = await updatePool(editingPool.id, pool);
     onPoolsChange(pools.map((p) => (p.id === updated.id ? updated : p)));
     setEditingPool(null);
@@ -52,83 +47,16 @@ export default function PoolsTable({ networkId, pools, onPoolsChange }: PoolsTab
     setIsEditDialogOpen(true);
   };
 
-  const columns: ColumnDef<DhcpPool>[] = [
-    {
-      accessorKey: "name",
-      header: "Pool Name",
-      cell: ({ row }) => (
-        <span className="font-medium">{row.getValue("name")}</span>
-      ),
-    },
-    {
-      accessorKey: "range_start",
-      header: "Range Start",
-      cell: ({ row }) => (
-        <span className="font-mono text-xs">{row.getValue("range_start")}</span>
-      ),
-    },
-    {
-      accessorKey: "range_end",
-      header: "Range End",
-      cell: ({ row }) => (
-        <span className="font-mono text-xs">{row.getValue("range_end")}</span>
-      ),
-    },
-    {
-      id: "actions",
-      header: "Actions",
-      cell: ({ row }) => {
-        return (
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => openEditDialog(row.original)}
-              aria-label="Edit pool"
-            >
-              <Pencil className="h-4 w-4" />
-            </Button>
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="outline" size="sm" aria-label="Delete pool">
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete Pool</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    Are you sure you want to delete the pool "{row.original.name}"? This action
-                    cannot be undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction onClick={() => handleDelete(row.original.id)}>
-                    Delete
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </div>
-        );
-      },
-    },
-  ];
-
-  const table = useReactTable({
-    data: pools,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  });
-
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="flex justify-end">
-        <Button size="sm" onClick={() => setIsAddDialogOpen(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          Add Pool
-        </Button>
+        <button
+          type="button"
+          onClick={() => setIsAddDialogOpen(true)}
+          className="px-3 py-1 h-7 text-xs font-medium bg-accent text-bg-base border border-accent rounded hover:bg-accent-hover transition-colors cursor-pointer"
+        >
+          + Add Pool
+        </button>
       </div>
 
       <PoolDialog
@@ -144,45 +72,88 @@ export default function PoolsTable({ networkId, pools, onPoolsChange }: PoolsTab
         onSave={handleEdit}
       />
 
-      <div className="overflow-hidden rounded-md border">
-        <Table>
-          <TableHeader>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => {
-                  return (
-                    <TableHead key={header.id}>
-                      {header.isPlaceholder
-                        ? null
-                        : flexRender(header.column.columnDef.header, header.getContext())}
-                    </TableHead>
-                  );
-                })}
-              </TableRow>
-            ))}
-          </TableHeader>
-          <TableBody>
-            {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow key={row.id} data-state={row.getIsSelected() && "selected"}>
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
+      <div className="border border-border">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="bg-bg-raised">
+              {(["Pool Name", "Range Start", "Range End", ""] as const).map((col, i) => (
+                <th
+                  key={i}
+                  className="text-left text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] px-3 py-2 border-b border-border"
+                >
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {pools.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="px-3 py-6 text-center text-xs text-text-muted">
+                  No pools defined. Add a pool to allocate IP addresses dynamically.
+                </td>
+              </tr>
             ) : (
-              <TableRow>
-                <TableCell colSpan={columns.length} className="h-24 text-center">
-                  <div className="text-muted-foreground">
-                    No pools defined. Add a pool to allocate IP addresses dynamically.
-                  </div>
-                </TableCell>
-              </TableRow>
+              pools.map((pool, idx) => {
+                const rowBg = idx % 2 === 0 ? "bg-bg-surface" : "bg-bg-base";
+                return (
+                  <tr
+                    key={pool.id}
+                    className={`${rowBg} hover:bg-bg-raised border-b border-border-muted last:border-b-0 transition-colors`}
+                  >
+                    <td className="px-3 py-2 text-xs text-text-primary font-medium">
+                      {pool.name}
+                    </td>
+                    <td className="px-3 py-2 text-xs font-mono text-text-secondary">
+                      {pool.range_start}
+                    </td>
+                    <td className="px-3 py-2 text-xs font-mono text-text-secondary">
+                      {pool.range_end}
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => openEditDialog(pool)}
+                          className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
+                          aria-label={`Edit pool ${pool.name}`}
+                        >
+                          edit
+                        </button>
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <button
+                              type="button"
+                              className="text-xs text-text-muted hover:text-status-broken transition-colors cursor-pointer"
+                              aria-label={`Delete pool ${pool.name}`}
+                            >
+                              delete
+                            </button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Delete Pool</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                Are you sure you want to delete the pool "{pool.name}"? This action
+                                cannot be undone.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction onClick={() => handleDelete(pool.id)}>
+                                Delete
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
             )}
-          </TableBody>
-        </Table>
+          </tbody>
+        </table>
       </div>
     </div>
   );

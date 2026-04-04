@@ -2,12 +2,7 @@ import { useState, useEffect } from "react";
 import { useLoaderData, useNavigate, useParams } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
-import { FormField, FormTextareaField } from "@/components/ui/form-field";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import {
   Dialog,
@@ -36,6 +31,15 @@ import {
 } from "@/lib/client";
 import { Trash2, Plus, ChevronDown, ChevronRight } from "lucide-react";
 
+const labelCls =
+  "block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1";
+
+const inputCls =
+  "w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted";
+
+const selectCls =
+  "w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded focus:outline-none focus:border-accent appearance-none";
+
 function OperatingSystemEdit() {
   const initialData = useLoaderData<OperatingSystemWithArchitectures>();
   const navigate = useNavigate();
@@ -46,7 +50,6 @@ function OperatingSystemEdit() {
   const [editingBasic, setEditingBasic] = useState(false);
   const [name, setName] = useState(data.name);
   const [version, setVersion] = useState(data.version);
-  const [description, setDescription] = useState(data.description || "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedArchs, setExpandedArchs] = useState<Record<string, boolean>>({});
@@ -61,10 +64,9 @@ function OperatingSystemEdit() {
   const [archToDelete, setArchToDelete] = useState<Architecture | null>(null);
 
   useEffect(() => {
-    // Expand all architectures by default and initialize cmdline args
     const expanded: Record<string, boolean> = {};
     const cmdline: Record<string, string> = {};
-    data.architectures.forEach(arch => {
+    data.architectures.forEach((arch) => {
       expanded[arch.architecture] = true;
       cmdline[arch.architecture] = arch.cmdline_args || "";
     });
@@ -81,13 +83,8 @@ function OperatingSystemEdit() {
     e.preventDefault();
     setError(null);
     setIsSubmitting(true);
-
     try {
-      const updated = await updateOperatingSystem(osId, {
-        name,
-        version,
-        description: description || undefined,
-      });
+      const updated = await updateOperatingSystem(osId, { name, version });
       setData({ ...data, ...updated });
       setEditingBasic(false);
     } catch (err) {
@@ -99,7 +96,7 @@ function OperatingSystemEdit() {
 
   const handleDelete = async () => {
     await deleteOperatingSystem(osId);
-    navigate('/operating-systems');
+    navigate("/operating-systems");
   };
 
   const handleAddArchitecture = async () => {
@@ -140,18 +137,15 @@ function OperatingSystemEdit() {
   };
 
   const toggleArchExpanded = (arch: string) => {
-    setExpandedArchs(prev => ({ ...prev, [arch]: !prev[arch] }));
+    setExpandedArchs((prev) => ({ ...prev, [arch]: !prev[arch] }));
   };
 
   const handleSaveCmdlineArgs = async (arch: Architecture) => {
     setSavingCmdline(arch);
     setError(null);
     try {
-      // Find the current architecture data
-      const archData = data.architectures.find(a => a.architecture === arch);
+      const archData = data.architectures.find((a) => a.architecture === arch);
       if (!archData) return;
-
-      // Use createOsArchitecture which does an upsert
       await createOsArchitecture(osId, {
         architecture: arch,
         kernel_path: archData.kernel_path,
@@ -169,11 +163,12 @@ function OperatingSystemEdit() {
   };
 
   return (
-    <div className="space-y-4 max-w-4xl">
+    <div className="max-w-4xl">
       <PageHeader
         breadcrumbs={[
-          { label: "Operating Systems", href: "/operating-systems" },
-          { label: `${data.name} ${data.version}` }
+          { label: "Dashboard", href: "/" },
+          { label: "OS Images", href: "/operating-systems" },
+          { label: `${data.name} ${data.version}` },
         ]}
         title={`${data.name} ${data.version}`}
         actions={
@@ -185,156 +180,161 @@ function OperatingSystemEdit() {
       />
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
+        <div className="bg-error-bg border border-error-border text-status-broken px-3 py-2 text-xs mb-4">
           {error}
         </div>
       )}
 
       {/* Basic Information */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Basic Information</CardTitle>
-          <CardDescription>Operating system details</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {editingBasic ? (
-            <form onSubmit={handleUpdateBasic} className="space-y-4">
-              <FormField
-                id="name"
-                label="Name"
-                required
-                value={name}
-                onChange={setName}
-              />
+      <div className="bg-bg-surface border border-border p-4 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-xs font-semibold text-text-primary">Basic Information</p>
+          {!editingBasic && (
+            <button
+              onClick={() => setEditingBasic(true)}
+              className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
+            >
+              edit
+            </button>
+          )}
+        </div>
 
-              <FormField
-                id="version"
-                label="Version"
-                required
-                value={version}
-                onChange={setVersion}
-              />
-
-              <FormTextareaField
-                id="description"
-                label="Description"
-                value={description}
-                onChange={setDescription}
-                rows={3}
-              />
-
-              <div className="flex gap-2">
-                <Button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "Saving..." : "Save"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    setEditingBasic(false);
-                    setName(data.name);
-                    setVersion(data.version);
-                    setDescription(data.description || "");
-                  }}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          ) : (
-            <div className="space-y-2">
-              <div><span className="font-medium">Name:</span> {data.name}</div>
-              <div><span className="font-medium">Version:</span> {data.version}</div>
+        {editingBasic ? (
+          <form onSubmit={handleUpdateBasic}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
               <div>
-                <span className="font-medium">Description:</span>{" "}
-                {data.description || <span className="text-gray-400">—</span>}
+                <label htmlFor="edit-name" className={labelCls}>
+                  Name <span className="text-accent">*</span>
+                </label>
+                <Input
+                  id="edit-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                  className={inputCls}
+                />
               </div>
-              <Button variant="outline" onClick={() => setEditingBasic(true)}>
-                Edit
+              <div>
+                <label htmlFor="edit-version" className={labelCls}>
+                  Version <span className="text-accent">*</span>
+                </label>
+                <Input
+                  id="edit-version"
+                  value={version}
+                  onChange={(e) => setVersion(e.target.value)}
+                  required
+                  className={inputCls}
+                />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <Button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? "Saving..." : "Save"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setEditingBasic(false);
+                  setName(data.name);
+                  setVersion(data.version);
+                }}
+              >
+                Cancel
               </Button>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </form>
+        ) : (
+          <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-1">
+            <span className="text-xs text-text-secondary uppercase tracking-[0.5px]">Name</span>
+            <span className="text-xs text-text-primary">{data.name}</span>
+            <span className="text-xs text-text-secondary uppercase tracking-[0.5px]">Version</span>
+            <span className="text-xs text-text-primary">{data.version}</span>
+            {data.description && (
+              <>
+                <span className="text-xs text-text-secondary uppercase tracking-[0.5px]">Description</span>
+                <span className="text-xs text-text-primary">{data.description}</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Architectures */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>Architectures</CardTitle>
-              <CardDescription>Configure boot files for different architectures</CardDescription>
-            </div>
-            <Dialog open={addArchDialogOpen} onOpenChange={setAddArchDialogOpen}>
-              <DialogTrigger asChild>
-                <Button>
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add Architecture
-                </Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Add Architecture</DialogTitle>
-                  <DialogDescription>
-                    Add support for a new architecture
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="architecture">Architecture</Label>
-                    <select
-                      id="architecture"
-                      value={newArchitecture}
-                      onChange={(e) => setNewArchitecture(e.target.value as Architecture)}
-                      className="w-full border rounded-md px-3 py-2"
-                    >
-                      <option value="x86-64">x86-64</option>
-                    </select>
-                  </div>
+      <div className="bg-bg-surface border border-border">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <p className="text-xs font-semibold text-text-primary">Architectures</p>
+
+          <Dialog open={addArchDialogOpen} onOpenChange={setAddArchDialogOpen}>
+            <DialogTrigger asChild>
+              <button className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer">
+                <Plus className="h-3 w-3" />
+                Add Architecture
+              </button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Add Architecture</DialogTitle>
+                <DialogDescription>Add support for a new architecture</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div>
+                  <label htmlFor="arch-select" className={labelCls}>
+                    Architecture
+                  </label>
+                  <select
+                    id="arch-select"
+                    value={newArchitecture}
+                    onChange={(e) => setNewArchitecture(e.target.value as Architecture)}
+                    className={selectCls}
+                  >
+                    <option value="x86-64">x86-64</option>
+                  </select>
                 </div>
-                <DialogFooter>
-                  <Button onClick={handleAddArchitecture}>Add</Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+              </div>
+              <DialogFooter>
+                <Button onClick={handleAddArchitecture}>Add</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+
+        {data.architectures.length === 0 ? (
+          <div className="px-4 py-8 text-center text-xs text-text-muted">
+            No architectures configured. Add one to get started.
           </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {data.architectures.length === 0 ? (
-            <div className="text-center text-gray-400 py-8">
-              No architectures configured. Add one to get started.
-            </div>
-          ) : (
-            data.architectures.map((archData) => (
-              <Card key={archData.architecture} className="border-2">
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <button
-                      onClick={() => toggleArchExpanded(archData.architecture)}
-                      className="flex items-center gap-2 font-semibold text-lg hover:text-blue-600"
-                    >
-                      {expandedArchs[archData.architecture] ? (
-                        <ChevronDown className="h-5 w-5" />
-                      ) : (
-                        <ChevronRight className="h-5 w-5" />
-                      )}
-                      <Badge variant="outline" className="text-lg px-3 py-1">
-                        {archData.architecture}
-                      </Badge>
-                    </button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => openDeleteArchDialog(archData.architecture)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </CardHeader>
+        ) : (
+          <div className="divide-y divide-border">
+            {data.architectures.map((archData) => (
+              <div key={archData.architecture}>
+                {/* Architecture header row */}
+                <div className="flex items-center justify-between px-4 py-3 bg-bg-raised">
+                  <button
+                    onClick={() => toggleArchExpanded(archData.architecture)}
+                    className="flex items-center gap-2 text-xs font-semibold text-text-primary hover:text-accent transition-colors cursor-pointer"
+                    aria-label={`Toggle ${archData.architecture} section`}
+                  >
+                    {expandedArchs[archData.architecture] ? (
+                      <ChevronDown className="h-3.5 w-3.5 text-text-muted" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 text-text-muted" />
+                    )}
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium bg-accent-muted text-accent border border-accent/20">
+                      {archData.architecture}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => openDeleteArchDialog(archData.architecture)}
+                    className="text-text-muted hover:text-status-broken transition-colors cursor-pointer"
+                    aria-label={`Delete architecture ${archData.architecture}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
 
                 {expandedArchs[archData.architecture] && (
-                  <CardContent className="space-y-4">
-                    {/* Kernel Upload */}
+                  <div className="p-4 space-y-6">
+                    {/* Kernel */}
                     <FileUpload
                       label="Kernel"
                       currentFile={archData.kernel_path}
@@ -348,7 +348,7 @@ function OperatingSystemEdit() {
                       }}
                     />
 
-                    {/* Initramfs Upload */}
+                    {/* Initramfs */}
                     <FileUpload
                       label="Initramfs"
                       currentFile={archData.initramfs_path}
@@ -363,36 +363,48 @@ function OperatingSystemEdit() {
                     />
 
                     {/* Modules */}
-                    <div className="space-y-2">
-                      <div className="font-medium">Modules:</div>
+                    <div>
+                      <p className="text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-2">
+                        Modules
+                      </p>
                       {archData.modules.length === 0 ? (
-                        <div className="text-sm text-gray-400">No modules uploaded</div>
+                        <p className="text-xs text-text-muted mb-2">No modules uploaded</p>
                       ) : (
-                        <div className="space-y-2">
+                        <div className="space-y-1 mb-2">
                           {archData.modules.map((module) => (
-                            <div key={module} className="flex items-center justify-between border rounded px-3 py-2">
-                              <span className="text-sm">{module}</span>
-                              <div className="flex gap-2">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    window.location.href = getDownloadUrl(osId, archData.architecture, `modules/${module}`);
-                                  }}
-                                >
-                                  Download
-                                </Button>
-                              </div>
+                            <div
+                              key={module}
+                              className="flex items-center justify-between bg-bg-base border border-border px-3 py-2"
+                            >
+                              <span className="text-xs text-text-primary font-mono">{module}</span>
+                              <button
+                                onClick={() => {
+                                  window.location.href = getDownloadUrl(
+                                    osId,
+                                    archData.architecture,
+                                    `modules/${module}`
+                                  );
+                                }}
+                                className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
+                              >
+                                download
+                              </button>
                             </div>
                           ))}
                         </div>
                       )}
-                      <Dialog open={moduleDialogOpen === archData.architecture} onOpenChange={(open) => setModuleDialogOpen(open ? archData.architecture : null)}>
+
+                      <Dialog
+                        open={moduleDialogOpen === archData.architecture}
+                        onOpenChange={(open) =>
+                          setModuleDialogOpen(open ? archData.architecture : null)
+                        }
+                      >
                         <DialogTrigger asChild>
-                          <Button variant="outline" size="sm">
-                            <Plus className="h-4 w-4 mr-2" />
+                          <button className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer">
+                            <Plus className="h-3 w-3" />
                             Upload Module
-                          </Button>
+                          </button>
                         </DialogTrigger>
                         <DialogContent>
                           <DialogHeader>
@@ -402,26 +414,31 @@ function OperatingSystemEdit() {
                             </DialogDescription>
                           </DialogHeader>
                           <div className="space-y-4">
-                            <div className="space-y-2">
-                              <Label htmlFor="moduleName">Module Name</Label>
+                            <div>
+                              <label htmlFor="module-name" className={labelCls}>
+                                Module Name
+                              </label>
                               <Input
-                                id="moduleName"
+                                id="module-name"
                                 value={moduleName}
                                 onChange={(e) => setModuleName(e.target.value)}
                                 placeholder="e.g., network-driver.ko"
+                                className={inputCls}
                               />
                             </div>
                             <FileUpload
                               label="Module File"
                               currentFile={undefined}
-                              onUpload={(file) => handleUploadModule(archData.architecture, file)}
+                              onUpload={(file) =>
+                                handleUploadModule(archData.architecture, file)
+                              }
                             />
                           </div>
                         </DialogContent>
                       </Dialog>
                     </div>
 
-                    {/* Install Script Upload */}
+                    {/* Install Script */}
                     <div className="space-y-3">
                       <FileUpload
                         label="Install Script"
@@ -432,43 +449,56 @@ function OperatingSystemEdit() {
                           await refreshData();
                         }}
                         onDownload={() => {
-                          window.location.href = getDownloadUrl(osId, archData.architecture, "install_script");
+                          window.location.href = getDownloadUrl(
+                            osId,
+                            archData.architecture,
+                            "install_script"
+                          );
                         }}
                       />
                       <TemplateDocs type="install-script" />
                     </div>
 
-                    {/* Cmdline Args */}
+                    {/* Kernel Cmdline Args */}
                     <div className="space-y-3">
-                      <div className="space-y-2">
-                        <Label htmlFor={`cmdline-${archData.architecture}`}>
+                      <div>
+                        <label
+                          htmlFor={`cmdline-${archData.architecture}`}
+                          className={labelCls}
+                        >
                           Kernel Command Line Arguments
-                        </Label>
-                        <Textarea
+                        </label>
+                        <textarea
                           id={`cmdline-${archData.architecture}`}
                           value={cmdlineArgs[archData.architecture] || ""}
-                          onChange={(e) => setCmdlineArgs(prev => ({ ...prev, [archData.architecture]: e.target.value }))}
+                          onChange={(e) =>
+                            setCmdlineArgs((prev) => ({
+                              ...prev,
+                              [archData.architecture]: e.target.value,
+                            }))
+                          }
                           placeholder="Additional kernel boot parameters"
                           rows={2}
+                          className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded resize-none focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted font-mono"
                         />
                         <Button
                           size="sm"
+                          className="mt-2"
                           onClick={() => handleSaveCmdlineArgs(archData.architecture)}
                           disabled={savingCmdline === archData.architecture}
-                          className="bg-green-600 hover:bg-green-700 text-white"
                         >
                           {savingCmdline === archData.architecture ? "Saving..." : "Save"}
                         </Button>
                       </div>
                       <TemplateDocs type="cmdline" />
                     </div>
-                  </CardContent>
+                  </div>
                 )}
-              </Card>
-            ))
-          )}
-        </CardContent>
-      </Card>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <DeleteConfirmationDialog
         open={deleteDialogOpen}

@@ -1,7 +1,5 @@
 import { useState, useRef } from "react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Upload, Download, Trash2, Check, X } from "lucide-react";
+import { Upload, Download, Check, X } from "lucide-react";
 
 interface FileUploadProps {
   label: string;
@@ -19,11 +17,9 @@ export default function FileUpload({
   filename,
   onUpload,
   onDownload,
-  onDelete,
   accept,
 }: FileUploadProps) {
   const [uploading, setUploading] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -50,80 +46,52 @@ export default function FileUpload({
     }
   };
 
-  const handleDelete = async () => {
-    if (!onDelete) return;
-
-    setDeleting(true);
-    setError(null);
-
-    try {
-      await onDelete();
-      setSuccess(true);
-      setTimeout(() => setSuccess(false), 3000);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed");
-    } finally {
-      setDeleting(false);
-    }
-  };
-
   const hasFile = !!currentFile && currentFile.length > 0;
 
   return (
-    <div className="space-y-2">
+    <div>
       <div className="flex items-center justify-between">
+        {/* Label + status */}
         <div className="flex items-center gap-2">
-          <span className="font-medium">{label}:</span>
+          <span className="text-xs font-semibold text-text-secondary uppercase tracking-[0.5px]">
+            {label}
+          </span>
           {hasFile ? (
-            <div className="flex items-center gap-1.5">
-              <Check className="h-4 w-4 text-green-600 flex-shrink-0" />
+            <span className="flex items-center gap-1 text-xs text-status-provisioned">
+              <Check className="h-3.5 w-3.5" />
               {filename ? (
-                <Badge variant="secondary" className="font-mono text-xs">
-                  {filename}
-                </Badge>
+                <span className="font-mono text-text-secondary">{filename}</span>
               ) : (
-                <span className="text-green-600 text-sm">Uploaded</span>
+                "Uploaded"
               )}
-            </div>
+            </span>
           ) : (
-            <span className="flex items-center gap-1 text-gray-400 text-sm">
-              <X className="h-4 w-4" />
+            <span className="flex items-center gap-1 text-xs text-text-muted">
+              <X className="h-3.5 w-3.5" />
               Not uploaded
             </span>
           )}
         </div>
 
-        <div className="flex gap-2">
+        {/* Actions */}
+        <div className="flex items-center gap-3">
           {hasFile && onDownload && (
-            <Button
-              variant="outline"
-              size="sm"
+            <button
               onClick={onDownload}
+              className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
             >
-              <Download className="h-4 w-4 mr-1" />
-              Download
-            </Button>
+              <Download className="h-3.5 w-3.5" />
+              download
+            </button>
           )}
-          {hasFile && onDelete && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleDelete}
-              disabled={deleting}
-            >
-              <Trash2 className="h-4 w-4 mr-1" />
-              {deleting ? "Deleting..." : "Delete"}
-            </Button>
-          )}
-          <Button
-            variant={hasFile ? "outline" : "default"}
-            size="sm"
+          <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
+            className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Upload className="h-4 w-4 mr-1" />
-            {uploading ? "Uploading..." : hasFile ? "Replace" : "Upload"}
-          </Button>
+            <Upload className="h-3.5 w-3.5" />
+            {uploading ? "uploading..." : hasFile ? "replace" : "upload"}
+          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -135,14 +103,14 @@ export default function FileUpload({
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-800 px-3 py-2 rounded text-sm">
+        <div className="mt-1 bg-error-bg border border-error-border text-status-broken px-3 py-1.5 text-xs">
           {error}
         </div>
       )}
 
       {success && (
-        <div className="bg-green-50 border border-green-200 text-green-800 px-3 py-2 rounded text-sm">
-          Operation successful!
+        <div className="mt-1 bg-status-provisioned-bg border border-status-provisioned/30 text-status-provisioned px-3 py-1.5 text-xs">
+          Upload successful
         </div>
       )}
     </div>

@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
-import { useParams, useNavigate } from "react-router";
+import { useParams, useNavigate, Link } from "react-router";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { TransitionStatusBadge } from "@/components/ui/transition-status-badge";
-import { Breadcrumbs } from "@/components/ui/breadcrumbs";
+import { PageHeader } from "@/components/ui/page-header";
+import { KVGrid, KVRow } from "@/components/ui/kv-grid";
+import { WarningRow } from "@/components/ui/warning-row";
+import { cn } from "@/lib/utils";
 import {
   getDevice,
   getDeviceRole,
@@ -21,6 +22,8 @@ import {
   deleteDevice,
   getDevicePlatform,
   getPlatforms,
+  getDeviceWarnings,
+  dismissDeviceWarning,
   type Device,
   type Role,
   type DeviceStatus,
@@ -31,19 +34,146 @@ import {
   type StaticReservation,
   type DhcpNetwork,
   type Platform,
+  type DeviceWarning,
 } from "@/lib/client";
-import { ArrowLeft, AlertCircle, Pin, Trash2 } from "lucide-react";
+import { AlertCircle, Pin, Trash2, UserCheck, Zap, XCircle } from "lucide-react";
 import { EditableHostname } from "@/components/devices/editable-hostname";
 import { MakeStaticDialog } from "@/components/networks/make-static-dialog";
 import { TransitionDialog } from "@/components/devices/transition-dialog";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
 import { PlatformAssignment } from "@/components/devices/platform-assignment";
-import { DeviceWarnings } from "@/components/devices/device-warnings";
 import { DiskLabelOverrides } from "@/components/devices/disk-label-overrides";
 import { Label } from "@/components/ui/label";
 
-const LIFECYCLE_STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
+type TabId = "overview" | "hardware" | "transitions" | "warnings";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatRelativeTime(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+// ── Inline table component following design spec ──────────────────────────────
+
+interface CardTableProps {
+  headers: string[];
+  rows: React.ReactNode[][];
+  emptyMessage?: string;
+}
+
+function CardTable({ headers, rows, emptyMessage }: CardTableProps) {
+  if (rows.length === 0) {
+    return (
+      <div className="py-6 text-center text-sm text-text-muted">
+        {emptyMessage ?? "No data"}
+      </div>
+    );
+  }
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="bg-bg-raised">
+          {headers.map((h) => (
+            <th
+              key={h}
+              className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide"
+            >
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((cells, ri) => (
+          <tr
+            key={ri}
+            className={cn(
+              "border-t border-border-muted hover:bg-bg-raised transition-colors",
+              ri % 2 === 1 ? "bg-bg-base" : "bg-bg-surface"
+            )}
+          >
+            {cells.map((cell, ci) => (
+              <td key={ci} className="px-3 py-2 text-text-primary">
+                {cell}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// ── Card wrapper with optional title ─────────────────────────────────────────
+
+function SectionCard({
+  title,
+  children,
+  className,
+}: {
+  title?: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "bg-bg-surface border border-border",
+        className
+      )}
+    >
+      {title && (
+        <div className="px-4 pt-4 pb-0">
+          <h3 className="text-base font-semibold text-text-primary mb-3">{title}</h3>
+        </div>
+      )}
+      <div className={cn(title ? "px-4 pb-4" : "p-4")}>{children}</div>
+    </div>
+  );
+}
+
+// ── Tab bar (client-side, no route change) ────────────────────────────────────
+
+interface TabBarProps {
+  tabs: { id: TabId; label: string; count?: number }[];
+  active: TabId;
+  onChange: (id: TabId) => void;
+}
+
+function TabBar({ tabs, active, onChange }: TabBarProps) {
+  return (
+    <div className="flex border-b border-border mb-6">
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          onClick={() => onChange(tab.id)}
+          className={cn(
+            "px-4 py-2 text-sm transition-colors border-b-2 -mb-px cursor-pointer",
+            active === tab.id
+              ? "text-text-primary border-accent"
+              : "text-text-secondary border-transparent hover:text-text-primary"
+          )}
+        >
+          {tab.label}
+          {tab.count !== undefined && tab.count > 0 && (
+            <span className="ml-1.5 text-xs text-text-muted">({tab.count})</span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 function DeviceDetail() {
   const { uuid } = useParams<{ uuid: string }>();
@@ -54,74 +184,71 @@ function DeviceDetail() {
   const [assignedPlatform, setAssignedPlatform] = useState<Platform | null>(null);
   const [status, setStatus] = useState<DeviceStatus | null>(null);
   const [transitions, setTransitions] = useState<LifecycleTransition[]>([]);
-  const [dhcpLease, setDhcpLease] = useState<DhcpLease | null>(null);
+  const [warnings, setWarnings] = useState<DeviceWarning[]>([]);
+  const [_dhcpLease, setDhcpLease] = useState<DhcpLease | null>(null);
   const [availableRoles, setAvailableRoles] = useState<RoleWithOs[]>([]);
   const [availablePlatforms, setAvailablePlatforms] = useState<Platform[]>([]);
   const [selectedRoleId, setSelectedRoleId] = useState<number | null>(null);
+  const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
+  const [staticReservations, setStaticReservations] = useState<Map<string, StaticReservation>>(new Map());
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [assigningRole, setAssigningRole] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
+  const [dismissing, setDismissing] = useState<Set<number>>(new Set());
 
-  // Static IP dialog state
+  const [activeTab, setActiveTab] = useState<TabId>("overview");
+
+  // Dialog state
   const [staticDialogOpen, setStaticDialogOpen] = useState(false);
   const [selectedLease, setSelectedLease] = useState<DhcpLease | null>(null);
   const [selectedNetworkId, setSelectedNetworkId] = useState<number | null>(null);
-  const [staticReservations, setStaticReservations] = useState<Map<string, StaticReservation>>(new Map());
-  const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
-
-  // Transition dialog state
   const [transitionDialogOpen, setTransitionDialogOpen] = useState(false);
   const [targetState, setTargetState] = useState<DeviceLifecycle>("new");
-
-  // Delete dialog state
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   useEffect(() => {
     if (!uuid) return;
-
     const fetchData = async () => {
       try {
-        const [deviceData, roleData, platformData, statusData, transitionsData, rolesData, platformsData, networksData] = await Promise.all([
-          getDevice(uuid),
-          getDeviceRole(uuid),
-          getDevicePlatform(uuid),
-          getDeviceStatus(uuid),
-          getDeviceTransitions(uuid, true),
-          getRoles(),
-          getPlatforms(),
-          getNetworks()
-        ]);
+        const [deviceData, roleData, platformData, statusData, transitionsData, warningsData, rolesData, platformsData, networksData] =
+          await Promise.all([
+            getDevice(uuid),
+            getDeviceRole(uuid),
+            getDevicePlatform(uuid),
+            getDeviceStatus(uuid),
+            getDeviceTransitions(uuid, true),
+            getDeviceWarnings(uuid),
+            getRoles(),
+            getPlatforms(),
+            getNetworks(),
+          ]);
 
         setDevice(deviceData);
         setAssignedRole(roleData);
         setAssignedPlatform(platformData);
         setStatus(statusData);
         setTransitions(transitionsData);
+        setWarnings(warningsData);
         setAvailableRoles(rolesData);
         setAvailablePlatforms(platformsData);
-        setSelectedRoleId(deviceData.role_id || null);
+        setSelectedRoleId(deviceData.role_id ?? null);
         setNetworks(networksData);
 
-        // Fetch DHCP lease if MAC address is available
         if (deviceData.attributes?.mac_address) {
           const lease = await getDhcpLeaseByMac(deviceData.attributes.mac_address);
           setDhcpLease(lease);
         }
 
-        // Fetch static reservations for all network interfaces
         if (deviceData.attributes?.network_interfaces) {
           const reservationsMap = new Map<string, StaticReservation>();
-
           for (const nic of deviceData.attributes.network_interfaces) {
             if (nic.network_id) {
               const reservation = await getStaticReservationByMac(nic.network_id, nic.mac_address);
-              if (reservation) {
-                reservationsMap.set(nic.mac_address, reservation);
-              }
+              if (reservation) reservationsMap.set(nic.mac_address, reservation);
             }
           }
-
           setStaticReservations(reservationsMap);
         }
       } catch (err) {
@@ -130,23 +257,20 @@ function DeviceDetail() {
         setLoading(false);
       }
     };
-
     fetchData();
   }, [uuid]);
 
   const handleAssignRole = async () => {
     if (!uuid || !selectedRoleId) return;
-
     setAssigningRole(true);
     setError(null);
-
     try {
       await assignRoleToDevice(uuid, selectedRoleId);
-      const updatedRole = await getDeviceRole(uuid);
+      const [updatedRole, updatedDevice] = await Promise.all([
+        getDeviceRole(uuid),
+        getDevice(uuid),
+      ]);
       setAssignedRole(updatedRole);
-
-      // Refresh device data
-      const updatedDevice = await getDevice(uuid);
       setDevice(updatedDevice);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to assign role");
@@ -162,19 +286,14 @@ function DeviceDetail() {
 
   const handleTransition = async () => {
     if (!uuid) return;
-
     setTransitioning(true);
     setError(null);
-
     try {
       await transitionDeviceLifecycle(uuid, targetState);
-
-      // Refresh status and transitions
       const [updatedStatus, updatedTransitions] = await Promise.all([
         getDeviceStatus(uuid),
-        getDeviceTransitions(uuid, true)
+        getDeviceTransitions(uuid, true),
       ]);
-
       setStatus(updatedStatus);
       setTransitions(updatedTransitions);
     } catch (err) {
@@ -186,254 +305,323 @@ function DeviceDetail() {
 
   const handleMakeStatic = async (ip: string) => {
     if (!selectedLease) return;
-
     setError(null);
-
-    const reservation = await makeLeaseStatic(selectedLease.id, {
-      ip_address: ip || undefined,
-    });
-
-    // Update static reservations map
+    const reservation = await makeLeaseStatic(selectedLease.id, { ip_address: ip || undefined });
     const updatedReservations = new Map(staticReservations);
     updatedReservations.set(selectedLease.mac_address, reservation);
     setStaticReservations(updatedReservations);
-
-    // Reset selected lease
     setSelectedLease(null);
     setSelectedNetworkId(null);
   };
 
   const handleDeleteDevice = async () => {
     if (!uuid) return;
-
     setError(null);
-
     await deleteDevice(uuid);
-    navigate('/devices');
+    navigate("/devices");
   };
 
-  if (!uuid) {
-    return <div className="p-4">Invalid device URL</div>;
-  }
+  const handleDismissWarning = async (warningId: number) => {
+    if (!uuid) return;
+    setDismissing((prev) => new Set(prev).add(warningId));
+    try {
+      await dismissDeviceWarning(uuid, warningId);
+      setWarnings((prev) => prev.filter((w) => w.id !== warningId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to dismiss warning");
+    } finally {
+      setDismissing((prev) => {
+        const next = new Set(prev);
+        next.delete(warningId);
+        return next;
+      });
+    }
+  };
 
-  if (loading) {
-    return <div className="p-4">Loading device...</div>;
-  }
+  // ── Guard renders ────────────────────────────────────────────────────────
 
-  if (!device) {
-    return <div className="p-4">Device not found</div>;
-  }
+  if (!uuid) return <div className="p-4 text-text-secondary">Invalid device URL</div>;
+  if (loading) return <div className="p-4 text-text-secondary">Loading device...</div>;
+  if (!device) return <div className="p-4 text-text-secondary">Device not found</div>;
 
-  const ipAddress = device.attributes?.static_ip || dhcpLease?.ip_address;
+  const hostname = device.attributes?.hostname || device.uuid;
+  const lifecycle = status?.current_lifecycle ?? device.lifecycle ?? "new";
+  const nics = device.attributes?.network_interfaces ?? [];
+  const disksAttr: any[] = device.attributes?.disks ?? [];
+  const cpusAttr: any[] = device.attributes?.cpus ?? [];
+  const memoryGib: number | undefined = device.attributes?.memory_gib;
+  const bootMode: string | undefined = device.attributes?.boot_mode;
+  const recentTransitions = transitions.slice(0, 5);
 
-  return (
-    <div className="space-y-4 max-w-5xl">
-      <Breadcrumbs
-        items={[
-          { label: "Devices", href: "/devices" },
-          { label: device.attributes?.hostname || device.uuid },
-        ]}
-      />
+  // Contextual action buttons based on lifecycle
+  const canProvision = lifecycle === "unprovisioned";
+  const canAssignRole = lifecycle !== "provisioned" && lifecycle !== "removed";
+  const canDecommission = lifecycle === "provisioned";
 
-      <div className="flex items-center gap-4">
-        <Button
-          variant="outline"
-          size="icon"
-          onClick={() => navigate('/devices')}
-          aria-label="Back to devices"
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <div className="flex-1">
-          <EditableHostname
-            uuid={device.uuid}
-            hostname={device.attributes?.hostname || device.uuid}
-            onHostnameChange={async () => {
-              // Refresh device data to get the updated hostname
-              const updatedDevice = await getDevice(uuid);
-              setDevice(updatedDevice);
-            }}
-            onError={(errorMsg) => setError(errorMsg)}
+  // ── Tab content ──────────────────────────────────────────────────────────
+
+  const renderOverview = () => (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {/* Identity card */}
+      <SectionCard title="Identity">
+        <KVGrid>
+          <KVRow label="UUID" value={<span className="text-xs font-mono break-all">{device.uuid}</span>} />
+          <KVRow
+            label="Hostname"
+            value={
+              <EditableHostname
+                uuid={device.uuid}
+                hostname={hostname}
+                onHostnameChange={async () => {
+                  const updated = await getDevice(uuid);
+                  setDevice(updated);
+                }}
+                onError={(msg) => setError(msg)}
+              />
+            }
           />
-          <p className="text-sm text-muted-foreground font-mono">{device.uuid}</p>
-        </div>
-        {status?.current_lifecycle && (
-          <StatusBadge status={status.current_lifecycle} className="text-sm px-3 py-1" />
-        )}
-      </div>
+          <KVRow label="Architecture" value={<span className="text-xs">{device.architecture}</span>} />
+          <KVRow
+            label="Boot Mode"
+            value={
+              bootMode ? (
+                <span className="text-xs uppercase">{bootMode}</span>
+              ) : (
+                <span className="text-text-muted text-xs">—</span>
+              )
+            }
+          />
+          <KVRow
+            label="Platform"
+            value={
+              assignedPlatform ? (
+                <Link
+                  to={`/platforms/${assignedPlatform.id}`}
+                  className="text-accent hover:text-accent-hover text-xs transition-colors"
+                >
+                  {assignedPlatform.name}
+                </Link>
+              ) : (
+                <span className="text-text-muted text-xs">None</span>
+              )
+            }
+          />
+          <KVRow
+            label="Role"
+            value={
+              assignedRole ? (
+                <Link
+                  to={`/roles/${assignedRole.id}`}
+                  className="text-accent hover:text-accent-hover text-xs transition-colors"
+                >
+                  {assignedRole.name}
+                </Link>
+              ) : (
+                <span className="text-text-muted text-xs">None</span>
+              )
+            }
+          />
+          <KVRow
+            label="Last Seen"
+            value={
+              <span className="text-xs">
+                {device.last_seen_at ? new Date(device.last_seen_at).toLocaleString() : "Never"}
+              </span>
+            }
+          />
+        </KVGrid>
+      </SectionCard>
 
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
-          {error}
+      {/* Network Interfaces card */}
+      <SectionCard title="Network Interfaces">
+        <CardTable
+          headers={["Interface", "MAC Address", "IP Address"]}
+          emptyMessage="No network interfaces discovered"
+          rows={nics.map((nic) => {
+            const hasStatic = staticReservations.has(nic.mac_address);
+            return [
+              <span key="iface" className="text-xs font-mono">
+                {nic.interface_name}
+                {nic.disabled && (
+                  <span className="ml-2 text-xs text-status-broken">[disabled]</span>
+                )}
+              </span>,
+              <span key="mac" className="text-xs font-mono">
+                {nic.mac_address}
+                {nic.warning_label && (
+                  <span className="block text-xs text-status-unprovisioned mt-0.5">
+                    {nic.warning_label}
+                  </span>
+                )}
+              </span>,
+              <span key="ip" className="flex items-center gap-2 text-xs font-mono">
+                {nic.ip_address ?? <span className="text-text-muted">—</span>}
+                {hasStatic && (
+                  <span className="text-xs text-accent">[static]</span>
+                )}
+                {nic.ip_address && !hasStatic && nic.network_id && (
+                  <button
+                    onClick={async () => {
+                      const lease = await getDhcpLeaseByMac(nic.mac_address);
+                      if (lease) {
+                        setSelectedLease(lease);
+                        setSelectedNetworkId(nic.network_id ?? null);
+                        setStaticDialogOpen(true);
+                      } else {
+                        setError("No DHCP lease found for this interface");
+                      }
+                    }}
+                    aria-label="Make IP static"
+                    className="text-text-muted hover:text-accent transition-colors cursor-pointer"
+                  >
+                    <Pin className="size-3" />
+                  </button>
+                )}
+              </span>,
+            ];
+          })}
+        />
+        {/* Legacy MAC fallback */}
+        {nics.length === 0 && device.attributes?.mac_address && (
+          <div className="mt-2 text-xs text-text-secondary font-mono">
+            {device.attributes.mac_address}
+            <span className="ml-2 text-text-muted">(legacy – re-scan to update)</span>
+          </div>
+        )}
+      </SectionCard>
+
+      {/* Disks card */}
+      <SectionCard title="Disks">
+        <CardTable
+          headers={["Label", "Path", "Size", "Type"]}
+          emptyMessage="No disk information available"
+          rows={disksAttr.map((disk: any) => [
+            disk.label ? (
+              <span key="label" className="text-xs font-medium text-accent">{disk.label}</span>
+            ) : (
+              <span key="label" className="text-text-muted text-xs">—</span>
+            ),
+            <span key="path" className="text-xs font-mono">{disk.path ?? "—"}</span>,
+            <span key="size" className="text-xs">{disk.size_gb != null ? `${disk.size_gb} GB` : "—"}</span>,
+            <span key="type" className="text-xs uppercase text-text-secondary">{disk.disk_type ?? "—"}</span>,
+          ])}
+        />
+      </SectionCard>
+
+      {/* Recent Transitions card */}
+      <SectionCard title="Recent Transitions">
+        <CardTable
+          headers={["Time", "From", "To", "Result"]}
+          emptyMessage="No transitions yet"
+          rows={recentTransitions.map((t) => [
+            <span key="time" className="text-xs text-text-secondary">
+              {formatRelativeTime(t.started_at)}
+            </span>,
+            <StatusBadge key="from" status={t.from_state} />,
+            <StatusBadge key="to" status={t.to_state} />,
+            <TransitionStatusBadge key="result" transition={t} />,
+          ])}
+        />
+        {transitions.length > 5 && (
+          <button
+            onClick={() => setActiveTab("transitions")}
+            className="mt-3 text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
+          >
+            View all {transitions.length} transitions
+          </button>
+        )}
+      </SectionCard>
+    </div>
+  );
+
+  const renderHardware = () => (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {/* CPU */}
+      <SectionCard title="CPU">
+        {cpusAttr.length > 0 ? (
+          <KVGrid>
+            {cpusAttr.map((cpu: any, i: number) => (
+              <>
+                {cpusAttr.length > 1 && (
+                  <KVRow
+                    key={`cpu-label-${i}`}
+                    label={`CPU ${i + 1}`}
+                    value={<span className="text-xs text-text-muted">{cpu.brand} {cpu.model}</span>}
+                  />
+                )}
+                {cpusAttr.length === 1 && (
+                  <>
+                    <KVRow key="brand" label="Brand" value={<span className="text-xs">{cpu.brand ?? "—"}</span>} />
+                    <KVRow key="model" label="Model" value={<span className="text-xs">{cpu.model ?? "—"}</span>} />
+                    <KVRow key="cores" label="Cores" value={<span className="text-xs">{cpu.cores ?? "—"}</span>} />
+                  </>
+                )}
+              </>
+            ))}
+          </KVGrid>
+        ) : (
+          <p className="text-sm text-text-muted py-4 text-center">No CPU data available</p>
+        )}
+      </SectionCard>
+
+      {/* Memory */}
+      <SectionCard title="Memory">
+        <KVGrid>
+          <KVRow
+            label="Total RAM"
+            value={
+              memoryGib != null ? (
+                <span className="text-xs">{memoryGib} GiB</span>
+              ) : (
+                <span className="text-text-muted text-xs">—</span>
+              )
+            }
+          />
+        </KVGrid>
+      </SectionCard>
+
+      {/* Full Disks */}
+      <SectionCard title="Disks" className="lg:col-span-2">
+        <CardTable
+          headers={["Label", "Path", "Size", "Type"]}
+          emptyMessage="No disk information available"
+          rows={disksAttr.map((disk: any) => [
+            disk.label ? (
+              <span key="label" className="text-xs font-medium text-accent">{disk.label}</span>
+            ) : (
+              <span key="label" className="text-text-muted text-xs">—</span>
+            ),
+            <span key="path" className="text-xs font-mono">{disk.path ?? "—"}</span>,
+            <span key="size" className="text-xs">{disk.size_gb != null ? `${disk.size_gb} GB` : "—"}</span>,
+            <span key="type" className="text-xs uppercase text-text-secondary">{disk.disk_type ?? "—"}</span>,
+          ])}
+        />
+      </SectionCard>
+
+      {/* BMC Configuration */}
+      {(device.lifecycle === "new" || device.attributes?.bmc) && (
+        <div className="lg:col-span-2">
+          <BmcConfiguration
+            device={device}
+            networks={networks}
+            onDeviceUpdate={(updated) => setDevice(updated)}
+            onError={(msg) => setError(msg)}
+          />
         </div>
       )}
 
-      {/* Device Warnings */}
-      <DeviceWarnings
-        uuid={uuid}
-        onError={(errorMsg) => setError(errorMsg)}
-      />
+      {/* Disk Label Overrides */}
+      <div className="lg:col-span-2">
+        <DiskLabelOverrides
+          uuid={uuid}
+          device={device}
+          onDeviceUpdate={(updated) => setDevice(updated)}
+          onError={(msg) => setError(msg)}
+        />
+      </div>
 
-      {/* Static IP Dialog */}
-      <MakeStaticDialog
-        open={staticDialogOpen}
-        onOpenChange={setStaticDialogOpen}
-        lease={selectedLease}
-        subnet={selectedNetworkId ? networks.find(n => n.id === selectedNetworkId)?.subnet : undefined}
-        onConfirm={handleMakeStatic}
-      />
-
-      {/* Device Information */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle>Device Information</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <span className="font-medium">UUID:</span>
-              <span className="font-mono text-xs">{device.uuid}</span>
-
-              <span className="font-medium">Hostname:</span>
-              <span>{device.attributes?.hostname || <span className="text-gray-400">—</span>}</span>
-
-              <span className="font-medium">Architecture:</span>
-              <Badge variant="outline" className="w-fit">{device.architecture}</Badge>
-
-              <span className="font-medium">IP Address:</span>
-              <span className="font-mono">{ipAddress || <span className="text-gray-400">—</span>}</span>
-
-              <span className="font-medium">Network Interfaces:</span>
-              <div className="col-span-2">
-                {device.attributes?.network_interfaces && device.attributes.network_interfaces.length > 0 ? (
-                  <table className="min-w-full text-sm border">
-                    <thead>
-                      <tr className="border-b bg-gray-50">
-                        <th className="text-left py-2 px-3">Interface</th>
-                        <th className="text-left py-2 px-3">MAC Address</th>
-                        <th className="text-left py-2 px-3">IP Address</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {device.attributes.network_interfaces.map((nic, idx) => {
-                        const hasStaticReservation = staticReservations.has(nic.mac_address);
-                        return (
-                          <tr
-                            key={idx}
-                            className={`border-b ${nic.disabled ? "bg-red-50 opacity-60" : ""}`}
-                          >
-                            <td className="py-2 px-3 font-mono text-xs">
-                              {nic.interface_name}
-                              {nic.disabled && (
-                                <Badge className="ml-2 text-xs" variant="destructive">Disabled</Badge>
-                              )}
-                            </td>
-                            <td className="py-2 px-3 font-mono text-xs">
-                              {nic.mac_address}
-                              {nic.warning_label && (
-                                <div className="text-xs text-red-600 mt-1">
-                                  ⚠️ {nic.warning_label}
-                                </div>
-                              )}
-                            </td>
-                            <td className="py-2 px-3 font-mono text-xs">
-                              <div className="flex items-center gap-2">
-                                {nic.ip_address || <span className="text-gray-400">—</span>}
-                                {hasStaticReservation && (
-                                  <Badge variant="secondary" className="text-xs">Static</Badge>
-                                )}
-                                {nic.ip_address && !hasStaticReservation && nic.network_id && (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={async () => {
-                                      // Look up the lease by MAC to get lease ID
-                                      const lease = await getDhcpLeaseByMac(nic.mac_address);
-                                      if (lease) {
-                                        setSelectedLease(lease);
-                                        setSelectedNetworkId(nic.network_id ?? null);
-                                        setStaticDialogOpen(true);
-                                      } else {
-                                        setError("No DHCP lease found for this interface");
-                                      }
-                                    }}
-                                    aria-label="Make IP static"
-                                    className="h-6 w-6 p-0"
-                                  >
-                                    <Pin className="h-3 w-3" />
-                                  </Button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                ) : (
-                  <span className="text-gray-400">
-                    {device.attributes?.mac_address ? (
-                      <div className="text-sm">
-                        <span className="font-mono">{device.attributes.mac_address}</span>
-                        <span className="ml-2 text-xs text-gray-500">(Legacy format - trigger re-discovery to update)</span>
-                      </div>
-                    ) : (
-                      "No network interfaces discovered"
-                    )}
-                  </span>
-                )}
-              </div>
-
-              <span className="font-medium">Last Seen:</span>
-              <span className="text-xs">{device.last_seen_at ? new Date(device.last_seen_at).toLocaleString() : "Never"}</span>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Role Assignment</CardTitle>
-            <CardDescription>
-              Assign a provisioning role to this device
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {assignedRole && (
-              <div className="p-3 bg-blue-50 rounded border border-blue-200">
-                <div className="font-medium text-blue-900">{assignedRole.name}</div>
-                <div className="text-xs text-blue-700 mt-1">
-                  {assignedRole.description || "No description"}
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <Label htmlFor="role">Select Role</Label>
-              <select
-                id="role"
-                value={selectedRoleId || ''}
-                onChange={(e) => setSelectedRoleId(e.target.value ? parseInt(e.target.value) : null)}
-                className="w-full border rounded-md px-3 py-2"
-              >
-                <option value="">No role</option>
-                {availableRoles.map((role) => (
-                  <option key={role.id} value={role.id}>
-                    {role.name} ({role.os_name} {role.os_version})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <Button
-              onClick={handleAssignRole}
-              disabled={assigningRole || selectedRoleId === device.role_id}
-              className="w-full"
-            >
-              {assigningRole ? "Assigning..." : "Assign Role"}
-            </Button>
-          </CardContent>
-        </Card>
-
+      {/* Platform Assignment */}
+      <div className="lg:col-span-2">
         <PlatformAssignment
           uuid={uuid}
           device={device}
@@ -443,52 +631,286 @@ function DeviceDetail() {
             setAssignedPlatform(updatedPlatform);
             setDevice(updatedDevice);
           }}
-          onError={(errorMsg) => setError(errorMsg)}
+          onError={(msg) => setError(msg)}
         />
       </div>
+    </div>
+  );
 
-      {/* BMC Configuration */}
-      <BmcConfiguration
-        device={device}
-        networks={networks}
-        onDeviceUpdate={(updatedDevice) => setDevice(updatedDevice)}
-        onError={(errorMsg) => setError(errorMsg)}
-      />
-
-      {/* Disk Label Overrides */}
-      <DiskLabelOverrides
-        uuid={uuid}
-        device={device}
-        onDeviceUpdate={(updatedDevice) => setDevice(updatedDevice)}
-        onError={(errorMsg) => setError(errorMsg)}
-      />
-
-      {/* Lifecycle Management */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Lifecycle Management</CardTitle>
-          <CardDescription>
-            Transition this device to a new lifecycle state
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {LIFECYCLE_STATES.map((state) => (
-              <Button
-                key={state}
-                variant={status?.current_lifecycle === state ? "default" : "outline"}
-                disabled={transitioning || status?.current_lifecycle === state}
-                className="capitalize"
-                onClick={() => openTransitionDialog(state)}
+  const renderTransitions = () => (
+    <SectionCard>
+      {transitions.length === 0 ? (
+        <div className="py-8 text-center">
+          <p className="text-sm text-text-muted">No transitions yet</p>
+        </div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-bg-raised">
+              {["Time", "From", "To", "Plan", "Result", "Error"].map((h) => (
+                <th
+                  key={h}
+                  className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide"
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {transitions.map((t, ri) => (
+              <tr
+                key={t.id}
+                className={cn(
+                  "border-t border-border-muted hover:bg-bg-raised transition-colors",
+                  ri % 2 === 1 ? "bg-bg-base" : "bg-bg-surface"
+                )}
               >
-                {state}
-              </Button>
+                <td className="px-3 py-2 text-xs text-text-secondary whitespace-nowrap">
+                  {new Date(t.started_at).toLocaleString()}
+                </td>
+                <td className="px-3 py-2">
+                  <StatusBadge status={t.from_state} />
+                </td>
+                <td className="px-3 py-2">
+                  <StatusBadge status={t.to_state} />
+                </td>
+                <td className="px-3 py-2 text-xs text-text-secondary">
+                  {t.plan_id ? `#${t.plan_id}` : "—"}
+                </td>
+                <td className="px-3 py-2">
+                  <TransitionStatusBadge transition={t} />
+                </td>
+                <td className="px-3 py-2 text-xs text-status-broken max-w-xs truncate">
+                  {t.error_message ?? "—"}
+                </td>
+              </tr>
             ))}
-          </div>
-        </CardContent>
-      </Card>
+          </tbody>
+        </table>
+      )}
+    </SectionCard>
+  );
 
-      {/* Transition Dialog */}
+  const renderWarnings = () => (
+    <div className="space-y-1">
+      {warnings.length === 0 ? (
+        <div className="py-8 text-center">
+          <p className="text-sm text-text-muted">No active warnings</p>
+        </div>
+      ) : (
+        warnings.map((w) => (
+          <WarningRow
+            key={w.id}
+            severity="warning"
+            message={`[${w.code}] ${w.message}`}
+            onDismiss={dismissing.has(w.id) ? undefined : () => handleDismissWarning(w.id)}
+          />
+        ))
+      )}
+    </div>
+  );
+
+  // ── Role Assignment (in a separate section below tabs) ───────────────────
+
+  const renderRoleAssignment = () => (
+    <SectionCard title="Role Assignment">
+      <div className="space-y-3">
+        {assignedRole && (
+          <div className="p-3 bg-bg-raised border border-border">
+            <div className="text-sm font-medium text-text-primary">{assignedRole.name}</div>
+            <div className="text-xs text-text-secondary mt-0.5">{assignedRole.description ?? "No description"}</div>
+          </div>
+        )}
+        <div className="space-y-1">
+          <Label htmlFor="role-select" className="text-xs uppercase text-text-secondary tracking-wide">
+            Select Role
+          </Label>
+          <select
+            id="role-select"
+            value={selectedRoleId ?? ""}
+            onChange={(e) => setSelectedRoleId(e.target.value ? parseInt(e.target.value) : null)}
+            className="w-full bg-bg-base border border-border text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent"
+          >
+            <option value="">No role</option>
+            {availableRoles.map((role) => (
+              <option key={role.id} value={role.id}>
+                {role.name} ({role.os_name} {role.os_version})
+              </option>
+            ))}
+          </select>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={handleAssignRole}
+          disabled={assigningRole || selectedRoleId === device.role_id}
+          className="w-full"
+        >
+          {assigningRole ? "Assigning..." : "Assign Role"}
+        </Button>
+      </div>
+    </SectionCard>
+  );
+
+  // ── Lifecycle management ─────────────────────────────────────────────────
+
+  const renderLifecycle = () => {
+    const STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
+    return (
+      <SectionCard title="Lifecycle">
+        <div className="flex flex-wrap gap-2">
+          {STATES.map((state) => (
+            <Button
+              key={state}
+              variant={lifecycle === state ? "default" : "secondary"}
+              size="sm"
+              disabled={transitioning || lifecycle === state}
+              className="capitalize"
+              onClick={() => openTransitionDialog(state)}
+            >
+              {state}
+            </Button>
+          ))}
+        </div>
+      </SectionCard>
+    );
+  };
+
+  // ── Danger zone ──────────────────────────────────────────────────────────
+
+  const renderDangerZone = () => (
+    <SectionCard>
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-semibold text-status-broken">Delete Device</p>
+          <p className="text-xs text-text-secondary mt-0.5">
+            Permanently delete this device and all associated data
+          </p>
+        </div>
+        <Button
+          variant="danger"
+          size="sm"
+          onClick={() => setDeleteDialogOpen(true)}
+        >
+          <Trash2 className="size-3.5" />
+          Delete
+        </Button>
+      </div>
+    </SectionCard>
+  );
+
+  // ── Render ───────────────────────────────────────────────────────────────
+
+  const tabs: { id: TabId; label: string; count?: number }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "hardware", label: "Hardware" },
+    { id: "transitions", label: "Transitions", count: transitions.length },
+    { id: "warnings", label: "Warnings", count: warnings.length },
+  ];
+
+  // Action buttons - contextual based on lifecycle
+  const headerActions = (
+    <div className="flex items-center gap-2">
+      {canAssignRole && (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setActiveTab("hardware")}
+        >
+          <UserCheck className="size-3.5" />
+          Assign Role
+        </Button>
+      )}
+      {canProvision && (
+        <Button
+          variant="default"
+          size="sm"
+          onClick={() => openTransitionDialog("provisioned")}
+          disabled={transitioning}
+        >
+          <Zap className="size-3.5" />
+          Provision
+        </Button>
+      )}
+      {canDecommission && (
+        <Button
+          variant="danger"
+          size="sm"
+          onClick={() => openTransitionDialog("unprovisioned")}
+          disabled={transitioning}
+        >
+          <XCircle className="size-3.5" />
+          Decommission
+        </Button>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="space-y-0">
+      {/* Page header */}
+      <PageHeader
+        breadcrumbs={[
+          { label: "Dashboard", href: "/" },
+          { label: "Devices", href: "/devices" },
+          { label: hostname },
+        ]}
+        title={hostname}
+        status={<StatusBadge status={lifecycle} />}
+        description={[
+          device.attributes?.mac_address ?? nics[0]?.mac_address,
+          assignedPlatform?.name,
+          assignedRole?.name,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+        actions={headerActions}
+      />
+
+      {/* Error banner */}
+      {error && (
+        <div className="mb-4 flex items-start gap-2 border border-error-border bg-error-bg px-3 py-2 text-sm text-status-broken">
+          <AlertCircle className="size-4 shrink-0 mt-0.5" />
+          <span>{error}</span>
+          <button
+            onClick={() => setError(null)}
+            className="ml-auto text-text-muted hover:text-status-broken cursor-pointer"
+            aria-label="Dismiss error"
+          >
+            <XCircle className="size-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Tab bar */}
+      <TabBar tabs={tabs} active={activeTab} onChange={setActiveTab} />
+
+      {/* Tab panels */}
+      {activeTab === "overview" && renderOverview()}
+      {activeTab === "hardware" && (
+        <div className="space-y-4">
+          {renderHardware()}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {renderRoleAssignment()}
+            {renderLifecycle()}
+          </div>
+        </div>
+      )}
+      {activeTab === "transitions" && renderTransitions()}
+      {activeTab === "warnings" && renderWarnings()}
+
+      {/* Danger zone always visible at bottom */}
+      <div className="pt-6">{renderDangerZone()}</div>
+
+      {/* Dialogs */}
+      <MakeStaticDialog
+        open={staticDialogOpen}
+        onOpenChange={setStaticDialogOpen}
+        lease={selectedLease}
+        subnet={selectedNetworkId ? networks.find((n) => n.id === selectedNetworkId)?.subnet : undefined}
+        onConfirm={handleMakeStatic}
+      />
+
       <TransitionDialog
         open={transitionDialogOpen}
         onOpenChange={setTransitionDialogOpen}
@@ -497,102 +919,6 @@ function DeviceDetail() {
         onConfirm={handleTransition}
       />
 
-      {/* Transitions History */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Lifecycle Transitions</CardTitle>
-          <CardDescription>
-            History of all lifecycle state changes for this device
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {transitions.length === 0 ? (
-            <p className="text-center text-muted-foreground py-4">No transitions yet</p>
-          ) : (
-            <div className="space-y-3">
-              {transitions.map((transition) => (
-                <div
-                  key={transition.id}
-                  className="border rounded-lg p-4 space-y-2"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <StatusBadge status={transition.from_state} />
-                      <span className="text-muted-foreground">→</span>
-                      <StatusBadge status={transition.to_state} />
-                      <TransitionStatusBadge transition={transition} />
-                    </div>
-                    <span className="text-xs text-muted-foreground">
-                      {new Date(transition.started_at).toLocaleString()}
-                    </span>
-                  </div>
-
-                  {transition.plan_id && (
-                    <Badge variant="secondary" className="text-xs">
-                      Plan #{transition.plan_id}
-                    </Badge>
-                  )}
-
-                  {transition.error_message && (
-                    <div className="bg-destructive/10 border border-destructive/20 text-destructive rounded-md p-3 text-sm">
-                      <div className="flex items-start gap-2">
-                        <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                        <div>
-                          <p className="font-medium">Transition Failed</p>
-                          <p className="mt-1 text-xs">{transition.error_message}</p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {transition.completed_at && (
-                    <div className="text-xs text-muted-foreground">
-                      Completed: {new Date(transition.completed_at).toLocaleString()}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Device Attributes (Raw JSON) */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Device Attributes</CardTitle>
-          <CardDescription>
-            Raw attribute data stored for this device
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <pre className="bg-gray-50 p-4 rounded text-xs font-mono overflow-x-auto">
-            {JSON.stringify(device.attributes, null, 2)}
-          </pre>
-        </CardContent>
-      </Card>
-
-      {/* Delete Device */}
-      <Card className="border-red-200">
-        <CardHeader>
-          <CardTitle className="text-red-700">Danger Zone</CardTitle>
-          <CardDescription>
-            Irreversible and destructive actions
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button
-            variant="destructive"
-            className="w-full"
-            onClick={() => setDeleteDialogOpen(true)}
-          >
-            <Trash2 className="h-4 w-4 mr-2" />
-            Delete Device
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* Delete Device Dialog */}
       <DeleteConfirmationDialog
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}

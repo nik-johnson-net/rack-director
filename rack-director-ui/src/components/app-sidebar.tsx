@@ -1,117 +1,78 @@
-import { Home, Server, Settings, HardDrive, Users, ClipboardList, GitBranch, Network, Layers } from "lucide-react"
+import { NavLink } from "react-router";
+import { LayoutDashboard, Server, Shield, Cpu, HardDrive, Network, Settings } from "lucide-react";
 
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-} from "@/components/ui/sidebar"
-import { Link, useMatch } from "react-router";
+interface NavItem {
+  title: string;
+  href: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
 
-// Menu items organized by groups
-const menuGroups = [
-  {
-    label: "Infrastructure",
-    items: [
-      {
-        title: "Home",
-        url: "/",
-        icon: Home,
-      },
-      {
-        title: "Devices",
-        url: "/devices",
-        icon: Server,
-      },
-      {
-        title: "Networks",
-        url: "/networks",
-        icon: Network,
-      },
-      {
-        title: "Operating Systems",
-        url: "/operating-systems",
-        icon: HardDrive,
-      },
-    ],
-  },
-  {
-    label: "Configuration",
-    items: [
-      {
-        title: "Roles",
-        url: "/roles",
-        icon: Users,
-      },
-      {
-        title: "Platforms",
-        url: "/platforms",
-        icon: Layers,
-      },
-      {
-        title: "Plans",
-        url: "/plans",
-        icon: ClipboardList,
-      },
-    ],
-  },
-  {
-    label: "Monitoring",
-    items: [
-      {
-        title: "Transitions",
-        url: "/transitions",
-        icon: GitBranch,
-      },
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      {
-        title: "Settings",
-        url: "/settings",
-        icon: Settings,
-      },
-    ],
-  },
-]
+const mainNavItems: NavItem[] = [
+  { title: "Dashboard",  href: "/",                  icon: LayoutDashboard },
+  { title: "Devices",    href: "/devices",            icon: Server          },
+  { title: "Roles",      href: "/roles",              icon: Shield          },
+  { title: "Platforms",  href: "/platforms",          icon: Cpu             },
+  { title: "OS Images",  href: "/operating-systems",  icon: HardDrive       },
+  { title: "Networks",   href: "/networks",           icon: Network         },
+];
+
+const bottomNavItems: NavItem[] = [
+  { title: "Settings", href: "/settings", icon: Settings },
+];
+
+function SidebarNavItem({ item }: { item: NavItem }) {
+  const Icon = item.icon;
+  return (
+    <NavLink
+      to={item.href}
+      end={item.href === "/"}
+      className={({ isActive }) =>
+        [
+          "flex items-center gap-2 py-2 px-5 text-sm transition-colors cursor-pointer",
+          "border-l-[3px]",
+          isActive
+            ? "text-text-primary bg-bg-raised border-accent"
+            : "text-text-secondary bg-transparent border-transparent hover:text-text-primary hover:bg-bg-raised",
+        ].join(" ")
+      }
+    >
+      <Icon className="w-4 h-4 shrink-0" />
+      <span>{item.title}</span>
+    </NavLink>
+  );
+}
 
 export function AppSidebar() {
   return (
-    <Sidebar>
-      <SidebarContent>
-        {menuGroups.map((group) => (
-          <SidebarGroup key={group.label}>
-            <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {group.items.map((item) => (
-                  <AppSidebarMenuItem key={item.title} {...item} />
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        ))}
-      </SidebarContent>
-    </Sidebar>
-  )
-}
+    <aside className="flex flex-col w-[200px] shrink-0 h-screen bg-bg-surface border-r border-border">
+      {/* Logo */}
+      <div className="px-5 pt-5 pb-4">
+        <div className="text-xl font-bold text-accent leading-none">RACK</div>
+        <div
+          className="text-xs text-text-secondary uppercase mt-1"
+          style={{ letterSpacing: "3px" }}
+        >
+          director
+        </div>
+      </div>
 
-function AppSidebarMenuItem({ url, title, icon: Icon }: { url: string; title: string; icon: React.ComponentType }) {
-  let isActive = useMatch(url + "/*");
-  return (
-    <SidebarMenuItem key={title}>
-      <SidebarMenuButton asChild isActive={isActive !== null}>
-        <Link to={url}>
-          <Icon />
-          <span>{title}</span>
-        </Link>
-      </SidebarMenuButton>
-    </SidebarMenuItem>
-  )
+      {/* Separator */}
+      <div className="mx-5 border-t border-border" />
+
+      {/* Main nav */}
+      <nav className="flex-1 overflow-y-auto py-3">
+        {mainNavItems.map((item) => (
+          <SidebarNavItem key={item.href} item={item} />
+        ))}
+      </nav>
+
+      {/* Bottom separator + settings */}
+      <div className="mx-5 border-t border-border" />
+      <nav className="py-3">
+        {bottomNavItems.map((item) => (
+          <SidebarNavItem key={item.href} item={item} />
+        ))}
+      </nav>
+    </aside>
+  );
 }

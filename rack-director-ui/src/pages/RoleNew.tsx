@@ -1,11 +1,13 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
-import { FormField, FormTextareaField, FormSelectField } from "@/components/ui/form-field";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { FormFieldError } from "@/components/ui/form-field-error";
 import DiskLayoutEditor from "@/components/roles/disk-layout-editor";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
+import { selectClassName } from "@/components/roles/styles";
 import {
   createRole,
   getOperatingSystems,
@@ -56,7 +58,6 @@ function RoleNew() {
       return;
     }
 
-    // Validate JSON if provided
     let parsedConfig = undefined;
     if (configTemplate.trim()) {
       try {
@@ -92,164 +93,208 @@ function RoleNew() {
   };
 
   if (loadingOs) {
-    return <div className="p-4">Loading...</div>;
+    return (
+      <div className="text-xs text-text-muted p-4">Loading...</div>
+    );
   }
 
   if (operatingSystems.length === 0) {
     return (
-      <div className="space-y-4 max-w-2xl">
+      <div>
         <PageHeader
           breadcrumbs={[
+            { label: "Dashboard", href: "/" },
             { label: "Roles", href: "/roles" },
-            { label: "New Role" }
+            { label: "New Role" },
           ]}
-          title="Add Role"
+          title="Create Role"
         />
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-center text-muted-foreground">
+        <div style={{ maxWidth: 700 }}>
+          <div className="border border-border bg-bg-surface p-4">
+            <p className="text-xs text-text-secondary text-center mb-3">
               No operating systems available. Please create an operating system first.
             </p>
-            <div className="flex justify-center mt-4">
-              <Button onClick={() => navigate('/operating-systems/new')}>
+            <div className="flex justify-center">
+              <Button onClick={() => navigate("/operating-systems/new")}>
                 Create Operating System
               </Button>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4 max-w-4xl">
+    <div>
       <PageHeader
         breadcrumbs={[
+          { label: "Dashboard", href: "/" },
           { label: "Roles", href: "/roles" },
-          { label: "New Role" }
+          { label: "New Role" },
         ]}
-        title="Add Role"
+        title="Create Role"
         description="Define a provisioning role with OS, disk layout, and configuration"
       />
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {/* Basic Information */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Basic Information</CardTitle>
-            <CardDescription>
-              Define the role name, description, and operating system
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <FormField
-              id="name"
-              label="Name"
-              required
-              value={name}
-              onChange={(val) => {
-                setName(val);
-                clearFieldError("name");
-              }}
-              placeholder="e.g., web-server"
-              error={fieldErrors["name"]}
-              onClearError={() => clearFieldError("name")}
-            />
+      <form onSubmit={handleSubmit}>
+        <div style={{ maxWidth: 700 }} className="space-y-4">
+          {/* General card */}
+          <div className="border border-border bg-bg-surface">
+            <div className="px-4 py-3 border-b border-border">
+              <span className="text-sm font-semibold text-text-primary">General</span>
+            </div>
+            <div className="px-4 py-4 space-y-4">
+              {/* Name */}
+              <div className="space-y-1">
+                <Label htmlFor="name" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                  Name *
+                </Label>
+                <Input
+                  id="name"
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    clearFieldError("name");
+                  }}
+                  placeholder="e.g., k8s-worker, storage-node"
+                  aria-invalid={!!fieldErrors["name"]}
+                  className="h-8 text-xs"
+                />
+                <FormFieldError error={fieldErrors["name"]} />
+              </div>
 
-            <FormTextareaField
-              id="description"
-              label="Description"
-              value={description}
-              onChange={setDescription}
-              placeholder="Optional description"
-              rows={2}
-            />
+              {/* Description */}
+              <div className="space-y-1">
+                <Label htmlFor="description" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                  Description
+                </Label>
+                <Input
+                  id="description"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Optional description"
+                  className="h-8 text-xs"
+                />
+              </div>
 
-            <FormSelectField
-              id="os"
-              label="Operating System"
-              required
-              value={osId || ''}
-              onChange={(value) => setOsId(parseInt(value))}
-              options={operatingSystems.map((os) => ({
-                value: os.id!,
-                label: `${os.name} ${os.version}`
-              }))}
-              helperText="Supported architectures will be inferred from the selected OS"
-            />
+              {/* OS + Firmware row */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="os" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                    Operating System *
+                  </Label>
+                  <select
+                    id="os"
+                    value={osId ?? ""}
+                    onChange={(e) => setOsId(parseInt(e.target.value))}
+                    className={selectClassName}
+                    required
+                  >
+                    {operatingSystems.map((os) => (
+                      <option key={os.id} value={os.id!}>
+                        {os.name} {os.version}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-            <FormSelectField
-              id="firmware_mode"
-              label="Firmware Mode"
-              value={firmwareMode || ""}
-              onChange={(val) => setFirmwareMode((val as FirmwareMode) || undefined)}
-              options={[
-                { value: "", label: "— No constraint" },
-                { value: "bios", label: "BIOS" },
-                { value: "uefi", label: "UEFI" },
-              ]}
-              helperText="If set, only devices with this firmware mode can be assigned this role"
-            />
-          </CardContent>
-        </Card>
-
-        {/* Disk Layout */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Disk Layout</CardTitle>
-            <CardDescription>
-              Define the partition scheme for devices with this role
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <DiskLayoutEditor
-              value={diskLayout}
-              onChange={setDiskLayout}
-              errors={fieldErrors}
-              onClearError={clearFieldError}
-            />
-          </CardContent>
-        </Card>
-
-        {/* Config Template */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Configuration Template</CardTitle>
-            <CardDescription>
-              Optional JSON configuration that will be available in install scripts
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <FormTextareaField
-              id="config"
-              label="JSON Configuration"
-              value={configTemplate}
-              onChange={setConfigTemplate}
-              placeholder={'{\n  "packages": ["nginx", "postgresql"],\n  "custom_setting": "value"\n}'}
-              rows={8}
-              inputClassName="font-mono text-sm"
-              helperText="This configuration will be accessible in install scripts via template variables"
-            />
-          </CardContent>
-        </Card>
-
-        {error && (
-          <div className="bg-destructive/10 border border-destructive text-destructive px-4 py-3 rounded-md">
-            {error}
+                <div className="space-y-1">
+                  <Label htmlFor="firmware_mode" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                    Firmware Mode
+                  </Label>
+                  <select
+                    id="firmware_mode"
+                    value={firmwareMode ?? ""}
+                    onChange={(e) =>
+                      setFirmwareMode((e.target.value as FirmwareMode) || undefined)
+                    }
+                    className={selectClassName}
+                  >
+                    <option value="">Any</option>
+                    <option value="uefi">UEFI</option>
+                    <option value="bios">BIOS</option>
+                  </select>
+                  <p className="text-xs text-text-muted">
+                    Constrains which devices can be assigned this role
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
-        )}
 
-        <div className="flex gap-2">
-          <Button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? "Creating..." : "Create Role"}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => navigate('/roles')}
-          >
-            Cancel
-          </Button>
+          {/* Disk Layout card */}
+          <div className="border border-border bg-bg-surface">
+            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+              <span className="text-sm font-semibold text-text-primary">Disk Layout</span>
+              <button
+                type="button"
+                onClick={() => {
+                  // Trigger add disk in the editor via a custom event isn't ideal,
+                  // so we rely on the "+ Add Device" inside the editor empty state.
+                  // This button is shown here for visual consistency per spec.
+                }}
+                className="text-xs text-text-secondary border border-border px-2 py-1 hover:border-accent hover:text-text-primary transition-colors rounded-sm cursor-not-allowed opacity-50"
+                title="Use the '+ Add Device' button below when no disks are defined"
+              >
+                + Add Device
+              </button>
+            </div>
+            <div className="px-4 py-4">
+              <DiskLayoutEditor
+                value={diskLayout}
+                onChange={setDiskLayout}
+                errors={fieldErrors}
+                onClearError={clearFieldError}
+              />
+            </div>
+          </div>
+
+          {/* Config Template card */}
+          <div className="border border-border bg-bg-surface">
+            <div className="px-4 py-3 border-b border-border">
+              <span className="text-sm font-semibold text-text-primary">Configuration Template</span>
+            </div>
+            <div className="px-4 py-4">
+              <div className="space-y-1">
+                <Label htmlFor="config" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                  JSON Configuration
+                </Label>
+                <textarea
+                  id="config"
+                  value={configTemplate}
+                  onChange={(e) => setConfigTemplate(e.target.value)}
+                  placeholder={'{\n  "packages": ["nginx", "postgresql"],\n  "custom_setting": "value"\n}'}
+                  rows={8}
+                  className="w-full bg-bg-base border border-border text-text-primary text-xs px-3 py-2 font-mono focus:outline-none focus:border-accent resize-y rounded-sm placeholder:text-text-muted"
+                />
+                <p className="text-xs text-text-muted">
+                  Optional JSON accessible in install scripts via template variables
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Error banner */}
+          {error && (
+            <div className="px-3 py-2 border border-error-border bg-error-bg text-status-broken text-xs">
+              {error}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex gap-2 justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => navigate("/roles")}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? "Creating..." : "Create Role"}
+            </Button>
+          </div>
         </div>
       </form>
     </div>

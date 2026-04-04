@@ -1,5 +1,5 @@
 interface AlertBannerProps {
-  variant: "success" | "error";
+  variant: "success" | "error" | "warning";
   message: string | null | undefined;
 }
 
@@ -8,10 +8,12 @@ export function AlertBanner({ variant, message }: AlertBannerProps) {
 
   const styles =
     variant === "success"
-      ? "bg-green-500/10 border border-green-500 text-green-700 dark:text-green-400"
-      : "bg-destructive/10 border border-destructive text-destructive";
+      ? "bg-status-provisioned-bg border-l-2 border-status-provisioned text-status-provisioned"
+      : variant === "warning"
+      ? "bg-warn-bg border-l-2 border-warn-border text-status-unprovisioned"
+      : "bg-error-bg border-l-2 border-error-border text-status-broken";
 
   return (
-    <div className={`${styles} px-4 py-3 rounded-md`}>{message}</div>
+    <div className={`${styles} px-3 py-2 text-xs`}>{message}</div>
   );
 }

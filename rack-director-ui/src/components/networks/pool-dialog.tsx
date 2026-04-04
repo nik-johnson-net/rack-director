@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { DhcpPool, CreateDhcpPoolRequest } from "@/lib/client";
 import PoolsTableForm from "./pools-table-form";
 
@@ -19,7 +18,6 @@ export function PoolDialog({ open, onOpenChange, pool, onSave }: PoolDialogProps
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset form when dialog opens or pool changes
   useEffect(() => {
     if (open) {
       if (pool) {
@@ -29,11 +27,7 @@ export function PoolDialog({ open, onOpenChange, pool, onSave }: PoolDialogProps
           range_end: pool.range_end,
         });
       } else {
-        setFormData({
-          name: "",
-          range_start: "",
-          range_end: "",
-        });
+        setFormData({ name: "", range_start: "", range_end: "" });
       }
       setError(null);
     }
@@ -54,24 +48,57 @@ export function PoolDialog({ open, onOpenChange, pool, onSave }: PoolDialogProps
     }
   };
 
+  if (!open) return null;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{pool ? "Edit Pool" : "Add Pool"}</DialogTitle>
-          <DialogDescription>
-            {pool ? "Update the pool configuration." : "Create a new IP address pool for this network."}
-          </DialogDescription>
-        </DialogHeader>
-        <PoolsTableForm
-          onSubmit={handleSubmit}
-          setFormData={setFormData}
-          editingPool={!!pool}
-          formData={formData}
-          isSubmitting={isSubmitting}
-          error={error}
-        />
-      </DialogContent>
-    </Dialog>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      role="dialog"
+      aria-modal="true"
+      aria-label={pool ? "Edit Pool" : "Add Pool"}
+    >
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={() => onOpenChange(false)}
+      />
+
+      {/* Dialog panel */}
+      <div className="relative z-10 w-full max-w-md bg-bg-overlay border border-border shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">
+              {pool ? "Edit Pool" : "Add Pool"}
+            </h2>
+            <p className="text-xs text-text-secondary mt-0.5">
+              {pool
+                ? "Update the pool configuration."
+                : "Create a new IP address pool for this network."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="text-text-muted hover:text-text-primary transition-colors cursor-pointer text-lg leading-none"
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="p-4">
+          <PoolsTableForm
+            onSubmit={handleSubmit}
+            setFormData={setFormData}
+            editingPool={!!pool}
+            formData={formData}
+            isSubmitting={isSubmitting}
+            error={error}
+          />
+        </div>
+      </div>
+    </div>
   );
 }

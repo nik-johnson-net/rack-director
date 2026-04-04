@@ -1,17 +1,12 @@
 import { useState, useEffect } from "react";
 import { useLoaderData, useNavigate, useParams } from "react-router";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/ui/page-header";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { FormField } from "@/components/ui/form-field";
 import PoolsTable from "@/components/networks/pools-table";
 import ReservationsTable from "@/components/networks/reservations-table";
 import LeasesTable from "@/components/networks/leases-table";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
+import { FormFieldError } from "@/components/ui/form-field-error";
 import {
   updateNetwork,
   ValidationError,
@@ -30,6 +25,8 @@ type LoaderData = {
   pendingDevices: PendingDevice[];
 };
 
+type Tab = "info" | "pools" | "reservations" | "leases";
+
 function NetworkDetail() {
   const initialData = useLoaderData<LoaderData>();
   const navigate = useNavigate();
@@ -42,6 +39,8 @@ function NetworkDetail() {
   const [reservations, setReservations] = useState(initialData.reservations);
   const [leases] = useState(initialData.leases);
   const [pendingDevices] = useState(initialData.pendingDevices);
+
+  const [activeTab, setActiveTab] = useState<Tab>("info");
 
   const [name, setName] = useState(network.name);
   const [subnet, setSubnet] = useState(network.subnet);
@@ -74,7 +73,6 @@ function NetworkDetail() {
         gateway,
         dns_servers: dnsArray,
         lease_duration: parseInt(leaseDuration),
-        // Explicitly send null when empty to clear the relay agent
         relay_agent_address: relayAgent,
         enable_autodiscovery: enableAutodiscovery,
       });
@@ -100,217 +98,279 @@ function NetworkDetail() {
     }
   }, [successMessage]);
 
+  const tabs: { id: Tab; label: string; count?: number }[] = [
+    { id: "info", label: "Network Info" },
+    { id: "pools", label: "Pools", count: pools.length },
+    { id: "reservations", label: "Static Reservations", count: reservations.length },
+    { id: "leases", label: "Active Leases", count: leases.length },
+  ];
+
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div>
       <PageHeader
-        breadcrumbs={[{ label: "Networks", href: "/networks" }, { label: network.name }]}
+        breadcrumbs={[
+          { label: "Dashboard", href: "/" },
+          { label: "Networks", href: "/networks" },
+          { label: network.name },
+        ]}
         title={network.name}
         description="Configure network settings, pools, and reservations"
         actions={
-          <Button variant="outline" onClick={() => navigate("/networks")}>
+          <Button variant="secondary" onClick={() => navigate("/networks")}>
             Back to Networks
           </Button>
         }
       />
 
-      {error && (
-        <div className="bg-destructive/10 border border-destructive text-destructive px-4 py-3 rounded-md">
-          {error}
-        </div>
-      )}
+      {/* Page tabs */}
+      <div className="flex border-b border-border mb-6">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-4 py-2 text-xs transition-colors cursor-pointer ${
+              activeTab === tab.id
+                ? "text-text-primary border-b-2 border-accent -mb-px"
+                : "text-text-secondary hover:text-text-primary"
+            }`}
+          >
+            {tab.label}
+            {tab.count !== undefined && (
+              <span className="ml-2 px-1.5 py-0.5 bg-bg-raised text-text-muted text-xs rounded-sm">
+                {tab.count}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
 
-      {successMessage && (
-        <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-md">
-          {successMessage}
-        </div>
-      )}
-
-      <Tabs defaultValue="info" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="info">Network Info</TabsTrigger>
-          <TabsTrigger value="pools">
-            Pools
-            <Badge variant="secondary" className="ml-2">
-              {pools.length}
-            </Badge>
-          </TabsTrigger>
-          <TabsTrigger value="reservations">
-            Static Reservations
-            <Badge variant="secondary" className="ml-2">
-              {reservations.length}
-            </Badge>
-          </TabsTrigger>
-          <TabsTrigger value="leases">
-            Active Leases
-            <Badge variant="secondary" className="ml-2">
-              {leases.length}
-            </Badge>
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="info" className="space-y-4">
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Network Configuration</CardTitle>
-                <CardDescription>
-                  Configure the network subnet, gateway, and DNS settings
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <FormField
-                    id="name"
-                    label="Network Name"
-                    required
-                    value={name}
-                    onChange={setName}
-                    placeholder="e.g., Main Network"
-                    error={getError("name")}
-                    onClearError={() => clearFieldError("name")}
-                  />
-
-                  <FormField
-                    id="subnet"
-                    label="Subnet (CIDR)"
-                    required
-                    value={subnet}
-                    onChange={setSubnet}
-                    placeholder="e.g., 192.168.1.0/24"
-                    error={getError("subnet")}
-                    onClearError={() => clearFieldError("subnet")}
-                  />
-
-                  <FormField
-                    id="gateway"
-                    label="Gateway"
-                    required
-                    value={gateway}
-                    onChange={setGateway}
-                    placeholder="e.g., 192.168.1.1"
-                    error={getError("gateway")}
-                    onClearError={() => clearFieldError("gateway")}
-                  />
-
-                  <FormField
-                    id="lease-duration"
-                    label="Lease Duration (seconds)"
-                    type="number"
-                    required
-                    value={leaseDuration}
-                    onChange={setLeaseDuration}
-                    placeholder="e.g., 86400"
-                    error={getError("lease_duration")}
-                    onClearError={() => clearFieldError("lease_duration")}
-                  />
-
-                  <FormField
-                    id="dns-servers"
-                    label="DNS Servers"
-                    required
-                    value={dnsServers}
-                    onChange={setDnsServers}
-                    placeholder="e.g., 8.8.8.8, 8.8.4.4"
-                    helperText="Enter multiple DNS servers separated by commas"
-                    error={getError("dns_servers")}
-                    onClearError={() => clearFieldError("dns_servers")}
-                    className="sm:col-span-2"
-                  />
-
-                  <FormField
-                    id="relay-agent"
-                    label="Relay Agent Address"
-                    value={relayAgent}
-                    onChange={setRelayAgent}
-                    placeholder="Leave empty for Local L2"
-                    helperText="Leave empty if this DHCP server is on the same L2 network. Otherwise, specify the relay agent IP address."
-                    error={getError("relay_agent_address")}
-                    onClearError={() => clearFieldError("relay_agent_address")}
-                    className="sm:col-span-2"
-                  />
-
-                  <div className="space-y-2 sm:col-span-2">
-                    <div className="flex items-center space-x-2">
-                      <Checkbox
-                        id="enableAutodiscovery"
-                        checked={enableAutodiscovery}
-                        onCheckedChange={(checked) => setEnableAutodiscovery(checked === true)}
-                      />
-                      <Label htmlFor="enableAutodiscovery" className="cursor-pointer">
-                        Enable Autodiscovery
-                      </Label>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      When enabled, unknown devices will receive PXE boot options. When disabled, only known devices and pending devices will boot.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => navigate("/networks")}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={isSubmitting}>
-                {isSubmitting ? "Saving..." : "Save Changes"}
-              </Button>
+      {/* Network Info Tab */}
+      {activeTab === "info" && (
+        <form onSubmit={handleSubmit}>
+          {error && (
+            <div className="mb-4 px-3 py-2 bg-error-bg border-l-[3px] border-status-broken text-xs text-status-broken">
+              {error}
             </div>
-          </form>
-        </TabsContent>
+          )}
+          {successMessage && (
+            <div className="mb-4 px-3 py-2 bg-status-provisioned-bg border-l-[3px] border-status-provisioned text-xs text-status-provisioned">
+              {successMessage}
+            </div>
+          )}
 
-        <TabsContent value="pools">
-          <Card>
-            <CardHeader>
-              <CardTitle>IP Address Pools</CardTitle>
-              <CardDescription>
-                Define ranges of IP addresses for dynamic allocation
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <PoolsTable networkId={networkId} pools={pools} onPoolsChange={setPools} />
-            </CardContent>
-          </Card>
-        </TabsContent>
+          <div className="border border-border bg-bg-surface mb-4">
+            <div className="px-3 py-2 border-b border-border">
+              <span className="text-sm font-semibold text-text-primary">Network Configuration</span>
+            </div>
+            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Name */}
+              <div>
+                <label
+                  htmlFor="name"
+                  className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+                >
+                  Network Name <span className="text-status-broken">*</span>
+                </label>
+                <input
+                  id="name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => { setName(e.target.value); clearFieldError("name"); }}
+                  placeholder="e.g., Main Network"
+                  required
+                  aria-invalid={!!getError("name")}
+                  className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+                />
+                <FormFieldError error={getError("name")} />
+              </div>
 
-        <TabsContent value="reservations">
-          <Card>
-            <CardHeader>
-              <CardTitle>Static Reservations</CardTitle>
-              <CardDescription>
-                Assign specific IP addresses to MAC addresses
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ReservationsTable
-                networkId={networkId}
-                reservations={reservations}
-                onReservationsChange={setReservations}
-              />
-            </CardContent>
-          </Card>
-        </TabsContent>
+              {/* Subnet */}
+              <div>
+                <label
+                  htmlFor="subnet"
+                  className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+                >
+                  Subnet (CIDR) <span className="text-status-broken">*</span>
+                </label>
+                <input
+                  id="subnet"
+                  type="text"
+                  value={subnet}
+                  onChange={(e) => { setSubnet(e.target.value); clearFieldError("subnet"); }}
+                  placeholder="e.g., 192.168.1.0/24"
+                  required
+                  aria-invalid={!!getError("subnet")}
+                  className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+                />
+                <FormFieldError error={getError("subnet")} />
+              </div>
 
-        <TabsContent value="leases">
-          <Card>
-            <CardHeader>
-              <CardTitle>Active Leases</CardTitle>
-              <CardDescription>Currently assigned IP addresses from this network</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <LeasesTable
-                network={network}
-                networkId={networkId}
-                leases={leases}
-                pendingDevices={pendingDevices}
-                onReservationCreated={(reservation) => {
-                  setReservations([...reservations, reservation]);
-                }}
-              />
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+              {/* Gateway */}
+              <div>
+                <label
+                  htmlFor="gateway"
+                  className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+                >
+                  Gateway <span className="text-status-broken">*</span>
+                </label>
+                <input
+                  id="gateway"
+                  type="text"
+                  value={gateway}
+                  onChange={(e) => { setGateway(e.target.value); clearFieldError("gateway"); }}
+                  placeholder="e.g., 192.168.1.1"
+                  required
+                  aria-invalid={!!getError("gateway")}
+                  className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+                />
+                <FormFieldError error={getError("gateway")} />
+              </div>
+
+              {/* Lease Duration */}
+              <div>
+                <label
+                  htmlFor="leaseDuration"
+                  className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+                >
+                  Lease Duration (seconds) <span className="text-status-broken">*</span>
+                </label>
+                <input
+                  id="leaseDuration"
+                  type="number"
+                  value={leaseDuration}
+                  onChange={(e) => { setLeaseDuration(e.target.value); clearFieldError("lease_duration"); }}
+                  placeholder="e.g., 86400"
+                  required
+                  aria-invalid={!!getError("lease_duration")}
+                  className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+                />
+                <FormFieldError error={getError("lease_duration")} />
+              </div>
+
+              {/* DNS Servers */}
+              <div className="sm:col-span-2">
+                <label
+                  htmlFor="dnsServers"
+                  className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+                >
+                  DNS Servers <span className="text-status-broken">*</span>
+                </label>
+                <input
+                  id="dnsServers"
+                  type="text"
+                  value={dnsServers}
+                  onChange={(e) => { setDnsServers(e.target.value); clearFieldError("dns_servers"); }}
+                  placeholder="e.g., 8.8.8.8, 8.8.4.4"
+                  required
+                  aria-invalid={!!getError("dns_servers")}
+                  className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+                />
+                <p className="text-xs text-text-muted mt-1">Enter multiple DNS servers separated by commas</p>
+                <FormFieldError error={getError("dns_servers")} />
+              </div>
+
+              {/* Relay Agent */}
+              <div className="sm:col-span-2">
+                <label
+                  htmlFor="relayAgent"
+                  className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+                >
+                  Relay Agent Address
+                </label>
+                <input
+                  id="relayAgent"
+                  type="text"
+                  value={relayAgent}
+                  onChange={(e) => { setRelayAgent(e.target.value); clearFieldError("relay_agent_address"); }}
+                  placeholder="Leave empty for Local L2"
+                  aria-invalid={!!getError("relay_agent_address")}
+                  className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+                />
+                <p className="text-xs text-text-muted mt-1">
+                  Leave empty if this DHCP server is on the same L2 network. Otherwise, specify the relay agent IP address.
+                </p>
+                <FormFieldError error={getError("relay_agent_address")} />
+              </div>
+
+              {/* Autodiscovery toggle */}
+              <div className="sm:col-span-2">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    id="enableAutodiscovery"
+                    checked={enableAutodiscovery}
+                    onChange={(e) => setEnableAutodiscovery(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-accent cursor-pointer"
+                  />
+                  <span className="text-xs font-semibold text-text-secondary uppercase tracking-[0.5px]">
+                    Enable Autodiscovery
+                  </span>
+                </label>
+                <p className="text-xs text-text-muted mt-1 ml-5">
+                  When enabled, unknown devices will receive PXE boot options. When disabled, only known devices and pending devices will boot.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <Button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? "Saving..." : "Save Changes"}
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => navigate("/networks")}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {/* Pools Tab */}
+      {activeTab === "pools" && (
+        <div className="border border-border bg-bg-surface">
+          <div className="px-3 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-sm font-semibold text-text-primary">IP Address Pools</span>
+          </div>
+          <div className="p-4">
+            <PoolsTable networkId={networkId} pools={pools} onPoolsChange={setPools} />
+          </div>
+        </div>
+      )}
+
+      {/* Reservations Tab */}
+      {activeTab === "reservations" && (
+        <div className="border border-border bg-bg-surface">
+          <div className="px-3 py-2 border-b border-border">
+            <span className="text-sm font-semibold text-text-primary">Static Reservations</span>
+          </div>
+          <div className="p-4">
+            <ReservationsTable
+              networkId={networkId}
+              reservations={reservations}
+              onReservationsChange={setReservations}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Leases Tab */}
+      {activeTab === "leases" && (
+        <div className="border border-border bg-bg-surface">
+          <div className="px-3 py-2 border-b border-border">
+            <span className="text-sm font-semibold text-text-primary">Active Leases</span>
+          </div>
+          <div className="p-4">
+            <LeasesTable
+              network={network}
+              networkId={networkId}
+              leases={leases}
+              pendingDevices={pendingDevices}
+              onReservationCreated={(reservation) => {
+                setReservations([...reservations, reservation]);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,130 +1,302 @@
-import { useState, useEffect } from "react";
-import DevicesTableEnhanced from "@/components/devices/devices-table-enhanced";
-import type { Device, DhcpLease, RoleWithOs, PendingDevice, Platform } from "@/lib/client";
-import { useLoaderData, useRevalidator } from "react-router";
-import { getRoles, deletePendingDevice } from "@/lib/client";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { useState, useMemo } from "react";
+import { useLoaderData, useNavigate } from "react-router";
+import { Monitor } from "lucide-react";
+import type { Device, Platform, RoleWithOs } from "@/lib/client";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
-import { Clock, X } from "lucide-react";
-import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 
-function DevicesEnhanced() {
-  const { devices: initialDevices, dhcpLeases: initialDhcpLeases, pendingDevices: initialPendingDevices, platforms: initialPlatforms } = useLoaderData() as {
-    devices: Device[];
-    dhcpLeases: DhcpLease[];
-    pendingDevices: PendingDevice[];
-    platforms: Platform[];
-  };
+interface DevicesLoaderData {
+  devices: Device[];
+  platforms: Platform[];
+  roles: RoleWithOs[];
+}
 
-  const revalidator = useRevalidator();
-  const [dhcpLeases] = useState(initialDhcpLeases);
-  const [roles, setRoles] = useState<RoleWithOs[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [pendingDeviceToCancel, setPendingDeviceToCancel] = useState<number | null>(null);
+function Devices() {
+  const { devices, platforms, roles } = useLoaderData() as DevicesLoaderData;
+  const navigate = useNavigate();
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const rolesData = await getRoles();
-        setRoles(rolesData);
-      } catch (error) {
-        console.error("Failed to load additional data:", error);
-      } finally {
-        setLoading(false);
+  const [search, setSearch] = useState("");
+  const [lifecycleFilter, setLifecycleFilter] = useState("");
+  const [platformFilter, setPlatformFilter] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
+
+  // Build lookup maps
+  const platformsMap = useMemo(
+    () => new Map(platforms.map((p) => [p.id!, p.name])),
+    [platforms]
+  );
+  const rolesMap = useMemo(
+    () => new Map(roles.map((r) => [r.id!, r.name])),
+    [roles]
+  );
+
+  // Client-side filtering
+  const filtered = useMemo(() => {
+    return devices.filter((device) => {
+      // Search: hostname, MAC, UUID
+      if (search.trim()) {
+        const q = search.trim().toLowerCase();
+        const hostname = (device.attributes?.hostname ?? "").toLowerCase();
+        const mac = (device.attributes?.mac_address ?? "").toLowerCase();
+        // Also check network interfaces for MAC
+        const ifaceMacs = (device.attributes?.network_interfaces ?? [])
+          .map((i) => i.mac_address.toLowerCase())
+          .join(" ");
+        const uuid = device.uuid.toLowerCase();
+        if (
+          !hostname.includes(q) &&
+          !mac.includes(q) &&
+          !ifaceMacs.includes(q) &&
+          !uuid.includes(q)
+        ) {
+          return false;
+        }
       }
-    };
-    fetchData();
-  }, []);
 
-  const handleCancelPendingDevice = async () => {
-    if (pendingDeviceToCancel === null) return;
+      // Lifecycle filter
+      if (lifecycleFilter && device.lifecycle !== lifecycleFilter) {
+        return false;
+      }
 
-    await deletePendingDevice(pendingDeviceToCancel);
-    // Refresh the pending devices list
-    revalidator.revalidate();
-    setPendingDeviceToCancel(null);
-  };
+      // Platform filter
+      if (platformFilter) {
+        const pid = platformFilter === "none" ? null : parseInt(platformFilter);
+        if (pid === null) {
+          if (device.platform_id != null) return false;
+        } else {
+          if (device.platform_id !== pid) return false;
+        }
+      }
 
-  // Create roles map for quick lookup
-  const rolesMap = new Map(
-    roles.map(role => [
-      role.id!,
-      { name: role.name, os_name: role.os_name, os_version: role.os_version }
-    ])
-  );
+      // Role filter
+      if (roleFilter) {
+        const rid = roleFilter === "none" ? null : parseInt(roleFilter);
+        if (rid === null) {
+          if (device.role_id != null) return false;
+        } else {
+          if (device.role_id !== rid) return false;
+        }
+      }
 
-  // Create platforms map for quick lookup
-  const platformsMap = new Map(
-    initialPlatforms.map(p => [p.id!, { name: p.name }])
-  );
+      return true;
+    });
+  }, [devices, search, lifecycleFilter, platformFilter, roleFilter]);
 
-  if (loading) {
-    return <div className="p-4">Loading device information...</div>;
-  }
+  const selectClass =
+    "bg-bg-base border border-border text-text-primary text-xs px-3 py-1.5 rounded-sm focus:outline-none focus:border-accent appearance-none cursor-pointer pr-7";
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold">Devices</h1>
-        <div className="text-sm text-muted-foreground">
-          {initialDevices.length} device{initialDevices.length !== 1 ? 's' : ''}
+    <div>
+      <PageHeader
+        breadcrumbs={[
+          { label: "Dashboard", href: "/" },
+          { label: "Devices" },
+        ]}
+        title="Devices"
+        description={`${devices.length} device${devices.length !== 1 ? "s" : ""} registered`}
+        actions={
+          <Button onClick={() => navigate("/devices/pending/new")}>
+            + Add Pending Device
+          </Button>
+        }
+      />
+
+      {/* Filter bar */}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        {/* Search input */}
+        <div className="relative">
+          <input
+            type="text"
+            placeholder="Search hostname, MAC, UUID..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="bg-bg-base border border-border text-text-primary text-xs px-3 py-1.5 rounded-sm focus:outline-none focus:border-accent placeholder:text-text-muted"
+            style={{ width: 260 }}
+          />
+        </div>
+
+        {/* Lifecycle state */}
+        <div className="relative">
+          <select
+            value={lifecycleFilter}
+            onChange={(e) => setLifecycleFilter(e.target.value)}
+            className={selectClass}
+          >
+            <option value="">All Lifecycle States</option>
+            <option value="new">New</option>
+            <option value="unprovisioned">Unprovisioned</option>
+            <option value="provisioned">Provisioned</option>
+            <option value="broken">Broken</option>
+            <option value="removed">Removed</option>
+          </select>
+          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-text-muted">
+            <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor">
+              <path d="M0 0l5 6 5-6z" />
+            </svg>
+          </span>
+        </div>
+
+        {/* Platform */}
+        <div className="relative">
+          <select
+            value={platformFilter}
+            onChange={(e) => setPlatformFilter(e.target.value)}
+            className={selectClass}
+          >
+            <option value="">All Platforms</option>
+            <option value="none">No Platform</option>
+            {platforms.map((p) => (
+              <option key={p.id} value={String(p.id)}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-text-muted">
+            <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor">
+              <path d="M0 0l5 6 5-6z" />
+            </svg>
+          </span>
+        </div>
+
+        {/* Role */}
+        <div className="relative">
+          <select
+            value={roleFilter}
+            onChange={(e) => setRoleFilter(e.target.value)}
+            className={selectClass}
+          >
+            <option value="">All Roles</option>
+            <option value="none">No Role</option>
+            {roles.map((r) => (
+              <option key={r.id} value={String(r.id)}>
+                {r.name}
+              </option>
+            ))}
+          </select>
+          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-text-muted">
+            <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor">
+              <path d="M0 0l5 6 5-6z" />
+            </svg>
+          </span>
         </div>
       </div>
 
-      {initialPendingDevices.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Pending Devices</CardTitle>
-            <CardDescription>Waiting for machines to boot and provide their UUID</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {initialPendingDevices.map((pd) => (
-                <div key={pd.id} className="flex items-center justify-between p-3 border rounded-md">
-                  <div>
-                    <div className="font-mono text-sm font-semibold">{pd.mac_address}</div>
-                    <div className="text-xs text-muted-foreground">
-                      Created {new Date(pd.created_at).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="secondary">
-                      <Clock className="h-3 w-3 mr-1" />
-                      Awaiting Boot
-                    </Badge>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setPendingDeviceToCancel(pd.id)}
-                      className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Table */}
+      <div className="border border-border">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="bg-bg-raised">
+              {(["Hostname", "MAC", "Platform", "Role", "Lifecycle", "Actions"] as const).map(
+                (col) => (
+                  <th
+                    key={col}
+                    className="text-left text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] px-3 py-2 border-b border-border"
+                  >
+                    {col}
+                  </th>
+                )
+              )}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={6}>
+                  <EmptyState
+                    icon={Monitor}
+                    title="No devices found"
+                    description={
+                      search || lifecycleFilter || platformFilter || roleFilter
+                        ? "No devices match the current filters. Try adjusting your search."
+                        : "No devices have been registered yet."
+                    }
+                  />
+                </td>
+              </tr>
+            ) : (
+              filtered.map((device, idx) => {
+                const hostname = device.attributes?.hostname;
+                // Prefer the first NIC MAC, fall back to legacy mac_address field
+                const mac =
+                  device.attributes?.network_interfaces?.[0]?.mac_address ??
+                  device.attributes?.mac_address;
+                const platformName = device.platform_id
+                  ? platformsMap.get(device.platform_id)
+                  : undefined;
+                const roleName = device.role_id
+                  ? rolesMap.get(device.role_id)
+                  : undefined;
+                const rowBg = idx % 2 === 0 ? "bg-bg-surface" : "bg-bg-base";
 
-      <DevicesTableEnhanced
-        data={initialDevices}
-        dhcpLeases={dhcpLeases}
-        rolesMap={rolesMap}
-        platformsMap={platformsMap}
-      />
+                return (
+                  <tr
+                    key={device.uuid}
+                    className={`${rowBg} hover:bg-bg-raised border-b border-border-muted last:border-b-0 transition-colors`}
+                  >
+                    {/* Hostname */}
+                    <td className="px-3 py-2 text-xs text-text-primary font-semibold">
+                      {hostname ?? (
+                        <span className="text-text-muted font-normal">—</span>
+                      )}
+                    </td>
 
-      <DeleteConfirmationDialog
-        open={pendingDeviceToCancel !== null}
-        onOpenChange={(open) => !open && setPendingDeviceToCancel(null)}
-        title="Cancel Pending Device"
-        description="Are you sure you want to cancel this pending device registration? The DHCP lease will remain active."
-        onConfirm={handleCancelPendingDevice}
-      />
+                    {/* MAC */}
+                    <td className="px-3 py-2 text-xs text-text-secondary font-mono">
+                      {mac ?? <span className="text-text-muted">—</span>}
+                    </td>
+
+                    {/* Platform */}
+                    <td className="px-3 py-2 text-xs text-text-primary">
+                      {device.platform_id ? (
+                        platformName ?? (
+                          <span className="text-text-muted">Platform #{device.platform_id}</span>
+                        )
+                      ) : (
+                        <span className="text-text-muted italic">detecting...</span>
+                      )}
+                    </td>
+
+                    {/* Role */}
+                    <td className="px-3 py-2 text-xs text-text-primary">
+                      {device.role_id ? (
+                        roleName ?? (
+                          <span className="text-text-muted">Role #{device.role_id}</span>
+                        )
+                      ) : (
+                        <span className="text-text-muted">—</span>
+                      )}
+                    </td>
+
+                    {/* Lifecycle */}
+                    <td className="px-3 py-2">
+                      {device.lifecycle ? (
+                        <StatusBadge status={device.lifecycle} />
+                      ) : (
+                        <span className="text-text-muted text-xs">—</span>
+                      )}
+                    </td>
+
+                    {/* Actions */}
+                    <td className="px-3 py-2">
+                      <button
+                        onClick={() => navigate(`/devices/${device.uuid}`)}
+                        className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
+                        aria-label={`View device ${hostname ?? device.uuid}`}
+                      >
+                        view
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
-export default DevicesEnhanced;
+export default Devices;

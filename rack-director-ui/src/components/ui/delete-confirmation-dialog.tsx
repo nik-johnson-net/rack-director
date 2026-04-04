@@ -50,7 +50,7 @@ export function DeleteConfirmationDialog({
             {description}
             {itemName && <strong className="block mt-2">{itemName}</strong>}
             {warningMessage && (
-              <span className="block mt-2 font-semibold text-orange-600">
+              <span className="block mt-2 font-semibold text-status-unprovisioned">
                 {warningMessage}
               </span>
             )}
@@ -61,7 +61,7 @@ export function DeleteConfirmationDialog({
           <AlertDialogAction
             onClick={handleConfirm}
             disabled={isDeleting}
-            className="bg-red-600 hover:bg-red-700"
+            className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
           >
             {isDeleting ? "Deleting..." : "Delete"}
           </AlertDialogAction>

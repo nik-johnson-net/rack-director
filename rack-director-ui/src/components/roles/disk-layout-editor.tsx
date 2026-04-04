@@ -1,7 +1,5 @@
 import { useReducer, useMemo, useEffect, useRef } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Plus, HardDrive } from "lucide-react";
+import { HardDrive } from "lucide-react";
 import type {
   DiskLayout,
   DiskConfig,
@@ -104,7 +102,6 @@ function reducer(state: DiskLayout, action: Action): DiskLayout {
       const isLvm = incoming.flags?.includes("lvm") ?? false;
       const vgName = incoming.volume_group;
 
-      // Auto-create VG if partition has lvm flag and a VG name
       let newVolumeGroups = state.volume_groups ? [...state.volume_groups] : [];
       if (isLvm && vgName && !newVolumeGroups.find((vg) => vg.name === vgName)) {
         newVolumeGroups = [...newVolumeGroups, { name: vgName, logical_volumes: [] }];
@@ -114,7 +111,6 @@ function reducer(state: DiskLayout, action: Action): DiskLayout {
         if (i !== action.diskIndex) return disk;
         const newPartitions = disk.partitions.map((part, pi) => {
           if (pi !== action.partIndex) return part;
-          // If lvm was removed from flags, clear volume_group and ensure filesystem exists
           if (!isLvm) {
             return { ...incoming, volume_group: undefined };
           }
@@ -146,7 +142,6 @@ function reducer(state: DiskLayout, action: Action): DiskLayout {
         i === action.vgIndex ? { ...vg, name: action.newName } : vg
       );
 
-      // Update all partition volume_group references
       const newDisks = state.disks.map((disk) => ({
         ...disk,
         partitions: disk.partitions.map((part) =>
@@ -220,7 +215,6 @@ export default function DiskLayoutEditor({
   const [layout, dispatch] = useReducer(reducer, value);
   const isFirstRender = useRef(true);
 
-  // Sync changes to parent, skipping the initial mount
   useEffect(() => {
     if (isFirstRender.current) {
       isFirstRender.current = false;
@@ -234,7 +228,6 @@ export default function DiskLayoutEditor({
     [layout.volume_groups]
   );
 
-  // pvMap: VG name -> array of partition labels feeding it
   const pvMap = useMemo<Record<string, string[]>>(() => {
     const map: Record<string, string[]> = {};
     for (const disk of layout.disks) {
@@ -249,53 +242,33 @@ export default function DiskLayoutEditor({
     return map;
   }, [layout.disks]);
 
-
   const globalDiskLayoutError = errors?.["disk_layout"];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* Global disk_layout error */}
       {globalDiskLayoutError && (
-        <div className="bg-destructive/10 border border-destructive text-destructive px-4 py-3 rounded-md text-sm">
+        <div className="px-3 py-2 border border-error-border bg-error-bg text-status-broken text-xs rounded-sm">
           {globalDiskLayoutError}
         </div>
       )}
 
-      {/* Header with Add Disk button */}
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-foreground">Disks</span>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => dispatch({ type: "ADD_DISK" })}
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          Add Disk
-        </Button>
-      </div>
-
-      {/* Empty state */}
+      {/* Disk blocks */}
       {layout.disks.length === 0 ? (
-        <Card>
-          <CardContent className="py-12">
-            <div className="text-center">
-              <HardDrive className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <h3 className="text-base font-semibold mb-2">No disks defined</h3>
-              <p className="text-sm text-muted-foreground mb-4">
-                Add a disk to get started with your disk layout.
-              </p>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => dispatch({ type: "ADD_DISK" })}
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Add Disk
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="border border-border py-8 text-center">
+          <HardDrive className="h-8 w-8 mx-auto text-text-muted mb-3 opacity-50" />
+          <p className="text-sm text-text-primary mb-1">No disks defined</p>
+          <p className="text-xs text-text-secondary mb-3">
+            Add a disk to get started with your disk layout.
+          </p>
+          <button
+            type="button"
+            onClick={() => dispatch({ type: "ADD_DISK" })}
+            className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
+          >
+            + Add Device
+          </button>
+        </div>
       ) : (
         layout.disks.map((disk, diskIndex) => (
           <DiskSection
@@ -325,26 +298,26 @@ export default function DiskLayoutEditor({
         ))
       )}
 
-      {/* Volume Groups section */}
+      {/* Volume Groups */}
       <VolumeGroupSection
-          volumeGroups={layout.volume_groups ?? []}
-          pvMap={pvMap}
-          vgNames={vgNames}
-          onAddVg={(name) => dispatch({ type: "ADD_VG", name })}
-          onRenameVg={(vgIndex, newName) =>
-            dispatch({ type: "RENAME_VG", vgIndex, newName })
-          }
-          onRemoveVg={(vgIndex) => dispatch({ type: "REMOVE_VG", vgIndex })}
-          onAddLv={(vgIndex) => dispatch({ type: "ADD_LV", vgIndex })}
-          onRemoveLv={(vgIndex, lvIndex) =>
-            dispatch({ type: "REMOVE_LV", vgIndex, lvIndex })
-          }
-          onUpdateLv={(vgIndex, lvIndex, lv) =>
-            dispatch({ type: "UPDATE_LV", vgIndex, lvIndex, lv })
-          }
-          errors={errors}
-          onClearError={onClearError}
-        />
+        volumeGroups={layout.volume_groups ?? []}
+        pvMap={pvMap}
+        vgNames={vgNames}
+        onAddVg={(name) => dispatch({ type: "ADD_VG", name })}
+        onRenameVg={(vgIndex, newName) =>
+          dispatch({ type: "RENAME_VG", vgIndex, newName })
+        }
+        onRemoveVg={(vgIndex) => dispatch({ type: "REMOVE_VG", vgIndex })}
+        onAddLv={(vgIndex) => dispatch({ type: "ADD_LV", vgIndex })}
+        onRemoveLv={(vgIndex, lvIndex) =>
+          dispatch({ type: "REMOVE_LV", vgIndex, lvIndex })
+        }
+        onUpdateLv={(vgIndex, lvIndex, lv) =>
+          dispatch({ type: "UPDATE_LV", vgIndex, lvIndex, lv })
+        }
+        errors={errors}
+        onClearError={onClearError}
+      />
     </div>
   );
 }

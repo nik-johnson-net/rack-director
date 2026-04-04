@@ -3,76 +3,68 @@
 - The web UI is a vite + React project. Build by running `npx vite build` in the rack-director-ui/ directory.
 - Individual pages exist under rack-director-ui/src/pages/ and global components are under rack-director-ui/src/components/.
 - The Web UI depends on the rack-director service running. The project Makefile has a command to do this. Run `make devserver` to expose the web service on 127.0.0.1:3000.
-- The Web UI uses shadcn components for common UI components. Use the internet to search for relevant components that we don't already have at `ui.shadcn.com`.
 - After making changes, claude should run the web server and visit the page to ensure the page works correctly.
 - Web UI must only depend on /ui/ endpoints in rack-director! Never /api/ or /cnc/!
 
 # UI DEVELOPMENT
 
-## Design Guide
-**IMPORTANT**: All UI changes must use the ui-developer subagent.
+## Design Spec
+**IMPORTANT**: All UI changes must follow `DESIGN.md` — the authoritative design reference for all components and pages.
 
-The design guide covers:
-- Core design principles (Consistency, Clarity, Efficiency, Responsiveness)
-- Component patterns (Page structure, Forms, Tables, Navigation)
-- Theme & styling guidelines (Colors, spacing, typography)
-- Accessibility requirements (WCAG AA compliance)
-- Testing requirements
-- Common patterns and anti-patterns
+Before making ANY UI changes, read `DESIGN.md`. It covers:
+- Design tokens (colors, typography, spacing, radii)
+- Component specifications (sidebar, buttons, tables, cards, forms, badges, etc.)
+- Page layouts for every route
 
-**Before making ANY UI changes, read the design guide.**
-
-## UI Developer Agent
-For UI-focused tasks, consider using the specialized UI Developer agent defined in `DESIGN_GUIDE.md`.
-
-The UI Developer agent is trained to:
-- Follow design guide patterns automatically
-- Ensure visual consistency across pages
-- Apply responsive design principles
-- Implement proper accessibility features
-- Use existing components correctly
-- Run build verification after changes
+All UI changes should use the **ui-developer** subagent.
 
 ## Technology Stack
 - **Framework**: React 19 + TypeScript + Vite
-- **Styling**: Tailwind CSS 4.1 with OKLCH color space
-- **Components**: Radix UI primitives (via shadcn/ui)
+- **Styling**: Tailwind CSS 4.1, dark-only theme, design tokens in `src/index.css` `@theme` block
+- **Font**: JetBrains Mono (monospace everywhere — terminal aesthetic)
+- **Components**: Radix UI primitives (via shadcn/ui), restyled to match design
 - **Router**: React Router 7.8.2
 - **Icons**: Lucide React
-- **Tables**: TanStack React Table v8
+- **Tables**: Plain HTML tables (not TanStack Table)
+
+## Design Language
+- **Dark terminal aesthetic**: `#0d1117` background, `#00d4aa` cyan-green accent
+- **Dense and functional**: 13px base font, compact spacing, no decorative elements
+- **Color for status only**: Monochrome surfaces, color indicates lifecycle state
+- **Sharp geometry**: No border-radius on cards, 4px on buttons, 2px on badges
+- **Monospace everywhere**: JetBrains Mono for all text
+
+## Theme Colors (Tailwind classes)
+```
+Backgrounds: bg-bg-base, bg-bg-surface, bg-bg-raised, bg-bg-overlay
+Borders:     border-border, border-border-muted
+Text:        text-text-primary, text-text-secondary, text-text-muted
+Accent:      text-accent, bg-accent, border-accent, text-accent-hover
+Status:      text-status-new, text-status-unprovisioned, text-status-provisioned,
+             text-status-broken, text-status-removed, text-status-transitioning
+             (each has a bg-status-*-bg variant for tinted backgrounds)
+```
+
+Never use hardcoded colors. Always use the token classes above.
 
 ## Key Component Patterns
 
 ### PageHeader Component
-All pages should use the `PageHeader` component for consistency:
-```typescript
-<PageHeader
-  breadcrumbs={[{ label: "Parent", href: "/parent" }, { label: "Current" }]}
-  title="Page Title"
-  description="Optional description"
-  actions={<Button>Action</Button>}
-/>
-```
+All pages use `PageHeader` with breadcrumbs, title, subtitle, and action buttons.
 
-### Responsive Grids
-Always use responsive grid patterns:
-```typescript
-// ✅ Correct
-<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+### Tables
+Simple HTML `<table>` elements with:
+- Border wrapper: `border border-border`
+- Header: `bg-bg-raised`, 11px uppercase, secondary color
+- Rows: alternating `bg-bg-surface` / `bg-bg-base`, hover `bg-bg-raised`
 
-// ❌ Wrong
-<div className="grid grid-cols-3 gap-4">
-```
+### Cards
+`bg-bg-surface border border-border p-4` — no border-radius (sharp corners).
 
-### Theme Colors
-Use CSS variables, never hardcoded colors:
-```typescript
-// ✅ Correct
-<div className="bg-primary text-primary-foreground">
-
-// ❌ Wrong
-<div className="bg-blue-500 text-white">
-```
+### Forms
+- Labels: 11px, uppercase, secondary color, letter-spacing
+- Inputs: `bg-bg-base border-border`, accent focus ring
+- Selects: same as inputs with custom SVG chevron
 
 ## Build Verification
 Always run `npm run build` after making UI changes to verify they compile correctly.
@@ -100,58 +92,6 @@ Complex cards and sections should be extracted into separate components when the
 - Perform API calls or complex logic
 - Are more than ~50 lines of JSX
 - Could be reused across pages
-
-### Pattern for Extracted Components
-
-```typescript
-// components/devices/platform-assignment.tsx
-interface PlatformAssignmentProps {
-  uuid: string;
-  device: Device;
-  assignedPlatform: Platform | null;
-  availablePlatforms: Platform[];
-  onPlatformUpdate: (platform: Platform | null, device: Device) => void;
-  onError: (error: string) => void;
-}
-
-export function PlatformAssignment({ uuid, device, ... }: PlatformAssignmentProps) {
-  // Component manages its own internal state
-  const [selectedPlatformId, setSelectedPlatformId] = useState<number | null>(device.platform_id);
-  const [loading, setLoading] = useState(false);
-
-  const handleAssign = async () => {
-    setLoading(true);
-    try {
-      await assignDevicePlatform(uuid, selectedPlatformId);
-      const [updatedPlatform, updatedDevice] = await Promise.all([
-        getDevicePlatform(uuid),
-        getDevice(uuid)
-      ]);
-      onPlatformUpdate(updatedPlatform, updatedDevice);
-    } catch (err) {
-      onError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return <Card>...</Card>;
-}
-```
-
-### Benefits
-- **Separation of concerns**: Page manages high-level state, component handles details
-- **Testability**: Components can be tested in isolation
-- **Reusability**: Components can be used across multiple pages
-- **Maintainability**: Easier to understand and modify focused components
-- **Performance**: Can optimize re-renders independently
-
-### When to Extract
-- ✅ Role Assignment Card (has selection state, API calls)
-- ✅ Platform Assignment Card (has selection state, API calls)
-- ✅ BMC Configuration (complex form logic)
-- ❌ Simple information displays (Device UUID, Architecture)
-- ❌ Single API call without state (can stay inline)
 
 Available extracted components:
 - `PlatformAssignment` (`components/devices/platform-assignment.tsx`) - Platform selection and assignment

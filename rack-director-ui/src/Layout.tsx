@@ -1,17 +1,13 @@
-import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar"
-import { AppSidebar } from "@/components/app-sidebar"
-import { Outlet } from "react-router"
-
-import './Layout.css';
+import { Outlet } from "react-router";
+import { AppSidebar } from "@/components/app-sidebar";
 
 export default function Layout() {
   return (
-    <SidebarProvider>
+    <div className="flex h-screen bg-bg-base">
       <AppSidebar />
-      <main>
-        <SidebarTrigger />
+      <main className="flex-1 overflow-y-auto p-6 md:p-8">
         <Outlet />
       </main>
-    </SidebarProvider>
-  )
+    </div>
+  );
 }

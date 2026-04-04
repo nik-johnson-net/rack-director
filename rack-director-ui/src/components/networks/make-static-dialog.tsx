@@ -1,7 +1,4 @@
 import { useState, useEffect } from "react";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { FormField } from "@/components/ui/form-field";
 import type { DhcpLease } from "@/lib/client";
 
 interface MakeStaticDialogProps {
@@ -12,12 +9,23 @@ interface MakeStaticDialogProps {
   onConfirm: (ip: string, hostname?: string) => Promise<void>;
 }
 
-export function MakeStaticDialog({ open, onOpenChange, lease, subnet, onConfirm }: MakeStaticDialogProps) {
+const inputCls =
+  "w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted";
+
+const labelCls =
+  "block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1";
+
+export function MakeStaticDialog({
+  open,
+  onOpenChange,
+  lease,
+  subnet,
+  onConfirm,
+}: MakeStaticDialogProps) {
   const [ip, setIp] = useState("");
   const [hostname, setHostname] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  // Reset form when dialog opens
   useEffect(() => {
     if (open && lease) {
       setIp(lease.ip_address);
@@ -36,93 +44,124 @@ export function MakeStaticDialog({ open, onOpenChange, lease, subnet, onConfirm 
   };
 
   const handleUseCurrentIp = () => {
-    if (lease) {
-      setIp(lease.ip_address);
-    }
+    if (lease) setIp(lease.ip_address);
   };
 
+  if (!open) return null;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Make IP Address Static</DialogTitle>
-          <DialogDescription>
-            Assign a static IP address to this MAC address. You can use the current lease IP or specify a custom one.
-          </DialogDescription>
-        </DialogHeader>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Make IP Address Static"
+    >
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={() => onOpenChange(false)}
+      />
 
+      {/* Dialog panel */}
+      <div className="relative z-10 w-full max-w-md bg-bg-overlay border border-border shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">Make IP Address Static</h2>
+            <p className="text-xs text-text-secondary mt-0.5">
+              Assign a static IP address to this MAC address.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="text-text-muted hover:text-text-primary transition-colors cursor-pointer text-lg leading-none"
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Body */}
         {lease && (
-          <div className="space-y-4">
-            <div className="bg-muted p-3 rounded-md">
-              <div className="text-sm">
-                <span className="font-medium">MAC Address: </span>
-                <span className="font-mono">{lease.mac_address}</span>
-              </div>
-              <div className="text-sm mt-1">
-                <span className="font-medium">Current IP: </span>
-                <span className="font-mono">{lease.ip_address}</span>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex gap-2">
-                <div className="flex-1">
-                  <FormField
-                    id="static-ip"
-                    label="IP Address"
-                    required
-                    value={ip}
-                    onChange={setIp}
-                    placeholder="e.g., 192.168.1.100"
-                  />
-                </div>
-                <div className="pt-8">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={handleUseCurrentIp}
-                  >
-                    Reset
-                  </Button>
-                </div>
-              </div>
+          <div className="p-4 space-y-4">
+            {/* Info block */}
+            <div className="bg-bg-raised border border-border px-3 py-2 grid grid-cols-[140px_1fr] gap-y-1">
+              <span className="text-xs text-text-secondary uppercase tracking-[0.5px]">MAC Address</span>
+              <span className="text-xs font-mono text-text-primary">{lease.mac_address}</span>
+              <span className="text-xs text-text-secondary uppercase tracking-[0.5px]">Current IP</span>
+              <span className="text-xs font-mono text-text-primary">{lease.ip_address}</span>
               {subnet && (
-                <p className="text-xs text-muted-foreground">
-                  Subnet: {subnet}
-                </p>
+                <>
+                  <span className="text-xs text-text-secondary uppercase tracking-[0.5px]">Subnet</span>
+                  <span className="text-xs font-mono text-text-primary">{subnet}</span>
+                </>
               )}
             </div>
 
-            <FormField
-              id="static-hostname"
-              label="Hostname"
-              value={hostname}
-              onChange={setHostname}
-              placeholder="e.g., server-01"
-              helperText="Optional hostname for this reservation"
-            />
+            {/* IP Address field */}
+            <div>
+              <label htmlFor="static-ip" className={labelCls}>
+                IP Address <span className="text-status-broken">*</span>
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="static-ip"
+                  type="text"
+                  value={ip}
+                  onChange={(e) => setIp(e.target.value)}
+                  placeholder="e.g., 192.168.1.100"
+                  required
+                  className={`${inputCls} flex-1`}
+                />
+                <button
+                  type="button"
+                  onClick={handleUseCurrentIp}
+                  className="px-3 py-2 h-8 text-xs font-medium bg-bg-surface text-text-primary border border-border rounded-sm hover:bg-bg-raised transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            {/* Hostname field */}
+            <div>
+              <label htmlFor="static-hostname" className={labelCls}>
+                Hostname
+              </label>
+              <input
+                id="static-hostname"
+                type="text"
+                value={hostname}
+                onChange={(e) => setHostname(e.target.value)}
+                placeholder="e.g., server-01"
+                className={inputCls}
+              />
+              <p className="text-xs text-text-muted mt-1">Optional hostname for this reservation</p>
+            </div>
           </div>
         )}
 
-        <DialogFooter>
-          <Button
+        {/* Footer */}
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-border">
+          <button
             type="button"
-            variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={isLoading}
+            className="px-4 py-2 h-8 text-xs font-medium bg-bg-surface text-text-primary border border-border rounded hover:bg-bg-raised disabled:opacity-50 disabled:pointer-events-none transition-colors cursor-pointer"
           >
             Cancel
-          </Button>
-          <Button
+          </button>
+          <button
             type="button"
             onClick={handleConfirm}
             disabled={isLoading}
+            className="px-4 py-2 h-8 text-xs font-medium bg-accent text-bg-base border border-accent rounded hover:bg-accent-hover disabled:opacity-50 disabled:pointer-events-none transition-colors cursor-pointer"
           >
             {isLoading ? "Creating..." : "Create Static Reservation"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

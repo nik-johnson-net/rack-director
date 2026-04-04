@@ -31,17 +31,26 @@ const router = createBrowserRouter([
   {
     Component: Layout,
     children: [
-      { index: true, Component: Index, HydrateFallback: Loading },
+      {
+        index: true,
+        loader: async () => {
+          const devices = await getAllDevices();
+          return { devices };
+        },
+        Component: Index,
+        HydrateFallback: Loading
+      },
       {
         path: "/devices",
         loader: async () => {
-          const [devices, dhcpLeases, pendingDevices, platforms] = await Promise.all([
+          const [devices, dhcpLeases, pendingDevices, platforms, roles] = await Promise.all([
             getAllDevices(),
             getDhcpLeases(),
             getPendingDevices(),
             getPlatforms(),
+            getRoles(),
           ]);
-          return { devices, dhcpLeases, pendingDevices, platforms };
+          return { devices, dhcpLeases, pendingDevices, platforms, roles };
         },
         Component: Devices,
         HydrateFallback: Loading

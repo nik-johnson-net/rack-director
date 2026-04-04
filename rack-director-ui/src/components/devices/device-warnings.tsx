@@ -56,18 +56,18 @@ export function DeviceWarnings({ uuid, onError }: DeviceWarningsProps) {
       {warnings.map((warning) => (
         <div
           key={warning.id}
-          className="flex items-start gap-3 rounded-md border border-yellow-300 bg-yellow-50 px-4 py-3 text-yellow-900"
+          className="flex items-start gap-3 rounded border border-warn-border bg-warn-bg px-4 py-3"
           role="alert"
         >
-          <AlertCircle className="h-5 w-5 mt-0.5 shrink-0 text-yellow-600" aria-hidden="true" />
+          <AlertCircle className="h-5 w-5 mt-0.5 shrink-0 text-status-unprovisioned" aria-hidden="true" />
           <div className="flex-1 min-w-0">
-            <p className="font-semibold text-sm">{warning.code}</p>
-            <p className="text-sm mt-0.5">{warning.message}</p>
+            <p className="font-semibold text-sm text-text-primary">{warning.code}</p>
+            <p className="text-sm mt-0.5 text-text-secondary">{warning.message}</p>
           </div>
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6 shrink-0 text-yellow-700 hover:text-yellow-900 hover:bg-yellow-100"
+            className="h-6 w-6 shrink-0 text-status-unprovisioned hover:text-text-primary hover:bg-bg-raised"
             onClick={() => handleDismiss(warning.id)}
             disabled={dismissing.has(warning.id)}
             aria-label={`Dismiss warning: ${warning.code}`}
