@@ -24,6 +24,7 @@ import Platforms from './pages/Platforms.tsx';
 import PlatformNew from './pages/PlatformNew.tsx';
 import PlatformDetail from './pages/PlatformDetail.tsx';
 import PlatformEdit from './pages/PlatformEdit.tsx';
+import PendingDeviceNew from './pages/PendingDeviceNew.tsx';
 import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices, getPlatforms, getPlatform, getPlatformDevicesWithDetails } from './lib/client.ts';
 import Loading from './pages/Loading.tsx';
 
@@ -55,6 +56,7 @@ const router = createBrowserRouter([
         Component: Devices,
         HydrateFallback: Loading
       },
+      { path: "/devices/pending/new", Component: PendingDeviceNew },
       { path: "/devices/:uuid", Component: DeviceDetail },
       { path: "/operating-systems", loader: getOperatingSystems, Component: OperatingSystems, HydrateFallback: Loading },
       { path: "/operating-systems/new", Component: OperatingSystemNew },

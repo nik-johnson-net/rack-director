@@ -70,6 +70,24 @@ pub fn validate_ipv4_list(ips: &[String], field_name: &str, min_count: usize) ->
     None
 }
 
+/// Validate MAC address format (`XX:XX:XX:XX:XX:XX` where X is a hex digit).
+///
+/// Returns `Some(error_message)` when the format is invalid, `None` when valid.
+pub fn validate_mac_address(mac: &str) -> Option<String> {
+    let octets: Vec<&str> = mac.split(':').collect();
+    if octets.len() != 6 {
+        return Some("MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string());
+    }
+    let all_valid = octets
+        .iter()
+        .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit()));
+    if all_valid {
+        None
+    } else {
+        Some("MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string())
+    }
+}
+
 /// Validate numeric range
 pub fn validate_u32_range(value: u32, min: u32, max: u32, field_name: &str) -> Option<String> {
     if value < min {

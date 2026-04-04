@@ -20,6 +20,7 @@ use crate::database::ConnectionFactory;
 
 pub use ip_discovery::discover_server_identifier;
 pub use socket_manager::SocketCmd;
+#[allow(unused_imports)] // re-exported for `crate::dhcp::LeaseState` usage in other modules
 pub use store::{DhcpNetwork, DhcpPool, Lease, LeaseState, StaticReservation};
 
 use boot_config::BootConfigProvider;

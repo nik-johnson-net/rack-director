@@ -723,19 +723,17 @@ export async function getDhcpLeaseByMac(mac: string): Promise<DhcpLease | null> 
 }
 
 export async function createPendingDevice(data: CreatePendingDeviceRequest): Promise<PendingDevice> {
-  return fetch('/ui/devices/pending', {
+  const response = await fetch('/ui/devices/pending', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      return response.json().then((err) => {
-        throw new Error(err.error || 'Failed to create pending device');
-      });
-    }
   });
+
+  if (response.ok) {
+    return response.json();
+  }
+
+  return handleApiError(response, 'Failed to create pending device');
 }
 
 export async function getPendingDevices(): Promise<PendingDevice[]> {

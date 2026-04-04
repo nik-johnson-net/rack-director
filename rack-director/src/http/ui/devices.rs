@@ -10,7 +10,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::validation::validate_hostname;
+use super::validation::{
+    ValidationErrors, validate_hostname, validate_mac_address, validate_required,
+};
 
 use crate::{
     device_warnings,
@@ -568,91 +570,22 @@ async fn get_device_status(
 
 async fn create_pending_device(
     State(state): State<Arc<AppState>>,
-    extract::Json(payload): extract::Json<CreatePendingDeviceRequest>,
-) -> Result<(StatusCode, Json<PendingDeviceResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let conn = match state.connection_factory.open().await {
-        Ok(conn) => conn,
-        Err(e) => {
-            log::error!("Failed to open database: {}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal server error".to_string(),
-                }),
-            ));
-        }
-    };
+    extract::Json(mut payload): extract::Json<CreatePendingDeviceRequest>,
+) -> Result<(StatusCode, Json<PendingDeviceResponse>), HttpError> {
+    // Normalize MAC address to lowercase for consistent storage and duplicate detection
+    payload.mac_address = payload.mac_address.to_lowercase();
+
+    let conn = state.connection_factory.open().await?;
     let director = Director::new(&conn);
 
-    // Validate that the lease exists by MAC address
-    let lease = match crate::dhcp::store::get_lease_by_mac(&conn, &payload.mac_address).await {
-        Ok(Some(lease)) => lease,
-        Ok(None) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!(
-                        "No DHCP lease found for MAC address {}",
-                        payload.mac_address
-                    ),
-                }),
-            ));
-        }
-        Err(e) => {
-            log::error!("Failed to query DHCP lease: {}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to query DHCP lease".to_string(),
-                }),
-            ));
-        }
-    };
-
-    // Check that the lease is active
-    if lease.state != crate::dhcp::LeaseState::Active {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!(
-                    "Lease for MAC {} is not active (state: {:?})",
-                    payload.mac_address, lease.state
-                ),
-            }),
-        ));
-    }
-
-    // Check that the lease doesn't already have a device
-    if lease.device_uuid.is_some() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!(
-                    "Lease for MAC {} already has a device UUID",
-                    payload.mac_address
-                ),
-            }),
-        ));
-    }
+    // Validate MAC address format and check for duplicates/network existence
+    validate_create_pending_device(&conn, &director, &payload).await?;
 
     // Create the pending device
-    let id = match director
+    let id = director
         .create_pending_device(&payload.mac_address, payload.network_id)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            log::error!("Failed to create pending device: {}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to create pending device".to_string(),
-                }),
-            ));
-        }
-    };
+        .await?;
 
-    // Return the created pending device
     Ok((
         StatusCode::CREATED,
         Json(PendingDeviceResponse {
@@ -666,62 +599,83 @@ async fn create_pending_device(
     ))
 }
 
-async fn get_pending_devices(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<PendingDeviceResponse>>, StatusCode> {
-    let conn = state
-        .connection_factory
-        .open()
+/// Validate a create-pending-device request.
+///
+/// Checks MAC address format, network existence, and absence of a duplicate
+/// pending device for the same MAC address. Returns a `ValidationError` when
+/// any check fails so the handler can return a structured 400 response.
+async fn validate_create_pending_device(
+    conn: &crate::database::Connection,
+    director: &Director<'_>,
+    payload: &CreatePendingDeviceRequest,
+) -> Result<(), HttpError> {
+    let mut errors = ValidationErrors::new();
+
+    // Sync format checks — guard format validation so "is required" isn't overwritten
+    errors.add_if_err(
+        "mac_address",
+        validate_required(&payload.mac_address, "MAC address"),
+    );
+    if !payload.mac_address.is_empty() {
+        errors.add_if_err("mac_address", validate_mac_address(&payload.mac_address));
+    }
+
+    // Network existence check
+    if crate::dhcp::store::get_network(conn, payload.network_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let director = Director::new(&conn);
-    match director.get_pending_devices().await {
-        Ok(devices) => {
-            let responses: Vec<PendingDeviceResponse> = devices
-                .into_iter()
-                .map(|d| PendingDeviceResponse {
-                    id: d.id,
-                    mac_address: d.mac_address,
-                    device_uuid: d.device_uuid.map(|u| u.to_string()),
-                    network_id: d.network_id,
-                    created_at: d.created_at,
-                    completed_at: d.completed_at,
-                })
-                .collect();
-            Ok(Json(responses))
+        .is_err()
+    {
+        errors.add_error("network_id", "Network not found".to_string());
+    }
+
+    // Duplicate pending device check
+    match director
+        .find_pending_device_by_mac(&payload.mac_address)
+        .await
+    {
+        Ok(Some(_)) => {
+            errors.add_error(
+                "mac_address",
+                "A pending device with this MAC address already exists".to_string(),
+            );
         }
+        Ok(None) => {}
         Err(e) => {
-            log::error!("Failed to get pending devices: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            log::warn!("Failed to check for duplicate pending device: {}", e);
         }
     }
+
+    errors.into_result().map_err(HttpError::ValidationError)
+}
+
+async fn get_pending_devices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PendingDeviceResponse>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+    let devices = director.get_pending_devices().await?;
+    let responses = devices
+        .into_iter()
+        .map(|d| PendingDeviceResponse {
+            id: d.id,
+            mac_address: d.mac_address,
+            device_uuid: d.device_uuid.map(|u| u.to_string()),
+            network_id: d.network_id,
+            created_at: d.created_at,
+            completed_at: d.completed_at,
+        })
+        .collect();
+    Ok(Json(responses))
 }
 
 async fn delete_pending_device(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let conn = state.connection_factory.open().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Internal server error".to_string(),
-            }),
-        )
-    })?;
+) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
     let director = Director::new(&conn);
-    match director.delete_pending_device(id).await {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => {
-            log::error!("Failed to delete pending device {}: {}", id, e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to delete pending device".to_string(),
-                }),
-            ))
-        }
-    }
+    director.delete_pending_device(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_device_by_uuid(
@@ -2069,6 +2023,131 @@ mod tests {
             bmc_config.get("username").unwrap().as_str().unwrap(),
             "RACKDIRECTOR"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_pending_device_success() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let network_id = create_test_network(&state).await;
+
+        let app = routes(state.clone());
+
+        // Create a pending device — no lease required
+        let payload = serde_json::json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": network_id
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ui/devices/pending")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_pending_device_invalid_mac() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let network_id = create_test_network(&state).await;
+
+        let app = routes(state.clone());
+
+        let payload = serde_json::json!({
+            "mac_address": "not-a-mac",
+            "network_id": network_id
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ui/devices/pending")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_create_pending_device_unknown_network() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+
+        let app = routes(state.clone());
+
+        let payload = serde_json::json!({
+            "mac_address": "aa:bb:cc:dd:ee:02",
+            "network_id": 9999_i64
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ui/devices/pending")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_create_pending_device_duplicate_mac() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let network_id = create_test_network(&state).await;
+        let mac = "aa:bb:cc:dd:ee:03";
+
+        // Pre-create a pending device directly
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .create_pending_device(mac, network_id)
+                .await
+                .unwrap();
+        }
+
+        let app = routes(state.clone());
+
+        let payload = serde_json::json!({
+            "mac_address": mac,
+            "network_id": network_id
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ui/devices/pending")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_validate_mac_address_valid() {
+        use super::super::validation::validate_mac_address;
+        assert!(validate_mac_address("aa:bb:cc:dd:ee:ff").is_none());
+        assert!(validate_mac_address("AA:BB:CC:DD:EE:FF").is_none());
+        assert!(validate_mac_address("00:11:22:33:44:55").is_none());
+    }
+
+    #[test]
+    fn test_validate_mac_address_invalid() {
+        use super::super::validation::validate_mac_address;
+        // Wrong number of octets
+        assert!(validate_mac_address("aa:bb:cc:dd:ee").is_some());
+        // Non-hex characters
+        assert!(validate_mac_address("gg:bb:cc:dd:ee:ff").is_some());
+        // Wrong separator
+        assert!(validate_mac_address("aa-bb-cc-dd-ee-ff").is_some());
+        // Octet too long
+        assert!(validate_mac_address("aaa:bb:cc:dd:ee:ff").is_some());
+        // Empty string
+        assert!(validate_mac_address("").is_some());
     }
 }
 
