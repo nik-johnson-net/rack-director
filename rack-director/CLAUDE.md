@@ -7,7 +7,8 @@ Rack Director is the server component, written in rust. Database functionality i
 `src/director`: `Device` code and main business logic.
 `src/http`: All HTTP handlers. Divided into `api` for `/api/` routes (currently unused), `cnc` for `/cnc/` routes (devices use this for automation), and `ui` for `/ui/` routes (serves `rack-director-ui`).
 `src/lifecycle`: `Lifecycle` and transition code - provisiong states of `Devices` and how they transition from one to the next.
-`src/operating_systems`: `Operating System` code, configuration for what operating systems can be installed and how.
+`src/operating_systems`: `Operating System` code, configuration for what operating systems can be installed and how (legacy — being replaced by OSM).
+`src/osm`: Operating System Modules — archive parsing, validation, and database storage for OSM packages.
 `src/plans`: `Plan` code - concrete `Actions` to move a `Device` from one `Lifecycle` state to another.
 `src/roles`: `Role` code - configuration for a group of `Devices`, including what `Operating System` to install.
 `src/storage`:  Interfaces for the storage layer. Used to store uploaded images for `Operating Systems`.
