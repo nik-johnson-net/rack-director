@@ -45,6 +45,10 @@ fn main() {
         install_path.join("firmware").to_string_lossy(),
     );
     overridable_env(
+        "RACK_DIRECTOR_BUNDLED_OSM_PATH",
+        install_path.join("osm/default").to_string_lossy(),
+    );
+    overridable_env(
         "RACK_DIRECTOR_UI_PATH",
         install_path.join("ui").to_string_lossy(),
     );
