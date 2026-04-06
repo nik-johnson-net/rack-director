@@ -12,6 +12,7 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | `dhcp.rs` | Global DHCP lease queries (all leases, by MAC) |
 | `operating_systems.rs` | OS and architecture CRUD, kernel/initramfs/module/install-script upload & download |
 | `platforms.rs` | Platform CRUD, platform-device listing |
+| `osm.rs` | OSM module CRUD, upload, export, OS enable/disable |
 | `roles.rs` | Role CRUD, role-device listing |
 | `validation.rs` | Shared validation helpers — no routes |
 
@@ -83,6 +84,22 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | POST | `/ui/operating_systems/{id}/architectures/{arch}/modules` | Upload kernel module |
 | POST | `/ui/operating_systems/{id}/architectures/{arch}/install_script` | Upload install script |
 | GET | `/ui/operating_systems/{id}/architectures/{arch}/download/{component}` | Download component |
+
+### OSM Modules (`osm.rs`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/ui/osm/modules` | List all OSM modules |
+| GET | `/ui/osm/modules/{id}` | Get module details |
+| DELETE | `/ui/osm/modules/{id}` | Delete module (blocked if Default) |
+| GET | `/ui/osm/modules/{id}/operating-systems` | List OS entries for module |
+| GET | `/ui/osm/modules/{id}/export` | Download/export OSM archive |
+| POST | `/ui/osm/upload` | Upload OSM archive (async, 10 GiB limit) |
+| GET | `/ui/osm/uploads` | List recent uploads |
+| GET | `/ui/osm/uploads/{id}` | Get upload status |
+| GET | `/ui/osm/operating-systems` | List all OS entries |
+| POST | `/ui/osm/operating-systems/{id}/disable` | Disable an OS |
+| POST | `/ui/osm/operating-systems/{id}/enable` | Enable an OS |
 
 ### Platforms (`platforms.rs`)
 
