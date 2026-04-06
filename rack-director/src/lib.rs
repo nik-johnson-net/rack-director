@@ -31,6 +31,7 @@ const DEFAULT_DATABASE_PATH: &str = env!("RACK_DIRECTOR_DATABASE_PATH");
 const DEFAULT_AGENT_IMAGES_PATH: &str = env!("RACK_DIRECTOR_AGENT_IMAGES_PATH");
 const DEFAULT_FIRMWARE_PATH: &str = env!("RACK_DIRECTOR_FIRMWARE_PATH");
 const DEFAULT_LOCAL_IMAGES_PATH: &str = env!("RACK_DIRECTOR_LOCAL_IMAGES_PATH");
+const DEFAULT_BUNDLED_OSM_PATH: &str = env!("RACK_DIRECTOR_BUNDLED_OSM_PATH");
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -117,6 +118,10 @@ pub struct Args {
     )]
     agent_images_path: String,
 
+    /// Path to the bundled Default OSM directory
+    #[arg(long, default_value = DEFAULT_BUNDLED_OSM_PATH)]
+    bundled_osm_path: String,
+
     /// Disable the wildcard broadcast socket.
     ///
     /// When set, no `0.0.0.0:PORT` socket is created. The server-identifier
@@ -169,6 +174,13 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Run migrations once. For a file-backed database the connection can be
     // dropped immediately after — the schema persists in the file.
     let _ = database::run_migrations(factory.as_ref()).await?;
+
+    // Load and sync bundled Default OSM
+    let bundled_osm = osm::load_bundled_osm(std::path::Path::new(&args.bundled_osm_path))?;
+    if let Some(ref bundled) = bundled_osm {
+        let conn = factory.open().await?;
+        osm::sync_default_osm(&conn, bundled).await?;
+    }
 
     // Determine DHCP Server Identifier (Option 54)
     // Priority: CLI arg > auto-discovered IP > fallback to gateway
