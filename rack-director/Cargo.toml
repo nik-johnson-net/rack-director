@@ -27,6 +27,10 @@ tokio = { workspace = true, features = ["rt"] }
 tokio-recvmsg = { workspace = true }
 uuid = { version = "1.20.0", features = ["serde"] }
 object_store = { version = "0.13.1", features = ["aws"] }
+zstd = "0.13"
+tar = "0.4"
+toml = "0.8"
+semver = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
