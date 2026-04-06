@@ -1915,6 +1915,7 @@ dependencies = [
  "log",
  "network-interface",
  "object_store",
+ "osm",
  "rand 0.8.5",
  "reqwest",
  "rusqlite",

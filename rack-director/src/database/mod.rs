@@ -64,7 +64,7 @@ pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
 }
 
-const LATEST_VERSION: usize = 17;
+const LATEST_VERSION: usize = 18;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -83,6 +83,7 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/15.sql"),
     include_str!("migrations/16.sql"),
     include_str!("migrations/17.sql"),
+    include_str!("migrations/18.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -108,6 +109,7 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
     Some(|conn| migrations::migration_15::strip_disk_paths(conn).boxed()),     // Migration 15
     None,                                                                      // Migration 16
     None,                                                                      // Migration 17
+    None,                                                                      // Migration 18
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.

@@ -7,6 +7,7 @@ mod disk_layout;
 mod http;
 mod lifecycle;
 mod operating_systems;
+mod osm;
 mod plans;
 mod platforms;
 mod roles;
