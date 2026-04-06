@@ -74,7 +74,7 @@ pub fn read_archive<R: Read>(reader: R) -> Result<ParsedArchive> {
 }
 
 /// Strips a leading `./` from an archive path component.
-fn normalize_path(raw: &str) -> String {
+pub fn normalize_path(raw: &str) -> String {
     raw.strip_prefix("./").unwrap_or(raw).to_owned()
 }
 

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::store::{self, OsmModule};
 use crate::database::Connection;
+use crate::storage::ImageStore;
 use osm::manifest::Manifest;
 use osm::os_config::OperatingSystemConfig;
 
@@ -258,13 +259,44 @@ fn build_storage_prefix(name: &str, version: &semver::Version) -> String {
     format!("osm/{name}/{version}/")
 }
 
-/// Resolve a file path within an OSM module.
+/// Delete any files under `"osm/"` in the image store that do not belong to a
+/// known OSM module.
 ///
-/// Returns the storage path for a file by combining the module's storage prefix with
-/// the OS directory and relative file path.  The result can be passed to ImageStore or
-/// used to locate a file under the bundled OSM directory.
-pub fn resolve_file_path(module: &OsmModule, os_dir: &str, relative_path: &str) -> String {
-    format!("{}{}/{}", module.storage_prefix, os_dir, relative_path)
+/// When rack-director restarts, in-process grace-period cleanup tasks from the
+/// previous run are lost, leaving stale files from superseded module versions.
+/// This function reconciles the image store against the database at startup,
+/// removing any path under `"osm/"` whose prefix does not match a module's
+/// `storage_prefix`.
+///
+/// Orphaned files are deleted immediately; a count is logged at `info` level.
+pub async fn cleanup_orphaned_storage(conn: &Connection, image_store: &ImageStore) -> Result<()> {
+    let known_prefixes = collect_known_prefixes(conn).await?;
+    let listed_paths = image_store
+        .list("osm/")
+        .await
+        .context("failed to list files under 'osm/'")?;
+
+    let mut deleted = 0usize;
+    for path in &listed_paths {
+        if !known_prefixes.iter().any(|p| path.starts_with(p.as_str())) {
+            image_store
+                .delete(path)
+                .await
+                .with_context(|| format!("failed to delete orphaned file '{path}'"))?;
+            deleted += 1;
+        }
+    }
+
+    log::info!("Startup storage cleanup: deleted {deleted} orphaned OSM file(s)");
+    Ok(())
+}
+
+/// Collect all `storage_prefix` values from the known OSM modules in the database.
+async fn collect_known_prefixes(conn: &Connection) -> Result<Vec<String>> {
+    let modules = store::list_modules(conn)
+        .await
+        .context("failed to list OSM modules")?;
+    Ok(modules.into_iter().map(|m| m.storage_prefix).collect())
 }
 
 #[cfg(test)]
@@ -498,22 +530,125 @@ operating_systems = ["ubuntu"]
         );
     }
 
-    #[test]
-    fn test_resolve_file_path() {
-        let module = OsmModule {
-            id: 1,
-            name: "Default".to_string(),
-            version: "1.0.0".to_string(),
-            author: "Test".to_string(),
-            description: "Test".to_string(),
-            source: "bundled".to_string(),
-            storage_prefix: "osm/Default/1.0.0/".to_string(),
-            archive_path: None,
-            created_at: None,
-            updated_at: None,
-        };
+    // ── cleanup_orphaned_storage ──────────────────────────────────────────────
 
-        let path = resolve_file_path(&module, "ubuntu", "x86-64/vmlinuz");
-        assert_eq!(path, "osm/Default/1.0.0/ubuntu/x86-64/vmlinuz");
+    /// Helper: seed a module record in the DB and a file in the store under its prefix.
+    async fn seed_module_with_files(
+        conn: &Connection,
+        store: &ImageStore,
+        name: &str,
+        version: &str,
+        filenames: &[&str],
+    ) -> String {
+        let prefix = format!("osm/{name}/{version}/");
+        super::store::create_module(
+            conn, name, version, "Author", "Desc", "uploaded", &prefix, false, None,
+        )
+        .await
+        .unwrap();
+
+        for filename in filenames {
+            let path = format!("{prefix}{filename}");
+            use tokio_util::io::ReaderStream;
+            let bytes: &[u8] = b"data";
+            let stream = Box::pin(ReaderStream::new(std::io::Cursor::new(bytes)));
+            store.upload(&path, stream).await.unwrap();
+        }
+
+        prefix
+    }
+
+    /// Files under a known module prefix must NOT be deleted.
+    #[tokio::test]
+    async fn test_cleanup_keeps_known_files() {
+        let conn = crate::database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+        let image_store = ImageStore::memory();
+
+        seed_module_with_files(&conn, &image_store, "my-module", "1.0.0", &["vmlinuz"]).await;
+
+        cleanup_orphaned_storage(&conn, &image_store).await.unwrap();
+
+        assert!(
+            image_store
+                .exists("osm/my-module/1.0.0/vmlinuz")
+                .await
+                .unwrap()
+        );
+    }
+
+    /// Files under a prefix not matching any module must be deleted.
+    #[tokio::test]
+    async fn test_cleanup_removes_orphaned_files() {
+        let conn = crate::database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+        let image_store = ImageStore::memory();
+
+        // Upload a file with no corresponding DB record.
+        use tokio_util::io::ReaderStream;
+        let stream = Box::pin(ReaderStream::new(std::io::Cursor::new(b"stale")));
+        image_store
+            .upload("osm/old-module/0.9.0/vmlinuz", stream)
+            .await
+            .unwrap();
+
+        cleanup_orphaned_storage(&conn, &image_store).await.unwrap();
+
+        assert!(
+            !image_store
+                .exists("osm/old-module/0.9.0/vmlinuz")
+                .await
+                .unwrap()
+        );
+    }
+
+    /// Mixed scenario: known and orphaned files coexist — only orphans are deleted.
+    #[tokio::test]
+    async fn test_cleanup_mixed_known_and_orphaned() {
+        let conn = crate::database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+        let image_store = ImageStore::memory();
+
+        // Seed a known module with files.
+        seed_module_with_files(&conn, &image_store, "good-module", "2.0.0", &["kernel"]).await;
+
+        // Upload an orphaned file for a superseded version (no DB row).
+        use tokio_util::io::ReaderStream;
+        let stream = Box::pin(ReaderStream::new(std::io::Cursor::new(b"old")));
+        image_store
+            .upload("osm/good-module/1.0.0/kernel", stream)
+            .await
+            .unwrap();
+
+        cleanup_orphaned_storage(&conn, &image_store).await.unwrap();
+
+        assert!(
+            image_store
+                .exists("osm/good-module/2.0.0/kernel")
+                .await
+                .unwrap(),
+            "current version file must be kept"
+        );
+        assert!(
+            !image_store
+                .exists("osm/good-module/1.0.0/kernel")
+                .await
+                .unwrap(),
+            "old version file must be deleted"
+        );
+    }
+
+    /// When no files exist under "osm/", cleanup must succeed without error.
+    #[tokio::test]
+    async fn test_cleanup_empty_store_is_ok() {
+        let conn = crate::database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+        let image_store = ImageStore::memory();
+
+        cleanup_orphaned_storage(&conn, &image_store).await.unwrap();
     }
 }

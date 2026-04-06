@@ -196,6 +196,11 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     let storage_config = build_storage_config(&args, &public_url)?;
     let image_store = ImageStore::new(storage_config)?;
 
+    // Remove stale OSM files left behind by interrupted grace-period cleanup tasks
+    // from previous runs. Must run after both the database and image store are ready.
+    let conn = factory.open().await?;
+    osm::cleanup_orphaned_storage(&conn, &image_store).await?;
+
     // Cleanup task uses the shared factory.
     let lease_cleanup_handle = dhcp::spawn_lease_cleanup_task(factory.clone());
 
