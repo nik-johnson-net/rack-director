@@ -3,6 +3,7 @@ mod device_registration;
 mod install_script;
 mod ipxe_scripts;
 mod network_processing;
+mod osm_files;
 mod poll;
 
 use std::sync::Arc;
@@ -45,7 +46,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/cnc/install_script", get(install_script_handler))
         .route("/cnc/agent-images/{filename}", get(agent_images_handler))
         .route("/cnc/boot/{filename}", get(boot_files::boot_file_handler))
-        .route("/cnc/files/{*path}", get(image_store_handler))
+        .route(
+            "/cnc/osm/{module}/{version}/{os_dir}/{*file}",
+            get(osm_files::osm_file_handler),
+        )
         .route("/cnc/update_attributes", post(update_attributes))
         .route("/cnc/action_success", post(action_success))
         .route("/cnc/action_failed", post(action_failed))
@@ -191,29 +195,6 @@ async fn install_script_handler(
     install_script::render_for_device(&conn, &state.image_store, &uuid).await
 }
 
-/// Serve a file from the image store at `/cnc/files/{path}`.
-///
-/// Used by iPXE to download OS installer kernels and initramfs images that have been
-/// uploaded to the local image store. The `--storage-base-url` must be set to
-/// `http://<director>/cnc/files` so that `ImageStore::get_url` generates URLs that
-/// route here.
-async fn image_store_handler(
-    State(state): State<Arc<AppState>>,
-    extract::Path(path): extract::Path<String>,
-) -> Result<impl axum::response::IntoResponse, StatusCode> {
-    let (stream, size) = state.image_store.download(&path).await.map_err(|e| {
-        warn!("image_store_handler: failed to download {}: {}", path, e);
-        StatusCode::NOT_FOUND
-    })?;
-    let body = axum::body::Body::from_stream(stream);
-    Ok(axum::http::Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_LENGTH, size)
-        .body(body)
-        .unwrap())
-}
-
 async fn agent_images_handler(
     State(state): State<Arc<AppState>>,
     extract::Path(filename): extract::Path<String>,
@@ -277,13 +258,18 @@ async fn update_attributes(
 
     // Serialize incoming DeviceAttributes to JSON map for storage
     // This ensures type safety at the API boundary
-    let attributes_json = match serde_json::to_value(&incoming_attributes) {
+    let mut attributes_json = match serde_json::to_value(&incoming_attributes) {
         Ok(serde_json::Value::Object(map)) => map,
         _ => {
             warn!("Failed to serialize device attributes for {}", uuid);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
+
+    // Remove null values — null from the agent means "not provided", not "clear this field".
+    // Without this, optional fields like `hostname` (set by register_device) would be
+    // overwritten with null when the agent submits a hardware scan that omits them.
+    attributes_json.retain(|_, v| !v.is_null());
 
     let conn = match state.connection_factory.open().await {
         Ok(conn) => conn,
@@ -543,12 +529,7 @@ async fn get_disk_layout(
         .await
         .map_err(Error::ServerInternalError)?;
 
-    let mut layout = role.disk_layout;
-
-    // Inject boot partition into the ROOT disk before label resolution, so that ROOT is
-    // still identifiable by label. After resolution the device field becomes a real path,
-    // making it impossible to determine which disk was ROOT.
-    crate::disk_layout::inject_boot_partition(&mut layout, device.attributes.boot_mode);
+    let layout = role.disk_layout;
 
     // Check if layout uses labels
     if crate::disk_layout::layout_uses_labels(&layout) {
@@ -1683,81 +1664,6 @@ mod tests {
             result.disks[0].device, "/dev/disk/by-path/pci-0000:05:00.0-ata-1",
             "ROOT label should resolve to the device's own by-path"
         );
-    }
-
-    /// Verify that `image_store_handler` sets a `Content-Length` header so that iPXE does not
-    /// fall back to chunked transfer encoding, which causes it to hang.
-    #[tokio::test]
-    async fn test_image_store_handler_sets_content_length() {
-        let (state, _temp_dir) = setup_test_state().await;
-
-        // Upload a small test file into the in-memory image store.
-        let file_data = b"kernel image data for testing";
-        let stream = Box::pin(futures::stream::once(async {
-            Ok::<_, std::io::Error>(bytes::Bytes::from_static(file_data))
-        }));
-        state
-            .image_store
-            .upload("test-kernel", stream)
-            .await
-            .unwrap();
-
-        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
-            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
-        ));
-
-        let request = Request::builder()
-            .uri("/cnc/files/test-kernel")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let content_length = response
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .expect("Content-Length header must be present so iPXE does not use chunked encoding")
-            .to_str()
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
-        assert_eq!(
-            content_length,
-            file_data.len() as u64,
-            "Content-Length must match the actual file size"
-        );
-
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .expect("Content-Type header must be present")
-            .to_str()
-            .unwrap();
-        assert_eq!(content_type, "application/octet-stream");
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(body.as_ref(), file_data);
-    }
-
-    /// Verify that `image_store_handler` returns 404 for a missing file.
-    #[tokio::test]
-    async fn test_image_store_handler_not_found() {
-        let (state, _temp_dir) = setup_test_state().await;
-
-        let app = routes(state).layer(axum::extract::connect_info::MockConnectInfo(
-            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
-        ));
-
-        let request = Request::builder()
-            .uri("/cnc/files/nonexistent-file")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
 
