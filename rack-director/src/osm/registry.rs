@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::store::{self, OsmModule};
 use crate::database::Connection;
@@ -13,8 +13,6 @@ use osm::os_config::OperatingSystemConfig;
 pub struct BundledOsm {
     pub manifest: Manifest,
     pub os_configs: HashMap<String, OperatingSystemConfig>,
-    /// Root directory on disk where the bundled OSM files live.
-    pub path: PathBuf,
 }
 
 /// Read the bundled Default OSM from a directory on disk.
@@ -41,7 +39,6 @@ pub fn load_bundled_osm(path: &Path) -> Result<Option<BundledOsm>> {
     Ok(Some(BundledOsm {
         manifest,
         os_configs,
-        path: path.to_path_buf(),
     }))
 }
 
