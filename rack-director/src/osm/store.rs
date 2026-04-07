@@ -251,6 +251,26 @@ pub async fn list_all_operating_systems(conn: &Connection) -> Result<Vec<OsmOper
     .context("Failed to list all OSM operating systems")
 }
 
+/// Fetch a single OS entry by module ID, name, and release (case-insensitive).
+///
+/// Used by `resolve_os` to avoid loading all OS entries for the module.
+pub async fn get_operating_system_by_name_release(
+    conn: &Connection,
+    module_id: i64,
+    name: &str,
+    release: &str,
+) -> Result<OsmOperatingSystem> {
+    conn.query_one(
+        "SELECT id, module_id, dir_name, name, release, config, disabled, created_at, updated_at
+         FROM osm_operating_systems
+         WHERE module_id = ?1 AND LOWER(name) = LOWER(?2) AND LOWER(release) = LOWER(?3)",
+        (module_id, name.to_string(), release.to_string()),
+        os_from_row,
+    )
+    .await
+    .context("OSM operating system not found")
+}
+
 /// Fetch a single OS entry by module + directory name.
 pub async fn get_operating_system(
     conn: &Connection,
