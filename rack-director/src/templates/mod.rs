@@ -32,23 +32,35 @@ pub struct DeviceInfo {
 /// - `{{ this.disk }}` - Disk device path (e.g., /dev/disk/by-path/...)
 /// - `{{ this.device }}` - Partition device path (e.g., /dev/disk/by-path/...-part1)
 /// - `{{ this.device_name }}` - Partition path without /dev/ prefix (e.g., disk/by-path/...-part1)
+/// - `{{ this.disk_name }}` - Disk path without /dev/ prefix (e.g., disk/by-path/...)
 /// - `{{ this.label }}` - GPT partition label
 /// - `{{ this.size }}` - Partition size string
 /// - `{{ this.filesystem }}` - Filesystem type, or null for LVM/ZFS partitions
 /// - `{{ this.mount_point }}` - Mount point, or null
 /// - `{{ this.flags }}` - Array of partition flags (e.g., ["esp", "boot"])
 /// - `{{ this.volume_group }}` - LVM volume group name, or null
+/// - `{{ this.is_bios_grub }}` - true if the partition has the bios_grub flag
+/// - `{{ this.is_esp }}` - true if the partition has the esp flag
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PartitionContext {
     pub disk: String,
     pub device: String,
     pub device_name: String,
+    /// Disk path without the /dev/ prefix (e.g., "disk/by-path/pci-...").
+    /// Useful for Anaconda/kickstart directives that expect a bare device name.
+    pub disk_name: String,
     pub label: String,
     pub size: String,
     pub filesystem: Option<String>,
     pub mount_point: Option<String>,
     pub flags: Vec<String>,
     pub volume_group: Option<String>,
+    /// True when `flags` contains `"bios_grub"`. Provided as a convenience
+    /// boolean so templates do not need to iterate the flags array.
+    pub is_bios_grub: bool,
+    /// True when `flags` contains `"esp"`. Provided as a convenience boolean
+    /// so templates do not need to iterate the flags array.
+    pub is_esp: bool,
 }
 
 /// Context for an LVM logical volume in the install script template.
@@ -86,16 +98,23 @@ pub fn build_disk_layout_context(
         for (i, partition) in disk.partitions.iter().enumerate() {
             let device = partition_path(&disk.device, i + 1);
             let device_name = device.trim_start_matches("/dev/").to_string();
+            let disk_name = disk.device.trim_start_matches("/dev/").to_string();
+            let flags = partition.flags.clone().unwrap_or_default();
+            let is_bios_grub = flags.contains(&"bios_grub".to_string());
+            let is_esp = flags.contains(&"esp".to_string());
             partitions.push(PartitionContext {
                 disk: disk.device.clone(),
                 device,
                 device_name,
+                disk_name,
                 label: partition.label.clone(),
                 size: partition.size.clone(),
                 filesystem: partition.filesystem.clone(),
                 mount_point: partition.mount_point.clone(),
-                flags: partition.flags.clone().unwrap_or_default(),
+                flags,
                 volume_group: partition.volume_group.clone(),
+                is_bios_grub,
+                is_esp,
             });
         }
     }
@@ -193,6 +212,80 @@ pub fn render_install_script(
         "config": role.config_template,
         "partitions": partitions,
         "logical_volumes": logical_volumes,
+    });
+
+    Ok(handlebars.render_template(template, &context)?)
+}
+
+/// Render an install script template using OSM-resolved context.
+///
+/// Similar to `render_install_script` but takes OS name/version as strings
+/// and template variables for the config context.
+#[allow(clippy::too_many_arguments)]
+pub fn render_install_script_osm(
+    template: &str,
+    device: &DeviceInfo,
+    role_name: &str,
+    role_disk_layout: &DiskLayout,
+    role_config_template: &Option<serde_json::Value>,
+    os_name: &str,
+    os_version: &str,
+    network: &NetworkInfo,
+    disk_layout: &DiskLayout,
+    root_url: &str,
+) -> Result<String> {
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(handlebars::no_escape);
+
+    let (partitions, logical_volumes) = build_disk_layout_context(disk_layout);
+
+    // Deduplicated list of VG names in insertion order, for templates that need
+    // to declare each volume group once (e.g., Anaconda's `volgroup` directive).
+    let mut volume_groups: Vec<String> = Vec::new();
+    for lv in &logical_volumes {
+        if !volume_groups.contains(&lv.vg_name) {
+            volume_groups.push(lv.vg_name.clone());
+        }
+    }
+
+    let boot_mode_str = device
+        .boot_mode
+        .map(|m| match m {
+            common::FirmwareMode::Bios => "bios",
+            common::FirmwareMode::Uefi => "uefi",
+        })
+        .unwrap_or("");
+    let is_uefi = device.boot_mode == Some(common::FirmwareMode::Uefi);
+    let is_bios = device.boot_mode == Some(common::FirmwareMode::Bios);
+
+    let context = json!({
+        "device": {
+            "uuid": device.uuid.to_string(),
+            "hostname": device.hostname.as_deref().unwrap_or("unknown"),
+            "mac_address": network.mac_address,
+            "ip_address": network.ip_address,
+            "gateway": network.gateway,
+            "dns_servers": network.dns_servers.join(","),
+            "dns_servers_csv": network.dns_servers.join(","),
+            "netmask": network.netmask,
+            "prefix_length": network.prefix_length,
+            "boot_mode": boot_mode_str,
+            "is_uefi": is_uefi,
+            "is_bios": is_bios,
+        },
+        "role": {
+            "name": role_name,
+            "disk_layout": role_disk_layout,
+        },
+        "os": {
+            "name": os_name,
+            "version": os_version,
+        },
+        "config": role_config_template,
+        "partitions": partitions,
+        "logical_volumes": logical_volumes,
+        "volume_groups": volume_groups,
+        "rack_director_url": root_url,
     });
 
     Ok(handlebars.render_template(template, &context)?)
@@ -873,22 +966,21 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
     }
 
     #[test]
-    fn test_render_is_uefi_false_when_bios() {
-        let template = "{{#if device.is_uefi}}UEFI{{else}}NOT_UEFI{{/if}}";
-        let device = DeviceInfo {
-            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
-            hostname: Some("server01".to_string()),
-            boot_mode: Some(common::FirmwareMode::Bios),
-        };
-        let result = render_install_script(
+    fn test_render_install_script_osm() {
+        let template = "hostname: {{ device.hostname }}\nos: {{ os.name }} {{ os.version }}";
+        let result = render_install_script_osm(
             template,
-            &device,
-            &make_role(empty_disk_layout()),
-            &make_os(),
+            &make_device(),
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Ubuntu",
+            "22.04",
             &make_network(),
             &empty_disk_layout(),
+            "",
         )
         .unwrap();
-        assert_eq!(result, "NOT_UEFI");
+        assert_eq!(result, "hostname: server01\nos: Ubuntu 22.04");
     }
 }
