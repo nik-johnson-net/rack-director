@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use anyhow::Result;
-use futures::future::try_join_all;
 
-use crate::{storage::ImageStore, templates};
+use crate::templates;
 
 #[derive(Debug)]
 pub enum BootTarget {
@@ -29,10 +26,14 @@ pub enum BootTarget {
 }
 
 impl BootTarget {
+    /// Generate an iPXE script for this boot target.
+    ///
+    /// Storage paths stored in `NetBoot` variants use the format
+    /// `osm/{module}/{version}/{os_dir}/{file}`.  The `/cnc/` prefix is
+    /// prepended here to produce the full URL that iPXE will fetch.
     pub async fn to_ipxe_script(
         &self,
         root_url: &str,
-        image_store: &Arc<ImageStore>,
         device_uuid: Option<&uuid::Uuid>,
     ) -> Result<String> {
         match self {
@@ -45,8 +46,6 @@ impl BootTarget {
                 );
 
                 // Agent Images are shipped with rack-director and not stored in the ImageStore.
-                // Perhaps in the future we can support agent components existing in the ImageStore
-                // for consistency and to support remote / distributed storage.
                 let kernel = format!("{}/cnc/agent-images/vmlinuz", root_url);
                 let initramfs = format!("{}/cnc/agent-images/initramfs.img", root_url);
 
@@ -60,11 +59,14 @@ impl BootTarget {
                 modules,
                 cmdline,
             } => {
-                // Resolve images to urls.
-                let kernel_url = image_store.get_url(kernel).await?;
-                let initrd_url = image_store.get_url(ramdisk).await?;
-                let module_futures = modules.iter().map(|module| image_store.get_url(module));
-                let module_urls = try_join_all(module_futures).await?;
+                // Storage paths are like "osm/{module}/{version}/{os_dir}/{file}".
+                // Prepend "{root_url}/cnc/" to produce the full serving URL.
+                let kernel_url = format!("{}/cnc/{}", root_url, kernel);
+                let initrd_url = format!("{}/cnc/{}", root_url, ramdisk);
+                let module_urls: Vec<String> = modules
+                    .iter()
+                    .map(|m| format!("{}/cnc/{}", root_url, m))
+                    .collect();
 
                 // Run template.
                 let resolved_cmdline =

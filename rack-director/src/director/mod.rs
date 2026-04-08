@@ -2042,10 +2042,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Create OS and role with label-based layout
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
+        // Create role with label-based layout
         let layout = common::disk_layout::DiskLayout {
             disks: vec![common::disk_layout::DiskConfig {
                 device: "ROOT".to_string(), // Platform label
@@ -2059,8 +2056,12 @@ mod tests {
             &conn,
             "label-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             None,
         )
@@ -2113,9 +2114,6 @@ mod tests {
             .unwrap();
 
         // Create role that references ROOT label (not in platform)
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![common::disk_layout::DiskConfig {
                 device: "ROOT".to_string(),
@@ -2129,8 +2127,12 @@ mod tests {
             &conn,
             "missing-label-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             None,
         )
@@ -2178,9 +2180,6 @@ mod tests {
             .unwrap();
 
         // Create role that uses ROOT label
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![common::disk_layout::DiskConfig {
                 device: "ROOT".to_string(),
@@ -2194,8 +2193,12 @@ mod tests {
             &conn,
             "label-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             None,
         )
@@ -2222,9 +2225,6 @@ mod tests {
             .unwrap();
 
         // Create role with path-based layout (no labels)
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![common::disk_layout::DiskConfig {
                 device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(), // Absolute path, not a label
@@ -2238,8 +2238,12 @@ mod tests {
             &conn,
             "path-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             None,
         )
@@ -2273,9 +2277,6 @@ mod tests {
             .unwrap();
 
         // Create a UEFI-only role
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![],
             volume_groups: None,
@@ -2285,8 +2286,12 @@ mod tests {
             &conn,
             "uefi-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             Some(common::FirmwareMode::Uefi),
         )
@@ -2325,9 +2330,6 @@ mod tests {
             .unwrap();
 
         // Create a UEFI-only role
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![],
             volume_groups: None,
@@ -2337,8 +2339,12 @@ mod tests {
             &conn,
             "uefi-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             Some(common::FirmwareMode::Uefi),
         )
@@ -2365,9 +2371,6 @@ mod tests {
             .unwrap();
 
         // Create a UEFI-constrained role
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![],
             volume_groups: None,
@@ -2377,8 +2380,12 @@ mod tests {
             &conn,
             "uefi-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             Some(common::FirmwareMode::Uefi),
         )

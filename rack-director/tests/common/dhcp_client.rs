@@ -27,6 +27,7 @@ pub enum Architecture {
 
 /// DHCP boot options extracted from DHCP response
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BootOptions {
     pub next_server: Ipv4Addr,
     pub bootfile_name: String,

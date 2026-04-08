@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{Result, anyhow};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;

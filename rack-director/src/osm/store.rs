@@ -272,6 +272,7 @@ pub async fn get_operating_system_by_name_release(
 }
 
 /// Fetch a single OS entry by module + directory name.
+#[cfg(test)]
 pub async fn get_operating_system(
     conn: &Connection,
     module_id: i64,

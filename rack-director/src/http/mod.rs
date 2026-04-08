@@ -35,6 +35,11 @@ pub struct AppState {
     /// Number of seconds an unprovisioned or unknown device sleeps before
     /// rebooting to retry PXE boot.  Configurable so e2e tests can set it to 0.
     pub unprovisioned_sleep_secs: u64,
+    /// Path to the bundled Default OSM directory on disk.
+    ///
+    /// When set, requests for bundled OSM files are served directly from this
+    /// directory rather than from the image store (which does not contain them).
+    pub bundled_osm_path: Option<PathBuf>,
 }
 
 pub struct StartResult {
@@ -50,6 +55,7 @@ pub async fn start<T: Into<SocketAddr>>(
     boot_file_provider: Arc<dyn BootFileProvider>,
     dhcp: DhcpControl,
     unprovisioned_sleep_secs: u64,
+    bundled_osm_path: Option<PathBuf>,
 ) -> Result<StartResult> {
     let state = Arc::new(AppState {
         connection_factory,
@@ -58,6 +64,7 @@ pub async fn start<T: Into<SocketAddr>>(
         boot_file_provider,
         dhcp,
         unprovisioned_sleep_secs,
+        bundled_osm_path,
     });
 
     let app = Router::new()

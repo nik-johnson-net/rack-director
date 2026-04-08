@@ -31,15 +31,27 @@ async fn create_role(
 
     let conn = state.connection_factory.open().await?;
 
-    // Verify the OS exists
-    crate::operating_systems::store::get(&conn, req.os_id).await?;
+    // Verify the referenced OS exists in the OSM registry
+    crate::osm::resolve_os(
+        &conn,
+        &req.osm_module,
+        &req.os_name,
+        &req.os_release,
+        &req.os_arch,
+    )
+    .await
+    .map_err(|e| HttpError::BadRequest(format!("Invalid OS reference: {}", e)))?;
 
     let role = crate::roles::store::create(
         &conn,
         &req.name,
         req.description.as_deref(),
-        req.os_id,
+        &req.osm_module,
+        &req.os_name,
+        &req.os_release,
+        &req.os_arch,
         &req.disk_layout,
+        req.cmdline_args.as_deref(),
         req.config_template.as_ref(),
         req.firmware_mode,
     )
@@ -49,11 +61,9 @@ async fn create_role(
 }
 
 // List all roles
-async fn list_roles(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<RoleWithOs>>, HttpError> {
+async fn list_roles(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Role>>, HttpError> {
     let conn = state.connection_factory.open().await?;
-    let roles = crate::roles::store::list_with_os(&conn).await?;
+    let roles = crate::roles::store::list(&conn).await?;
     Ok(Json(roles))
 }
 
@@ -61,9 +71,9 @@ async fn list_roles(
 async fn get_role(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-) -> Result<Json<RoleWithOs>, HttpError> {
+) -> Result<Json<Role>, HttpError> {
     let conn = state.connection_factory.open().await?;
-    let role = crate::roles::store::get_with_os(&conn, id).await?;
+    let role = crate::roles::store::get(&conn, id).await?;
     Ok(Json(role))
 }
 
@@ -83,9 +93,21 @@ async fn update_role(
 
     let conn = state.connection_factory.open().await?;
 
-    // If updating OS, verify it exists
-    if let Some(os_id) = req.os_id {
-        crate::operating_systems::store::get(&conn, os_id).await?;
+    // If updating any OSM fields, validate the resulting OS reference
+    if req.osm_module.is_some()
+        || req.os_name.is_some()
+        || req.os_release.is_some()
+        || req.os_arch.is_some()
+    {
+        // Get current role to fill in unchanged fields
+        let current = crate::roles::store::get(&conn, id).await?;
+        let module = req.osm_module.as_deref().unwrap_or(&current.osm_module);
+        let name = req.os_name.as_deref().unwrap_or(&current.os_name);
+        let release = req.os_release.as_deref().unwrap_or(&current.os_release);
+        let arch = req.os_arch.as_deref().unwrap_or(&current.os_arch);
+        crate::osm::resolve_os(&conn, module, name, release, arch)
+            .await
+            .map_err(|e| HttpError::BadRequest(format!("Invalid OS reference: {}", e)))?;
     }
 
     // Platform compatibility check: if the new disk layout uses labels, verify that every
@@ -102,8 +124,12 @@ async fn update_role(
         crate::roles::store::UpdateRoleParams {
             name: req.name.as_deref(),
             description: req.description.as_deref(),
-            os_id: req.os_id,
+            osm_module: req.osm_module.as_deref(),
+            os_name: req.os_name.as_deref(),
+            os_release: req.os_release.as_deref(),
+            os_arch: req.os_arch.as_deref(),
             disk_layout: req.disk_layout.as_ref(),
+            cmdline_args: req.cmdline_args.as_deref(),
             config_template: req.config_template.as_ref(),
             firmware_mode: req.firmware_mode,
             clear_firmware_mode: req.clear_firmware_mode,
@@ -254,22 +280,57 @@ mod tests {
         }
     }
 
-    /// Create an OS, returning its ID.
-    async fn create_os(conn: &database::Connection) -> i64 {
-        crate::operating_systems::store::create(conn, "Ubuntu", "24.04", None)
+    /// Create an OSM module with a single Ubuntu 24.04 x86-64 OS entry.
+    async fn create_osm_module(conn: &database::Connection) {
+        crate::osm::store::create_module(
+            conn,
+            "Default",
+            "1.0.0",
+            "Test",
+            "Test module",
+            "bundled",
+            "osm/Default/1.0.0/",
+            None,
+        )
+        .await
+        .unwrap();
+        let config = osm::os_config::OperatingSystemConfig {
+            name: "Ubuntu".to_string(),
+            release: "24.04".to_string(),
+            architectures: vec![osm::os_config::ArchitectureConfig {
+                arch: "x86-64".to_string(),
+                kernel: "vmlinuz".to_string(),
+                initramfs: "initrd.img".to_string(),
+                modules: vec![],
+                cmdline: String::new(),
+                install_template: "install.sh".to_string(),
+            }],
+            template_variables: vec![],
+        };
+        crate::osm::store::create_operating_system(conn, 1, "ubuntu", "Ubuntu", "24.04", &config)
             .await
-            .unwrap()
-            .id
-            .unwrap()
+            .unwrap();
     }
 
     /// Create a role with the given disk layout, returning its ID.
-    async fn create_role(conn: &database::Connection, os_id: i64, layout: &DiskLayout) -> i64 {
-        crate::roles::store::create(conn, "test-role", None, os_id, layout, None, None)
-            .await
-            .unwrap()
-            .id
-            .unwrap()
+    async fn create_role_helper(conn: &database::Connection, layout: &DiskLayout) -> i64 {
+        crate::roles::store::create(
+            conn,
+            "test-role",
+            None,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            layout,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .id
+        .unwrap()
     }
 
     /// Register a device and assign it to a role.
@@ -291,9 +352,8 @@ mod tests {
     #[tokio::test]
     async fn test_no_devices_returns_ok() {
         let conn = setup_db(test_connection_factory!()).await;
-
-        let os_id = create_os(&conn).await;
-        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        create_osm_module(&conn).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await;
 
         let result = check_platform_compatibility(&conn, role_id, &label_layout()).await;
         assert!(result.is_ok());
@@ -306,9 +366,8 @@ mod tests {
     #[tokio::test]
     async fn test_devices_without_platform_returns_ok() {
         let conn = setup_db(test_connection_factory!()).await;
-
-        let os_id = create_os(&conn).await;
-        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        create_osm_module(&conn).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await;
         let device_uuid = test_uuid(1);
         create_device_with_role(&conn, device_uuid, role_id).await;
         // Device has no platform assigned — platform_id remains NULL.
@@ -322,9 +381,8 @@ mod tests {
     #[tokio::test]
     async fn test_compatible_platform_returns_ok() {
         let conn = setup_db(test_connection_factory!()).await;
-
-        let os_id = create_os(&conn).await;
-        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        create_osm_module(&conn).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await;
         let device_uuid = test_uuid(1);
         create_device_with_role(&conn, device_uuid, role_id).await;
 
@@ -354,10 +412,9 @@ mod tests {
     #[tokio::test]
     async fn test_incompatible_platform_returns_validation_error() {
         let conn = setup_db(test_connection_factory!()).await;
-
-        let os_id = create_os(&conn).await;
+        create_osm_module(&conn).await;
         // The role itself uses a label-based layout — content doesn't affect this check.
-        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await;
         let device_uuid = test_uuid(1);
         create_device_with_role(&conn, device_uuid, role_id).await;
 
@@ -409,9 +466,8 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_devices_same_platform_returns_ok() {
         let conn = setup_db(test_connection_factory!()).await;
-
-        let os_id = create_os(&conn).await;
-        let role_id = create_role(&conn, os_id, &label_layout()).await;
+        create_osm_module(&conn).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await;
 
         let platform = crate::platforms::store::create(
             &conn,

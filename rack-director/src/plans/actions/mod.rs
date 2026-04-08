@@ -88,8 +88,7 @@ impl Action {
 /// Console and debugging kernel arguments shared by both the agent image boot and the OS
 /// installer boot. These args ensure serial console output is available for debugging
 /// regardless of which boot stage is running.
-const DEFAULT_LINUX_CMDLINE: &str =
-    "console=ttyS0 console=ttyS1,115200n8 earlyprintk=serial,ttyS0,115200n8";
+const DEFAULT_LINUX_CMDLINE: &str = "console=ttyS1,115200n8";
 
 /// Prepend the default Linux cmdline args to an OS-provided cmdline string.
 ///
@@ -115,9 +114,6 @@ fn generate_agent_boot_target(action_name: &str) -> Result<BootTarget> {
 
 /// Generate boot target for OS installation
 async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<BootTarget> {
-    // Get device architecture from the passed device
-    let architecture = ctx.device.architecture;
-
     // Get device role
     let role_id = ctx
         .device
@@ -126,16 +122,34 @@ async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<Boot
 
     let role = crate::roles::store::get(ctx.conn, role_id).await?;
 
-    // Get OS architecture configuration
-    let os_arch =
-        crate::operating_systems::store::get_architecture(ctx.conn, role.os_id, architecture)
-            .await?;
+    // Resolve OS from OSM registry
+    let resolved = crate::osm::resolve_os(
+        ctx.conn,
+        &role.osm_module,
+        &role.os_name,
+        &role.os_release,
+        &role.os_arch,
+    )
+    .await?;
 
-    let cmdline = prepend_default_cmdline(os_arch.cmdline_args);
+    // Build cmdline: prepend defaults, then OS cmdline, then role cmdline
+    let os_cmdline = resolved.cmdline().to_string();
+    let mut cmdline = prepend_default_cmdline(if os_cmdline.is_empty() {
+        None
+    } else {
+        Some(os_cmdline)
+    });
+
+    // Append role-level cmdline args if present
+    if let Some(ref role_cmdline) = role.cmdline_args {
+        if !role_cmdline.is_empty() {
+            cmdline = format!("{} {}", cmdline, role_cmdline);
+        }
+    }
 
     Ok(BootTarget::NetBoot {
-        ramdisk: os_arch.initramfs_path.clone(),
-        kernel: os_arch.kernel_path.clone(),
+        ramdisk: resolved.initramfs_storage_path(),
+        kernel: resolved.kernel_storage_path(),
         cmdline,
         modules: Vec::new(),
     })
@@ -148,8 +162,8 @@ mod tests {
     use crate::operating_systems::Architecture;
     use crate::roles::DiskLayout;
     use crate::{
-        database, database::DatabaseConnectionFactory, operating_systems::store as os_store,
-        roles::store as roles_store, test_connection_factory,
+        database, database::DatabaseConnectionFactory, roles::store as roles_store,
+        test_connection_factory,
     };
     use std::sync::Arc;
     use uuid::Uuid;
@@ -229,27 +243,38 @@ mod tests {
     async fn test_install_os_action_to_boot_target_success() {
         let conn = setup_test_db(test_connection_factory!()).await;
 
-        // Create an OS with architecture
-        let os = os_store::create(&conn, "Ubuntu", "24.04", Some("Ubuntu 24.04 LTS"))
-            .await
-            .unwrap();
-        let os_id = os.id.unwrap();
-
-        // Add architecture configuration with cmdline template
-        os_store::upsert_architecture(
+        // Set up OSM module with an OS entry
+        crate::osm::store::create_module(
             &conn,
-            os_id,
-            Architecture::X86_64,
-            "installer/ubuntu-24.04/vmlinuz",
-            "installer/ubuntu-24.04/initrd.img",
-            vec![],
-            Some("console=ttyS0 autoinstall ds=nocloud-net;s={{install_script_url}}"),
+            "Default",
+            "1.0.0",
+            "Test",
+            "Test",
+            "bundled",
+            "osm/Default/1.0.0/",
             None,
         )
         .await
         .unwrap();
+        let config = osm::os_config::OperatingSystemConfig {
+            name: "TestOS".to_string(),
+            release: "1.0".to_string(),
+            architectures: vec![osm::os_config::ArchitectureConfig {
+                arch: "x86-64".to_string(),
+                kernel: "vmlinuz".to_string(),
+                initramfs: "initrd.img".to_string(),
+                modules: vec![],
+                cmdline: "console=ttyS0 autoinstall ds=nocloud-net;s={{install_script_url}}"
+                    .to_string(),
+                install_template: "install.sh".to_string(),
+            }],
+            template_variables: vec![],
+        };
+        crate::osm::store::create_operating_system(&conn, 1, "testos", "TestOS", "1.0", &config)
+            .await
+            .unwrap();
 
-        // Create a role
+        // Create a role referencing the OSM module
         let disk_layout = DiskLayout {
             disks: vec![],
             volume_groups: None,
@@ -259,8 +284,12 @@ mod tests {
             &conn,
             "web-server",
             Some("Web server role"),
-            os_id,
+            "Default",
+            "TestOS",
+            "1.0",
+            "x86-64",
             &disk_layout,
+            None,
             None,
             None,
         )
@@ -306,8 +335,8 @@ mod tests {
                 cmdline,
                 modules: _,
             } => {
-                assert!(kernel.contains("installer/ubuntu-24.04/vmlinuz"));
-                assert!(ramdisk.contains("installer/ubuntu-24.04/initrd.img"));
+                assert_eq!(kernel, "osm/Default/1.0.0/testos/vmlinuz");
+                assert_eq!(ramdisk, "osm/Default/1.0.0/testos/initrd.img");
                 assert!(cmdline.contains("console=ttyS0"));
                 assert!(cmdline.contains("autoinstall"));
                 assert!(cmdline.contains("ds=nocloud-net;s={{install_script_url}}"));
@@ -356,27 +385,37 @@ mod tests {
     async fn test_install_os_action_with_no_cmdline_template() {
         let conn = setup_test_db(test_connection_factory!()).await;
 
-        // Create an OS with architecture but NO cmdline template
-        let os = os_store::create(&conn, "Debian", "12", Some("Debian 12"))
-            .await
-            .unwrap();
-        let os_id = os.id.unwrap();
-
-        // Add architecture configuration WITHOUT cmdline template
-        os_store::upsert_architecture(
+        // Set up OSM module with an OS entry that has NO cmdline args
+        crate::osm::store::create_module(
             &conn,
-            os_id,
-            Architecture::X86_64,
-            "installer/debian-12/vmlinuz",
-            "installer/debian-12/initrd.img",
-            vec![],
-            None, // No cmdline template
+            "Default",
+            "1.0.0",
+            "Test",
+            "Test",
+            "bundled",
+            "osm/Default/1.0.0/",
             None,
         )
         .await
         .unwrap();
+        let config = osm::os_config::OperatingSystemConfig {
+            name: "Debian".to_string(),
+            release: "12".to_string(),
+            architectures: vec![osm::os_config::ArchitectureConfig {
+                arch: "x86-64".to_string(),
+                kernel: "vmlinuz".to_string(),
+                initramfs: "initrd.img".to_string(),
+                modules: vec![],
+                cmdline: String::new(), // No cmdline template
+                install_template: "install.sh".to_string(),
+            }],
+            template_variables: vec![],
+        };
+        crate::osm::store::create_operating_system(&conn, 1, "debian", "Debian", "12", &config)
+            .await
+            .unwrap();
 
-        // Create a role
+        // Create a role referencing the OSM module
         let disk_layout = DiskLayout {
             disks: vec![],
             volume_groups: None,
@@ -386,8 +425,12 @@ mod tests {
             &conn,
             "database-server",
             Some("Database server role"),
-            os_id,
+            "Default",
+            "Debian",
+            "12",
+            "x86-64",
             &disk_layout,
+            None,
             None,
             None,
         )
@@ -433,8 +476,8 @@ mod tests {
                 cmdline,
                 modules: _,
             } => {
-                assert!(kernel.contains("installer/debian-12/vmlinuz"));
-                assert!(ramdisk.contains("installer/debian-12/initrd.img"));
+                assert_eq!(kernel, "osm/Default/1.0.0/debian/vmlinuz");
+                assert_eq!(ramdisk, "osm/Default/1.0.0/debian/initrd.img");
                 // When no OS cmdline is provided, the cmdline should equal only the defaults.
                 assert_eq!(
                     cmdline, DEFAULT_LINUX_CMDLINE,
