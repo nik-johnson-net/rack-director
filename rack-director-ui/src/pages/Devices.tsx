@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useLoaderData, useNavigate } from "react-router";
 import { Monitor } from "lucide-react";
-import type { Device, Platform, RoleWithOs } from "@/lib/client";
+import type { Device, Platform, Role } from "@/lib/client";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 interface DevicesLoaderData {
   devices: Device[];
   platforms: Platform[];
-  roles: RoleWithOs[];
+  roles: Role[];
 }
 
 function Devices() {
