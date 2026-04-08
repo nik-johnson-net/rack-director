@@ -1,11 +1,11 @@
-import type { RoleWithOs } from "@/lib/client";
+import type { Role } from "@/lib/client";
 import { useLoaderData, useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Shield } from "lucide-react";
 
-function diskLayoutSummary(role: RoleWithOs): string {
+function diskLayoutSummary(role: Role): string {
   const diskCount = role.disk_layout.disks.length;
   const partCount = role.disk_layout.disks.reduce(
     (sum, d) => sum + d.partitions.length,
@@ -22,7 +22,7 @@ function diskLayoutSummary(role: RoleWithOs): string {
 }
 
 function Roles() {
-  const data = useLoaderData<RoleWithOs[]>();
+  const data = useLoaderData<Role[]>();
   const navigate = useNavigate();
 
   return (
@@ -87,7 +87,7 @@ function Roles() {
 
                     {/* OS */}
                     <td className="px-3 py-2 text-xs text-text-primary">
-                      {role.os_name} {role.os_version}
+                      {role.os_name} {role.os_release}
                     </td>
 
                     {/* Firmware */}

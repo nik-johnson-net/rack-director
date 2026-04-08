@@ -14,16 +14,14 @@ import {
   updateRole,
   deleteRole,
   getRoleDevices,
-  getOperatingSystems,
   ValidationError,
-  type RoleWithOs,
+  type Role,
   type DiskLayout,
   type FirmwareMode,
-  type OperatingSystem,
 } from "@/lib/client";
 
 function RoleEdit() {
-  const initialData = useLoaderData<RoleWithOs>();
+  const initialData = useLoaderData<Role>();
   const navigate = useNavigate();
   const params = useParams<{ id: string }>();
   const roleId = parseInt(params.id!);
@@ -31,7 +29,6 @@ function RoleEdit() {
   const [data, setData] = useState(initialData);
   const [name, setName] = useState(data.name);
   const [description, setDescription] = useState(data.description || "");
-  const [osId, setOsId] = useState(data.os_id);
   const [diskLayout, setDiskLayout] = useState<DiskLayout>(
     data.disk_layout ?? { disks: [] }
   );
@@ -41,7 +38,6 @@ function RoleEdit() {
   const [configTemplate, setConfigTemplate] = useState(
     data.config_template ? JSON.stringify(data.config_template, null, 2) : ""
   );
-  const [operatingSystems, setOperatingSystems] = useState<OperatingSystem[]>([]);
   const [assignedDevices, setAssignedDevices] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,11 +48,7 @@ function RoleEdit() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [osList, devices] = await Promise.all([
-          getOperatingSystems(),
-          getRoleDevices(roleId),
-        ]);
-        setOperatingSystems(osList);
+        const devices = await getRoleDevices(roleId);
         setAssignedDevices(devices);
       } catch (err) {
         setError("Failed to load data");
@@ -91,14 +83,13 @@ function RoleEdit() {
       const updated = await updateRole(roleId, {
         name,
         description: description || undefined,
-        os_id: osId,
         disk_layout: diskLayout,
         firmware_mode: firmwareMode || undefined,
         clear_firmware_mode: firmwareMode === undefined ? true : undefined,
         config_template: parsedConfig,
       });
 
-      setData({ ...data, ...updated, os_name: data.os_name, os_version: data.os_version });
+      setData({ ...data, ...updated });
       setSaveSuccess(true);
     } catch (err) {
       if (err instanceof ValidationError) {
@@ -202,27 +193,17 @@ function RoleEdit() {
                 />
               </div>
 
-              {/* OS + Firmware row */}
+              {/* OS info (read-only) + Firmware row */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <Label htmlFor="os" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                    Operating System *
+                  <Label className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                    Operating System
                   </Label>
-                  <select
-                    id="os"
-                    value={osId}
-                    onChange={(e) => setOsId(parseInt(e.target.value))}
-                    className={selectClassName}
-                    required
-                  >
-                    {operatingSystems.map((os) => (
-                      <option key={os.id} value={os.id!}>
-                        {os.name} {os.version}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="h-8 px-3 flex items-center bg-bg-base border border-border text-xs text-text-secondary font-mono">
+                    {data.os_name} {data.os_release} ({data.os_arch})
+                  </div>
                   <p className="text-xs text-text-muted">
-                    Architectures are inferred from the selected OS
+                    Module: {data.osm_module}
                   </p>
                 </div>
 

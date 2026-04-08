@@ -479,36 +479,43 @@ export type Role = {
   id?: number;
   name: string;
   description?: string;
-  os_id: number;
+  osm_module: string;
+  os_name: string;
+  os_release: string;
+  os_arch: string;
   disk_layout: DiskLayout;
-  firmware_mode?: FirmwareMode;
+  cmdline_args?: string;
   config_template?: any;
+  firmware_mode?: FirmwareMode;
   created_at?: string;
   updated_at?: string;
-}
-
-export type RoleWithOs = Role & {
-  os_name: string;
-  os_version: string;
 }
 
 export type CreateRoleRequest = {
   name: string;
   description?: string;
-  os_id: number;
+  osm_module: string;
+  os_name: string;
+  os_release: string;
+  os_arch: string;
   disk_layout: DiskLayout;
-  firmware_mode?: FirmwareMode;
+  cmdline_args?: string;
   config_template?: any;
+  firmware_mode?: FirmwareMode;
 }
 
 export type UpdateRoleRequest = {
   name?: string;
   description?: string;
-  os_id?: number;
+  osm_module?: string;
+  os_name?: string;
+  os_release?: string;
+  os_arch?: string;
   disk_layout?: DiskLayout;
+  cmdline_args?: string;
+  config_template?: any;
   firmware_mode?: FirmwareMode;
   clear_firmware_mode?: boolean;
-  config_template?: any;
 }
 
 export type AssignRoleRequest = {
@@ -517,7 +524,7 @@ export type AssignRoleRequest = {
 
 // Roles API
 
-export async function getRoles(): Promise<RoleWithOs[]> {
+export async function getRoles(): Promise<Role[]> {
   return fetch('/ui/roles').then((response) => {
     if (response.ok) {
       return response.json();
@@ -528,7 +535,7 @@ export async function getRoles(): Promise<RoleWithOs[]> {
   });
 }
 
-export async function getRole(id: number): Promise<RoleWithOs> {
+export async function getRole(id: number): Promise<Role> {
   return fetch(`/ui/roles/${id}`).then((response) => {
     if (response.ok) {
       return response.json();
@@ -1198,4 +1205,138 @@ export async function updatePlatformDiskLabel(
     console.error('Error updating platform disk label:', response.statusText);
     throw new Error('Failed to update disk label');
   }
+}
+
+// --- OSM Types ---
+
+export type OsmModule = {
+  id: number;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  source: string;
+  storage_prefix: string;
+  archive_path?: string;
+  os_count: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type OsmOperatingSystem = {
+  id: number;
+  module_id: number;
+  dir_name: string;
+  name: string;
+  release: string;
+  config: OsmOperatingSystemConfig;
+  disabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type OsmOperatingSystemConfig = {
+  name: string;
+  release: string;
+  architectures: OsmArchitectureConfig[];
+  template_variables: OsmTemplateVariable[];
+}
+
+export type OsmArchitectureConfig = {
+  arch: string;
+  kernel: string;
+  initramfs: string;
+  modules: string[];
+  cmdline: string;
+  install_template: string;
+}
+
+export type OsmTemplateVariable = {
+  name: string;
+  type: "string" | "list" | "boolean" | "integer";
+  description: string;
+  required: boolean;
+  default: unknown;
+}
+
+export type OsmUpload = {
+  id: number;
+  filename: string;
+  status: "uploading" | "validating" | "extracting" | "complete" | "failed";
+  error_message?: string;
+  module_id?: number;
+  total_bytes?: number;
+  received_bytes: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// --- OSM API ---
+
+export async function getOsmModules(): Promise<OsmModule[]> {
+  const response = await fetch("/ui/osm/modules");
+  if (response.ok) return response.json();
+  throw new Error("Failed to fetch OSM modules");
+}
+
+export async function getOsmModule(id: number): Promise<OsmModule> {
+  const response = await fetch(`/ui/osm/modules/${id}`);
+  if (response.ok) return response.json();
+  throw new Error("Failed to fetch OSM module");
+}
+
+export async function deleteOsmModule(id: number): Promise<void> {
+  const response = await fetch(`/ui/osm/modules/${id}`, { method: "DELETE" });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(body || "Failed to delete module");
+  }
+}
+
+export async function getOsmModuleOperatingSystems(moduleId: number): Promise<OsmOperatingSystem[]> {
+  const response = await fetch(`/ui/osm/modules/${moduleId}/operating-systems`);
+  if (response.ok) return response.json();
+  throw new Error("Failed to fetch module operating systems");
+}
+
+export async function uploadOsm(file: File): Promise<OsmUpload> {
+  const response = await fetch("/ui/osm/upload", {
+    method: "POST",
+    body: file,
+    headers: { "Content-Type": "application/octet-stream" },
+  });
+  if (response.ok || response.status === 202) return response.json();
+  throw new Error("Failed to upload OSM archive");
+}
+
+export async function getOsmUploads(): Promise<OsmUpload[]> {
+  const response = await fetch("/ui/osm/uploads");
+  if (response.ok) return response.json();
+  throw new Error("Failed to fetch OSM uploads");
+}
+
+export async function getOsmUpload(id: number): Promise<OsmUpload> {
+  const response = await fetch(`/ui/osm/uploads/${id}`);
+  if (response.ok) return response.json();
+  throw new Error("Failed to fetch OSM upload");
+}
+
+export async function getAllOsmOperatingSystems(): Promise<OsmOperatingSystem[]> {
+  const response = await fetch("/ui/osm/operating-systems");
+  if (response.ok) return response.json();
+  throw new Error("Failed to fetch OSM operating systems");
+}
+
+export async function disableOsmOs(osId: number): Promise<void> {
+  const response = await fetch(`/ui/osm/operating-systems/${osId}/disable`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to disable OS");
+}
+
+export async function enableOsmOs(osId: number): Promise<void> {
+  const response = await fetch(`/ui/osm/operating-systems/${osId}/enable`, { method: "POST" });
+  if (!response.ok) throw new Error("Failed to enable OS");
+}
+
+export function getOsmModuleExportUrl(id: number): string {
+  return `/ui/osm/modules/${id}/export`;
 }

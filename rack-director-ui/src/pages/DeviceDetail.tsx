@@ -29,7 +29,6 @@ import {
   type DeviceStatus,
   type LifecycleTransition,
   type DhcpLease,
-  type RoleWithOs,
   type DeviceLifecycle,
   type StaticReservation,
   type DhcpNetwork,
@@ -186,7 +185,7 @@ function DeviceDetail() {
   const [transitions, setTransitions] = useState<LifecycleTransition[]>([]);
   const [warnings, setWarnings] = useState<DeviceWarning[]>([]);
   const [_dhcpLease, setDhcpLease] = useState<DhcpLease | null>(null);
-  const [availableRoles, setAvailableRoles] = useState<RoleWithOs[]>([]);
+  const [availableRoles, setAvailableRoles] = useState<Role[]>([]);
   const [availablePlatforms, setAvailablePlatforms] = useState<Platform[]>([]);
   const [selectedRoleId, setSelectedRoleId] = useState<number | null>(null);
   const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
@@ -735,7 +734,7 @@ function DeviceDetail() {
             <option value="">No role</option>
             {availableRoles.map((role) => (
               <option key={role.id} value={role.id}>
-                {role.name} ({role.os_name} {role.os_version})
+                {role.name} ({role.os_name} {role.os_release})
               </option>
             ))}
           </select>
