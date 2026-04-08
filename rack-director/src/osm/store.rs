@@ -177,6 +177,21 @@ pub async fn update_module(
     Ok(())
 }
 
+/// Check if any roles reference operating systems from a given module.
+/// Returns the list of role names that reference this module.
+pub async fn get_roles_referencing_module(
+    conn: &Connection,
+    module_name: &str,
+) -> Result<Vec<String>> {
+    conn.query(
+        "SELECT name FROM roles WHERE LOWER(osm_module) = LOWER(?1)",
+        (module_name.to_string(),),
+        |row| row.get(0),
+    )
+    .await
+    .context("Failed to query roles referencing module")
+}
+
 /// Delete an OSM module.  All associated `osm_operating_systems` rows are
 /// removed automatically via `ON DELETE CASCADE`.
 pub async fn delete_module(conn: &Connection, id: i64) -> Result<()> {
@@ -853,5 +868,58 @@ mod tests {
         let module_ids: Vec<i64> = all.iter().map(|os| os.module_id).collect();
         assert!(module_ids.contains(&mod1.id));
         assert!(module_ids.contains(&mod2.id));
+    }
+
+    // ── Role dependency tests ────────────────────────────────────────────────
+
+    /// `get_roles_referencing_module` returns role names that reference the module (case-insensitive).
+    #[tokio::test]
+    async fn test_get_roles_referencing_module() {
+        let conn = database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+
+        create_module(&conn, "TestMod", "1.0.0", "A", "A", "uploaded", "osm/TestMod/1.0.0/", None)
+            .await
+            .unwrap();
+
+        crate::roles::store::create(
+            &conn,
+            "web-server",
+            None,
+            "TestMod",
+            "Ubuntu",
+            "22.04",
+            "x86-64",
+            &common::disk_layout::DiskLayout {
+                disks: vec![],
+                volume_groups: None,
+                zfs_pools: None,
+            },
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Case-insensitive match
+        let roles = get_roles_referencing_module(&conn, "testmod").await.unwrap();
+        assert_eq!(roles, vec!["web-server"]);
+
+        // No match for different module
+        let roles = get_roles_referencing_module(&conn, "other-module").await.unwrap();
+        assert!(roles.is_empty());
+    }
+
+    /// `get_roles_referencing_module` returns empty vec when no roles exist.
+    #[tokio::test]
+    async fn test_get_roles_referencing_module_empty() {
+        let conn = database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+
+        let roles = get_roles_referencing_module(&conn, "nonexistent").await.unwrap();
+        assert!(roles.is_empty());
     }
 }
