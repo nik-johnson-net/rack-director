@@ -1,5 +1,5 @@
 import { NavLink } from "react-router";
-import { LayoutDashboard, Server, Shield, Cpu, HardDrive, Network, Settings } from "lucide-react";
+import { LayoutDashboard, Server, Shield, Cpu, HardDrive, Network, Package, Settings } from "lucide-react";
 
 interface NavItem {
   title: string;
@@ -13,6 +13,7 @@ const mainNavItems: NavItem[] = [
   { title: "Roles",      href: "/roles",              icon: Shield          },
   { title: "Platforms",  href: "/platforms",          icon: Cpu             },
   { title: "OS Images",  href: "/operating-systems",  icon: HardDrive       },
+  { title: "OS Modules", href: "/osm",                icon: Package         },
   { title: "Networks",   href: "/networks",           icon: Network         },
 ];
 

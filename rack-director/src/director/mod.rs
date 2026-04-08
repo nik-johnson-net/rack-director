@@ -190,7 +190,6 @@ impl<'a> Director<'a> {
         Ok(())
     }
 
-    #[cfg(test)]
     pub async fn create_plan(&self, plan: &Plan) -> anyhow::Result<i64> {
         crate::plans::store::create_plan(self.conn, plan).await
     }

@@ -19,6 +19,7 @@ use crate::{
     director::{Architecture, Director},
     http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
+    plans::{Action, Plan},
     platforms::{AssignPlatformRequest, Platform},
     roles::{AssignRoleRequest, Role},
 };
@@ -230,6 +231,11 @@ struct DevicesIndex {
     devices: Vec<DeviceResponse>,
 }
 
+#[derive(Deserialize)]
+struct DevicesPlanRequest {
+    plan: Vec<Action>,
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ui/devices", get(get_all_devices))
@@ -271,6 +277,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/ui/devices/{uuid}/warnings/{warning_id}",
             delete(delete_warning),
         )
+        .route("/ui/devices/{uuid}/plan", post(post_device_plan))
         .with_state(state)
 }
 
@@ -702,6 +709,19 @@ async fn delete_device_by_uuid(
             ))
         }
     }
+}
+
+async fn post_device_plan(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+    extract::Json(payload): extract::Json<DevicesPlanRequest>,
+) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
+    let plan = Plan::new(uuid, payload.plan);
+    director.create_plan(&plan).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

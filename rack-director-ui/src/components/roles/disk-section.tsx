@@ -3,7 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FormFieldError } from "@/components/ui/form-field-error";
 import { Trash2 } from "lucide-react";
-import type { DiskConfig, PartitionConfig } from "@/lib/client";
+import type { DiskConfig, FirmwareMode, PartitionConfig } from "@/lib/client";
 import PartitionRow from "./partition-row";
 
 interface DiskSectionProps {
@@ -20,6 +20,8 @@ interface DiskSectionProps {
   errors?: Record<string, string>;
   errorPrefix: string;
   onClearError?: (key: string) => void;
+  firmwareMode?: FirmwareMode;
+  onPrependPartition: (partition: PartitionConfig) => void;
 }
 
 export default function DiskSection({
@@ -36,6 +38,8 @@ export default function DiskSection({
   errors,
   errorPrefix,
   onClearError,
+  firmwareMode,
+  onPrependPartition,
 }: DiskSectionProps) {
   const [newPartIndices, setNewPartIndices] = useState<Set<number>>(new Set());
 
@@ -44,6 +48,35 @@ export default function DiskSection({
 
   // Determine if any partition has LVM flag for the header badge
   const hasLvm = disk.partitions.some((p) => p.flags?.includes("lvm"));
+
+  // Boot partition shortcut visibility logic
+  const isRootDisk = disk.device === "ROOT";
+  const hasEsp = disk.partitions.some((p) => p.flags?.includes("esp"));
+  const hasBiosGrub = disk.partitions.some((p) => p.flags?.includes("bios_grub"));
+  const isGpt = disk.partition_table === "gpt";
+
+  // Show EFI button: ROOT disk, missing esp, and firmware could be UEFI (not bios-only)
+  const showAddEfi = isRootDisk && !hasEsp && firmwareMode !== "bios";
+  // Show BIOS button: ROOT disk, GPT, missing bios_grub, and firmware could be BIOS (not uefi-only)
+  const showAddBios = isRootDisk && isGpt && !hasBiosGrub && firmwareMode !== "uefi";
+
+  function handlePrependEfi() {
+    onPrependPartition({
+      label: "efi",
+      size: "300MiB",
+      filesystem: "vfat",
+      mount_point: "/boot/efi",
+      flags: ["esp"],
+    });
+  }
+
+  function handlePrependBiosGrub() {
+    onPrependPartition({
+      label: "bios_grub",
+      size: "1MiB",
+      flags: ["bios_grub"],
+    });
+  }
 
   function handleAddPartition() {
     setNewPartIndices((prev) => new Set(prev).add(disk.partitions.length));
@@ -103,6 +136,28 @@ export default function DiskSection({
               MBR
             </button>
           </div>
+
+          {/* Boot partition shortcut buttons — only on ROOT disks */}
+          {showAddEfi && (
+            <button
+              type="button"
+              onClick={handlePrependEfi}
+              className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer border border-border px-2 py-0.5 rounded-sm"
+              title="Prepend an EFI System Partition (required for UEFI boot)"
+            >
+              + EFI
+            </button>
+          )}
+          {showAddBios && (
+            <button
+              type="button"
+              onClick={handlePrependBiosGrub}
+              className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer border border-border px-2 py-0.5 rounded-sm"
+              title="Prepend a BIOS GRUB partition (required for BIOS+GPT boot)"
+            >
+              + BIOS
+            </button>
+          )}
 
           {/* LVM indicator badge */}
           {hasLvm && (

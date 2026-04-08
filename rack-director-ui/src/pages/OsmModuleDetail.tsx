@@ -145,10 +145,12 @@ function OsmModuleDetail() {
                 Export
               </a>
             )}
-            <Button variant="danger" onClick={() => setDeleteDialogOpen(true)}>
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete
-            </Button>
+            {!osmModule.is_default && (
+              <Button variant="danger" onClick={() => setDeleteDialogOpen(true)}>
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
+              </Button>
+            )}
           </div>
         }
       />
@@ -264,18 +266,20 @@ function OsmModuleDetail() {
         </SectionCard>
       </div>
 
-      <DeleteConfirmationDialog
-        open={deleteDialogOpen}
-        onOpenChange={(open) => {
-          setDeleteDialogOpen(open);
-          if (!open) setDeleteError(null);
-        }}
-        title="Delete Module?"
-        description="This will permanently delete this module and all its operating system definitions."
-        itemName={osmModule.name}
-        warningMessage={deleteError ?? undefined}
-        onConfirm={handleDelete}
-      />
+      {!osmModule.is_default && (
+        <DeleteConfirmationDialog
+          open={deleteDialogOpen}
+          onOpenChange={(open) => {
+            setDeleteDialogOpen(open);
+            if (!open) setDeleteError(null);
+          }}
+          title="Delete Module?"
+          description="This will permanently delete this module and all its operating system definitions."
+          itemName={osmModule.name}
+          warningMessage={deleteError ?? undefined}
+          onConfirm={handleDelete}
+        />
+      )}
     </div>
   );
 }
