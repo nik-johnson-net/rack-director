@@ -110,6 +110,15 @@ async fn delete_module(
         ));
     }
 
+    let referencing_roles = store::get_roles_referencing_module(&conn, &module.name).await?;
+    if !referencing_roles.is_empty() {
+        return Err(HttpError::BadRequest(format!(
+            "Cannot delete module '{}': referenced by roles: {}",
+            module.name,
+            referencing_roles.join(", ")
+        )));
+    }
+
     store::delete_module(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
