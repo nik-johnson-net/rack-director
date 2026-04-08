@@ -12,8 +12,6 @@ import Plans from './pages/Plans.tsx';
 import Transitions from './pages/Transitions.tsx';
 import Settings from './pages/Settings.tsx';
 import OperatingSystems from './pages/OperatingSystems.tsx';
-import OperatingSystemNew from './pages/OperatingSystemNew.tsx';
-import OperatingSystemEdit from './pages/OperatingSystemEdit.tsx';
 import Roles from './pages/Roles.tsx';
 import RoleNew from './pages/RoleNew.tsx';
 import RoleEdit from './pages/RoleEdit.tsx';
@@ -28,7 +26,7 @@ import PendingDeviceNew from './pages/PendingDeviceNew.tsx';
 import OsmModules from './pages/OsmModules.tsx';
 import OsmUpload from './pages/OsmUpload.tsx';
 import OsmModuleDetail from './pages/OsmModuleDetail.tsx';
-import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices, getPlatforms, getPlatform, getPlatformDevicesWithDetails, getOsmModules, getOsmUploads, getOsmModule, getOsmModuleOperatingSystems } from './lib/client.ts';
+import { getAllDevices, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices, getPlatforms, getPlatform, getPlatformDevicesWithDetails, getOsmModules, getOsmUploads, getOsmModule, getOsmModuleOperatingSystems, getAllOsmOperatingSystems } from './lib/client.ts';
 import Loading from './pages/Loading.tsx';
 
 const router = createBrowserRouter([
@@ -61,9 +59,18 @@ const router = createBrowserRouter([
       },
       { path: "/devices/pending/new", Component: PendingDeviceNew },
       { path: "/devices/:uuid", Component: DeviceDetail },
-      { path: "/operating-systems", loader: getOperatingSystems, Component: OperatingSystems, HydrateFallback: Loading },
-      { path: "/operating-systems/new", Component: OperatingSystemNew },
-      { path: "/operating-systems/:id", loader: ({ params }) => getOperatingSystem(parseInt(params.id!)), Component: OperatingSystemEdit, HydrateFallback: Loading },
+      {
+        path: "/operating-systems",
+        loader: async () => {
+          const [operatingSystems, modules] = await Promise.all([
+            getAllOsmOperatingSystems(),
+            getOsmModules(),
+          ]);
+          return { operatingSystems, modules };
+        },
+        Component: OperatingSystems,
+        HydrateFallback: Loading
+      },
       { path: "/roles", loader: getRoles, Component: Roles, HydrateFallback: Loading },
       { path: "/roles/new", Component: RoleNew },
       { path: "/roles/:id", loader: ({ params }) => getRole(parseInt(params.id!)), Component: RoleEdit, HydrateFallback: Loading },
