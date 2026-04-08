@@ -280,10 +280,10 @@ async fn get_platform_devices_with_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::director::Architecture;
     use crate::{
         database,
         director::Director,
-        operating_systems::Architecture,
         platforms::{DiskType, PlatformCpu, PlatformDisk, PlatformNic},
         test_database_path,
     };

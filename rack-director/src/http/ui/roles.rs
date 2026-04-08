@@ -200,7 +200,7 @@ async fn delete_role(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operating_systems::Architecture;
+    use crate::director::Architecture;
     use crate::platforms::{DiskType, PlatformAttributes, PlatformCpu, PlatformDisk, PlatformNic};
     use crate::{database, test_connection_factory};
     use common::disk_layout::{DiskConfig, DiskLayout, PartitionConfig};

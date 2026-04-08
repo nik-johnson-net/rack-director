@@ -269,7 +269,7 @@ mod tests {
 
         let uuid = test_uuid();
         Director::new(&conn)
-            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -320,7 +320,7 @@ mod tests {
 
         // Register the device first (required due to foreign key constraint)
         director
-            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
 

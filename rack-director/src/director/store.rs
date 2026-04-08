@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::database::{Connection, FromRow};
 use crate::device_warnings;
+use crate::director::Architecture;
 use crate::lifecycle::DeviceLifecycle;
-use crate::operating_systems::Architecture;
 use common::device_attributes::{DeviceAttributes, NetworkInterface};
 
 #[derive(Debug, Clone)]

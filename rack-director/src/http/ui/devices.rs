@@ -16,10 +16,9 @@ use super::validation::{
 
 use crate::{
     device_warnings,
-    director::Director,
+    director::{Architecture, Director},
     http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
-    operating_systems::Architecture,
     platforms::{AssignPlatformRequest, Platform},
     roles::{AssignRoleRequest, Role},
 };
@@ -815,7 +814,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -841,7 +840,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -873,7 +872,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -939,7 +938,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -992,14 +991,14 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&uuid1, crate::operating_systems::Architecture::X86_64)
+                .register_device(&uuid1, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&uuid2, crate::operating_systems::Architecture::X86_64)
+                .register_device(&uuid2, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1077,7 +1076,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1121,7 +1120,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1166,7 +1165,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1211,7 +1210,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1256,7 +1255,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1301,7 +1300,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1346,7 +1345,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1393,7 +1392,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1438,7 +1437,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1485,7 +1484,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1534,7 +1533,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1582,7 +1581,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1637,7 +1636,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1684,7 +1683,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1731,7 +1730,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1775,7 +1774,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1896,7 +1895,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1963,7 +1962,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }

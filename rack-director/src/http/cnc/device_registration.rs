@@ -73,7 +73,7 @@ pub async fn register_and_start_discovery(
 
     // Register device
     if let Err(e) = director
-        .register_device(device_uuid, crate::operating_systems::Architecture::X86_64)
+        .register_device(device_uuid, crate::director::Architecture::X86_64)
         .await
     {
         warn!("Couldn't register device {}: {}", device_uuid, e);

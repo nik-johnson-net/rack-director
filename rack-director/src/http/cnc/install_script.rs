@@ -309,7 +309,7 @@ mod tests {
 
         let uuid = test_uuid();
         Director::new(&conn)
-            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -332,7 +332,7 @@ mod tests {
         let mac = "aa:bb:cc:dd:ee:ff";
 
         Director::new(&conn)
-            .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -372,7 +372,7 @@ mod tests {
         {
             let conn = state.connection_factory.open().await.unwrap();
             Director::new(&conn)
-                .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }

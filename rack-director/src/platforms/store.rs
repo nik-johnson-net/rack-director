@@ -279,7 +279,7 @@ pub async fn delete(conn: &Connection, id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operating_systems::Architecture;
+    use crate::director::Architecture;
     use crate::platforms::{DiskType, PlatformCpu, PlatformDisk, PlatformNic};
     use crate::test_database_path;
     use uuid::Uuid;

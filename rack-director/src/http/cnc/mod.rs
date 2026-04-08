@@ -714,7 +714,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -862,7 +862,7 @@ mod tests {
             let conn = test_db(&state).await;
             let director = Director::new(&conn);
             director
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
             director.create_plan(&plan).await.unwrap();
@@ -902,7 +902,7 @@ mod tests {
             let conn = test_db(&state).await;
             let director = Director::new(&conn);
             director
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
             director.create_plan(&plan).await.unwrap();
@@ -937,7 +937,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1070,7 +1070,7 @@ mod tests {
             let conn = test_db(&state).await;
             let director = Director::new(&conn);
             director
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
             director
@@ -1279,7 +1279,7 @@ mod tests {
             let conn = test_db(&state).await;
             let director = Director::new(&conn);
             director
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
 
@@ -1351,7 +1351,7 @@ mod tests {
             let conn = test_db(&state).await;
             let director = Director::new(&conn);
             director
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
 
@@ -1407,7 +1407,7 @@ mod tests {
         {
             let conn = test_db(&state).await;
             Director::new(&conn)
-                .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
@@ -1454,7 +1454,7 @@ mod tests {
 
         // Register device
         director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1525,7 +1525,7 @@ mod tests {
         // Register device but don't assign a role
         let conn = test_db(&state).await;
         Director::new(&conn)
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
 
@@ -1566,7 +1566,7 @@ mod tests {
         let director = Director::new(&conn);
 
         director
-            .register_device(&test_uuid, crate::operating_systems::Architecture::X86_64)
+            .register_device(&test_uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
 

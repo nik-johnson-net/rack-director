@@ -146,7 +146,9 @@ async fn upload_osm(
     let conn = state.connection_factory.open().await?;
     let upload = store::create_upload(&conn, &filename, None).await?;
 
-    let temp_path = std::env::temp_dir().join(format!("osm-upload-{}.tar.zst", upload.id));
+    let nonce: u64 = rand::random();
+    let temp_path =
+        std::env::temp_dir().join(format!("osm-upload-{}-{:016x}.tar.zst", upload.id, nonce));
     let upload_id = upload.id;
     let conn_factory = state.connection_factory.clone();
     let image_store = state.image_store.clone();

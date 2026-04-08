@@ -1,7 +1,6 @@
 mod devices;
 mod dhcp;
 mod networks;
-mod operating_systems;
 mod osm;
 mod platforms;
 mod roles;
@@ -32,7 +31,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .merge(devices::routes(state.clone()))
         .merge(dhcp::routes(state.clone()))
         .merge(networks::routes(state.clone()))
-        .merge(operating_systems::routes(state.clone()))
         .merge(osm::routes(state.clone()))
         .merge(platforms::routes(state.clone()))
         .merge(roles::routes(state))
