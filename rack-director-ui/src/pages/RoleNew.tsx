@@ -15,9 +15,42 @@ import {
   ValidationError,
   type DiskLayout,
   type FirmwareMode,
+  type PartitionConfig,
   type OsmOperatingSystem,
   type OsmModule,
 } from "@/lib/client";
+
+function defaultDiskLayoutForFirmwareMode(mode: FirmwareMode | undefined): DiskLayout {
+  const esp: PartitionConfig = {
+    label: "efi",
+    size: "300MiB",
+    filesystem: "vfat",
+    mount_point: "/boot/efi",
+    flags: ["esp"],
+  };
+  const biosGrub: PartitionConfig = {
+    label: "bios_grub",
+    size: "1MiB",
+    flags: ["bios_grub"],
+  };
+  const root: PartitionConfig = {
+    label: "root",
+    size: "rest",
+    filesystem: "ext4",
+    mount_point: "/",
+  };
+  const partitions =
+    mode === "uefi"
+      ? [esp, root]
+      : mode === "bios"
+      ? [biosGrub, root]
+      : [esp, biosGrub, root]; // undefined = any
+  return { disks: [{ device: "ROOT", partition_table: "gpt", partitions }] };
+}
+
+function isDiskLayoutEmpty(layout: DiskLayout): boolean {
+  return layout.disks.length === 0;
+}
 
 function RoleNew() {
   const navigate = useNavigate();
@@ -27,7 +60,9 @@ function RoleNew() {
   const [osName, setOsName] = useState("");
   const [osRelease, setOsRelease] = useState("");
   const [osArch, setOsArch] = useState("x86-64");
-  const [diskLayout, setDiskLayout] = useState<DiskLayout>({ disks: [] });
+  const [diskLayout, setDiskLayout] = useState<DiskLayout>(() =>
+    defaultDiskLayoutForFirmwareMode(undefined)
+  );
   const [firmwareMode, setFirmwareMode] = useState<FirmwareMode | undefined>(undefined);
   const [configTemplate, setConfigTemplate] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -39,6 +74,14 @@ function RoleNew() {
   const [loadingOs, setLoadingOs] = useState(true);
   const [selectedOsKey, setSelectedOsKey] = useState<string>("");
   const [availableArchs, setAvailableArchs] = useState<string[]>([]);
+
+  useEffect(() => {
+    // Only seed the layout when firmwareMode changes if the layout is still empty
+    if (isDiskLayoutEmpty(diskLayout)) {
+      setDiskLayout(defaultDiskLayoutForFirmwareMode(firmwareMode));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firmwareMode]);
 
   useEffect(() => {
     const fetchOs = async () => {
@@ -346,6 +389,7 @@ function RoleNew() {
                 onChange={setDiskLayout}
                 errors={fieldErrors}
                 onClearError={clearFieldError}
+                firmwareMode={firmwareMode}
               />
             </div>
           </div>

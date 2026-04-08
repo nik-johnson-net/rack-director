@@ -406,6 +406,7 @@ function RoleEdit() {
                 onChange={setDiskLayout}
                 errors={fieldErrors}
                 onClearError={clearFieldError}
+                firmwareMode={firmwareMode}
               />
             </div>
           </div>

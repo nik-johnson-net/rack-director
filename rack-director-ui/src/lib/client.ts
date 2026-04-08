@@ -212,55 +212,6 @@ export type TransitionRequest = {
 
 export type Architecture = "x86-64";
 
-export type OperatingSystem = {
-  id?: number;
-  name: string;
-  version: string;
-  description?: string;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export type OsArchitecture = {
-  id?: number;
-  os_id: number;
-  architecture: Architecture;
-  kernel_path: string;
-  initramfs_path: string;
-  modules: string[];
-  cmdline_args?: string;
-  install_script_path?: string;
-  kernel_filename?: string;
-  initramfs_filename?: string;
-  install_script_filename?: string;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export type OperatingSystemWithArchitectures = OperatingSystem & {
-  architectures: OsArchitecture[];
-}
-
-export type CreateOperatingSystemRequest = {
-  name: string;
-  version: string;
-  description?: string;
-}
-
-export type UpdateOperatingSystemRequest = {
-  name?: string;
-  version?: string;
-  description?: string;
-}
-
-export type CreateOsArchitectureRequest = {
-  architecture: Architecture;
-  kernel_path?: string;
-  initramfs_path?: string;
-  modules?: string[];
-  cmdline_args?: string;
-  install_script_path?: string;
-}
 
 export async function getDevicesIndex(): Promise<DevicesIndex> {
   return fetch('/ui/devices').then((response) => {
@@ -284,160 +235,6 @@ export async function getAllDevices(): Promise<Device[]> {
   });
 }
 
-// Operating Systems API
-
-export async function getOperatingSystems(): Promise<OperatingSystem[]> {
-  return fetch('/ui/operating_systems').then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error getting operating systems:', response.statusText);
-      throw new Error('Failed to fetch operating systems');
-    }
-  });
-}
-
-export async function getOperatingSystem(id: number): Promise<OperatingSystemWithArchitectures> {
-  return fetch(`/ui/operating_systems/${id}`).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error getting operating system:', response.statusText);
-      throw new Error('Failed to fetch operating system');
-    }
-  });
-}
-
-export async function createOperatingSystem(data: CreateOperatingSystemRequest): Promise<OperatingSystem> {
-  return fetch('/ui/operating_systems', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error creating operating system:', response.statusText);
-      throw new Error('Failed to create operating system');
-    }
-  });
-}
-
-export async function updateOperatingSystem(id: number, data: UpdateOperatingSystemRequest): Promise<OperatingSystem> {
-  return fetch(`/ui/operating_systems/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error updating operating system:', response.statusText);
-      throw new Error('Failed to update operating system');
-    }
-  });
-}
-
-export async function deleteOperatingSystem(id: number): Promise<void> {
-  return fetch(`/ui/operating_systems/${id}`, {
-    method: 'DELETE'
-  }).then((response) => {
-    if (!response.ok) {
-      console.error('Error deleting operating system:', response.statusText);
-      throw new Error('Failed to delete operating system');
-    }
-  });
-}
-
-export async function createOsArchitecture(osId: number, data: CreateOsArchitectureRequest): Promise<OsArchitecture> {
-  return fetch(`/ui/operating_systems/${osId}/architectures`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error creating architecture:', response.statusText);
-      throw new Error('Failed to create architecture');
-    }
-  });
-}
-
-export async function deleteOsArchitecture(osId: number, arch: Architecture): Promise<void> {
-  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}`, {
-    method: 'DELETE'
-  }).then((response) => {
-    if (!response.ok) {
-      console.error('Error deleting architecture:', response.statusText);
-      throw new Error('Failed to delete architecture');
-    }
-  });
-}
-
-export async function uploadKernel(osId: number, arch: Architecture, file: File): Promise<OsArchitecture> {
-  const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/kernel?filename=${encodeURIComponent(file.name)}`, {
-    method: 'POST',
-    body: arrayBuffer
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error uploading kernel:', response.statusText);
-      throw new Error('Failed to upload kernel');
-    }
-  });
-}
-
-export async function uploadInitramfs(osId: number, arch: Architecture, file: File): Promise<OsArchitecture> {
-  const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/initramfs?filename=${encodeURIComponent(file.name)}`, {
-    method: 'POST',
-    body: arrayBuffer
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error uploading initramfs:', response.statusText);
-      throw new Error('Failed to upload initramfs');
-    }
-  });
-}
-
-export async function uploadModule(osId: number, arch: Architecture, file: File, moduleName: string): Promise<OsArchitecture> {
-  const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/modules?name=${encodeURIComponent(moduleName)}`, {
-    method: 'POST',
-    body: arrayBuffer
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error uploading module:', response.statusText);
-      throw new Error('Failed to upload module');
-    }
-  });
-}
-
-export async function uploadInstallScript(osId: number, arch: Architecture, file: File): Promise<OsArchitecture> {
-  const arrayBuffer = await file.arrayBuffer();
-  return fetch(`/ui/operating_systems/${osId}/architectures/${arch}/install_script?filename=${encodeURIComponent(file.name)}`, {
-    method: 'POST',
-    body: arrayBuffer
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error uploading install script:', response.statusText);
-      throw new Error('Failed to upload install script');
-    }
-  });
-}
-
-export function getDownloadUrl(osId: number, arch: Architecture, component: string): string {
-  return `/ui/operating_systems/${osId}/architectures/${arch}/download/${component}`;
-}
 
 // Roles Types
 
@@ -763,6 +560,29 @@ export async function deletePendingDevice(id: number): Promise<void> {
       throw new Error('Failed to delete pending device');
     }
   });
+}
+
+export const ActionConsole: Action = {
+  "type": "console"
+};
+
+export type ActionType = "console";
+export type Action = {
+  "type": ActionType
+};
+
+export async function postDevicePlan(uuid: string, plan: Action[]): Promise<void> {
+  let data = { plan };
+  return fetch(`/ui/devices/${uuid}/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error creating device plan:', response.statusText);
+      return handleApiError(response, 'Failed to create device plan');
+    }
+  })
 }
 
 // DHCP Networks API
@@ -1216,6 +1036,7 @@ export type OsmModule = {
   author: string;
   description: string;
   source: string;
+  is_default: boolean;
   storage_prefix: string;
   archive_path?: string;
   os_count: number;

@@ -11,6 +11,7 @@ import {
   type Device,
   type DeviceWarning,
   type LifecycleTransition,
+  type PendingDevice,
   getDeviceStatus,
   getDeviceWarnings,
   dismissDeviceWarning,
@@ -19,6 +20,7 @@ import { Activity, Server } from "lucide-react";
 
 interface LoaderData {
   devices: Device[];
+  pendingDevices: PendingDevice[];
 }
 
 interface ActiveTransitionRow {
@@ -32,7 +34,7 @@ interface DeviceWarningRow {
 }
 
 function Index() {
-  const { devices } = useLoaderData() as LoaderData;
+  const { devices, pendingDevices } = useLoaderData() as LoaderData;
   const navigate = useNavigate();
 
   const [activeTransitions, setActiveTransitions] = useState<ActiveTransitionRow[]>([]);
@@ -40,12 +42,16 @@ function Index() {
   const [transitionsLoading, setTransitionsLoading] = useState(true);
   const [warningsLoading, setWarningsLoading] = useState(true);
 
+  // Pending devices waiting for first boot (no completed_at)
+  const activePendingDevices = pendingDevices.filter((p) => !p.completed_at);
+
   // Compute lifecycle counts
   const counts = {
     new: devices.filter((d) => d.lifecycle === "new").length,
     unprovisioned: devices.filter((d) => d.lifecycle === "unprovisioned").length,
     provisioned: devices.filter((d) => d.lifecycle === "provisioned").length,
     broken: devices.filter((d) => d.lifecycle === "broken").length,
+    pending: activePendingDevices.length,
   };
 
   // Fetch active transitions for all devices
@@ -149,6 +155,13 @@ function Index() {
 
       {/* Stat Cards */}
       <div className="grid gap-px" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+        <StatCard
+          label="Pending"
+          value={counts.pending}
+          detail="awaiting first boot"
+          status="new"
+          onClick={() => navigate("/devices")}
+        />
         <StatCard
           label="New"
           value={counts.new}

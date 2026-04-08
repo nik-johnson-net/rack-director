@@ -3,6 +3,7 @@ import { HardDrive } from "lucide-react";
 import type {
   DiskLayout,
   DiskConfig,
+  FirmwareMode,
   PartitionConfig,
   VolumeGroup,
   LogicalVolume,
@@ -15,6 +16,7 @@ interface DiskLayoutEditorProps {
   onChange: (layout: DiskLayout) => void;
   errors?: Record<string, string>;
   onClearError?: (key: string) => void;
+  firmwareMode?: FirmwareMode;
 }
 
 type Action =
@@ -25,6 +27,7 @@ type Action =
   | { type: "ADD_PARTITION"; diskIndex: number }
   | { type: "REMOVE_PARTITION"; diskIndex: number; partIndex: number }
   | { type: "UPDATE_PARTITION"; diskIndex: number; partIndex: number; partition: PartitionConfig }
+  | { type: "PREPEND_PARTITION"; diskIndex: number; partition: PartitionConfig }
   | { type: "ADD_VG"; name: string }
   | { type: "RENAME_VG"; vgIndex: number; newName: string }
   | { type: "REMOVE_VG"; vgIndex: number }
@@ -126,6 +129,14 @@ function reducer(state: DiskLayout, action: Action): DiskLayout {
       };
     }
 
+    case "PREPEND_PARTITION": {
+      const newDisks = state.disks.map((disk, i) => {
+        if (i !== action.diskIndex) return disk;
+        return { ...disk, partitions: [action.partition, ...disk.partitions] };
+      });
+      return { ...state, disks: newDisks };
+    }
+
     case "ADD_VG": {
       const existing = state.volume_groups ?? [];
       if (existing.find((vg) => vg.name === action.name)) return state;
@@ -211,6 +222,7 @@ export default function DiskLayoutEditor({
   onChange,
   errors,
   onClearError,
+  firmwareMode,
 }: DiskLayoutEditorProps) {
   const [layout, dispatch] = useReducer(reducer, value);
   const isFirstRender = useRef(true);
@@ -294,6 +306,10 @@ export default function DiskLayoutEditor({
             errors={errors}
             errorPrefix={`disks.${diskIndex}`}
             onClearError={onClearError}
+            firmwareMode={firmwareMode}
+            onPrependPartition={(partition) =>
+              dispatch({ type: "PREPEND_PARTITION", diskIndex, partition })
+            }
           />
         ))
       )}

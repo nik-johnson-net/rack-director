@@ -36,8 +36,11 @@ const router = createBrowserRouter([
       {
         index: true,
         loader: async () => {
-          const devices = await getAllDevices();
-          return { devices };
+          const [devices, pendingDevices] = await Promise.all([
+            getAllDevices(),
+            getPendingDevices(),
+          ]);
+          return { devices, pendingDevices };
         },
         Component: Index,
         HydrateFallback: Loading

@@ -8,6 +8,7 @@ import { KVGrid, KVRow } from "@/components/ui/kv-grid";
 import { WarningRow } from "@/components/ui/warning-row";
 import { cn } from "@/lib/utils";
 import {
+  ActionConsole,
   getDevice,
   getDeviceRole,
   getDeviceStatus,
@@ -24,6 +25,8 @@ import {
   getPlatforms,
   getDeviceWarnings,
   dismissDeviceWarning,
+  postDevicePlan,
+  type Action,
   type Device,
   type Role,
   type DeviceStatus,
@@ -35,15 +38,15 @@ import {
   type Platform,
   type DeviceWarning,
 } from "@/lib/client";
-import { AlertCircle, Pin, Trash2, UserCheck, Zap, XCircle } from "lucide-react";
+import { AlertCircle, Pin, Trash2, Zap, XCircle, WrenchIcon, CheckCircle2 } from "lucide-react";
 import { EditableHostname } from "@/components/devices/editable-hostname";
 import { MakeStaticDialog } from "@/components/networks/make-static-dialog";
 import { TransitionDialog } from "@/components/devices/transition-dialog";
+import { ProvisionDialog } from "@/components/devices/provision-dialog";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
 import { PlatformAssignment } from "@/components/devices/platform-assignment";
 import { DiskLabelOverrides } from "@/components/devices/disk-label-overrides";
-import { Label } from "@/components/ui/label";
 
 type TabId = "overview" | "hardware" | "transitions" | "warnings";
 
@@ -187,13 +190,12 @@ function DeviceDetail() {
   const [_dhcpLease, setDhcpLease] = useState<DhcpLease | null>(null);
   const [availableRoles, setAvailableRoles] = useState<Role[]>([]);
   const [availablePlatforms, setAvailablePlatforms] = useState<Platform[]>([]);
-  const [selectedRoleId, setSelectedRoleId] = useState<number | null>(null);
   const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
   const [staticReservations, setStaticReservations] = useState<Map<string, StaticReservation>>(new Map());
 
   const [loading, setLoading] = useState(true);
+  const [info, setInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [assigningRole, setAssigningRole] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [dismissing, setDismissing] = useState<Set<number>>(new Set());
 
@@ -206,6 +208,10 @@ function DeviceDetail() {
   const [transitionDialogOpen, setTransitionDialogOpen] = useState(false);
   const [targetState, setTargetState] = useState<DeviceLifecycle>("new");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [provisionDialogOpen, setProvisionDialogOpen] = useState(false);
+
+  // Expandable error rows in transitions tab
+  const [expandedTransitionIds, setExpandedTransitionIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     if (!uuid) return;
@@ -232,7 +238,6 @@ function DeviceDetail() {
         setWarnings(warningsData);
         setAvailableRoles(rolesData);
         setAvailablePlatforms(platformsData);
-        setSelectedRoleId(deviceData.role_id ?? null);
         setNetworks(networksData);
 
         if (deviceData.attributes?.mac_address) {
@@ -259,25 +264,6 @@ function DeviceDetail() {
     fetchData();
   }, [uuid]);
 
-  const handleAssignRole = async () => {
-    if (!uuid || !selectedRoleId) return;
-    setAssigningRole(true);
-    setError(null);
-    try {
-      await assignRoleToDevice(uuid, selectedRoleId);
-      const [updatedRole, updatedDevice] = await Promise.all([
-        getDeviceRole(uuid),
-        getDevice(uuid),
-      ]);
-      setAssignedRole(updatedRole);
-      setDevice(updatedDevice);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to assign role");
-    } finally {
-      setAssigningRole(false);
-    }
-  };
-
   const openTransitionDialog = (toState: DeviceLifecycle) => {
     setTargetState(toState);
     setTransitionDialogOpen(true);
@@ -289,14 +275,42 @@ function DeviceDetail() {
     setError(null);
     try {
       await transitionDeviceLifecycle(uuid, targetState);
-      const [updatedStatus, updatedTransitions] = await Promise.all([
+      const [updatedStatus, updatedTransitions, updatedDevice] = await Promise.all([
         getDeviceStatus(uuid),
         getDeviceTransitions(uuid, true),
+        getDevice(uuid),
       ]);
       setStatus(updatedStatus);
       setTransitions(updatedTransitions);
+      setDevice(updatedDevice);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to transition device");
+    } finally {
+      setTransitioning(false);
+    }
+  };
+
+  const handleProvision = async (roleId: number) => {
+    if (!uuid) return;
+    setTransitioning(true);
+    setError(null);
+    try {
+      // Assign the role first, then transition to provisioned
+      await assignRoleToDevice(uuid, roleId);
+      await transitionDeviceLifecycle(uuid, "provisioned");
+      const [updatedStatus, updatedTransitions, updatedRole, updatedDevice] = await Promise.all([
+        getDeviceStatus(uuid),
+        getDeviceTransitions(uuid, true),
+        getDeviceRole(uuid),
+        getDevice(uuid),
+      ]);
+      setStatus(updatedStatus);
+      setTransitions(updatedTransitions);
+      setAssignedRole(updatedRole);
+      setDevice(updatedDevice);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to provision device");
+      throw err;
     } finally {
       setTransitioning(false);
     }
@@ -337,6 +351,16 @@ function DeviceDetail() {
     }
   };
 
+  const createPlan = async (plan: Action[], msg: string) => {
+    if (!uuid) return;
+    try {
+      await postDevicePlan(uuid, plan);
+      setInfo("Requested device to " + msg);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create plan")
+    }
+  }
+
   // ── Guard renders ────────────────────────────────────────────────────────
 
   if (!uuid) return <div className="p-4 text-text-secondary">Invalid device URL</div>;
@@ -353,9 +377,9 @@ function DeviceDetail() {
   const recentTransitions = transitions.slice(0, 5);
 
   // Contextual action buttons based on lifecycle
-  const canProvision = lifecycle === "unprovisioned";
-  const canAssignRole = lifecycle !== "provisioned" && lifecycle !== "removed";
-  const canDecommission = lifecycle === "provisioned";
+  const isUnprovisioned = lifecycle === "unprovisioned";
+  const isProvisioned = lifecycle === "provisioned";
+  const isBroken = lifecycle === "broken";
 
   // ── Tab content ──────────────────────────────────────────────────────────
 
@@ -501,7 +525,7 @@ function DeviceDetail() {
               <span key="label" className="text-text-muted text-xs">—</span>
             ),
             <span key="path" className="text-xs font-mono">{disk.path ?? "—"}</span>,
-            <span key="size" className="text-xs">{disk.size_gb != null ? `${disk.size_gb} GB` : "—"}</span>,
+            <span key="size" className="text-xs">{disk.size != null ? `${disk.size} GB` : "—"}</span>,
             <span key="type" className="text-xs uppercase text-text-secondary">{disk.disk_type ?? "—"}</span>,
           ])}
         />
@@ -591,7 +615,7 @@ function DeviceDetail() {
               <span key="label" className="text-text-muted text-xs">—</span>
             ),
             <span key="path" className="text-xs font-mono">{disk.path ?? "—"}</span>,
-            <span key="size" className="text-xs">{disk.size_gb != null ? `${disk.size_gb} GB` : "—"}</span>,
+            <span key="size" className="text-xs">{disk.size != null ? `${disk.size} GB` : "—"}</span>,
             <span key="type" className="text-xs uppercase text-text-secondary">{disk.disk_type ?? "—"}</span>,
           ])}
         />
@@ -657,34 +681,72 @@ function DeviceDetail() {
             </tr>
           </thead>
           <tbody>
-            {transitions.map((t, ri) => (
-              <tr
-                key={t.id}
-                className={cn(
-                  "border-t border-border-muted hover:bg-bg-raised transition-colors",
-                  ri % 2 === 1 ? "bg-bg-base" : "bg-bg-surface"
-                )}
-              >
-                <td className="px-3 py-2 text-xs text-text-secondary whitespace-nowrap">
-                  {new Date(t.started_at).toLocaleString()}
-                </td>
-                <td className="px-3 py-2">
-                  <StatusBadge status={t.from_state} />
-                </td>
-                <td className="px-3 py-2">
-                  <StatusBadge status={t.to_state} />
-                </td>
-                <td className="px-3 py-2 text-xs text-text-secondary">
-                  {t.plan_id ? `#${t.plan_id}` : "—"}
-                </td>
-                <td className="px-3 py-2">
-                  <TransitionStatusBadge transition={t} />
-                </td>
-                <td className="px-3 py-2 text-xs text-status-broken max-w-xs truncate">
-                  {t.error_message ?? "—"}
-                </td>
-              </tr>
-            ))}
+            {transitions.map((t, ri) => {
+              const isExpanded = expandedTransitionIds.has(t.id);
+              const hasError = !!t.error_message;
+              const toggleExpand = () => {
+                setExpandedTransitionIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(t.id)) next.delete(t.id);
+                  else next.add(t.id);
+                  return next;
+                });
+              };
+              return (
+                <>
+                  <tr
+                    key={t.id}
+                    className={cn(
+                      "border-t border-border-muted transition-colors",
+                      ri % 2 === 1 ? "bg-bg-base" : "bg-bg-surface",
+                      hasError ? "hover:bg-bg-raised cursor-pointer" : "hover:bg-bg-raised"
+                    )}
+                    onClick={hasError ? toggleExpand : undefined}
+                  >
+                    <td className="px-3 py-2 text-xs text-text-secondary whitespace-nowrap">
+                      {new Date(t.started_at).toLocaleString()}
+                    </td>
+                    <td className="px-3 py-2">
+                      <StatusBadge status={t.from_state} />
+                    </td>
+                    <td className="px-3 py-2">
+                      <StatusBadge status={t.to_state} />
+                    </td>
+                    <td className="px-3 py-2 text-xs text-text-secondary">
+                      {t.plan_id ? `#${t.plan_id}` : "—"}
+                    </td>
+                    <td className="px-3 py-2">
+                      <TransitionStatusBadge transition={t} />
+                    </td>
+                    <td className="px-3 py-2 text-xs text-status-broken max-w-xs">
+                      {hasError ? (
+                        <span className={cn("block", !isExpanded && "truncate")}>
+                          <span className="mr-1 text-text-muted">[{isExpanded ? "−" : "+"}]</span>
+                          {t.error_message}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                  </tr>
+                  {isExpanded && hasError && (
+                    <tr
+                      key={`${t.id}-expanded`}
+                      className={cn(
+                        "border-t border-border-muted",
+                        ri % 2 === 1 ? "bg-bg-base" : "bg-bg-surface"
+                      )}
+                    >
+                      <td colSpan={6} className="px-3 py-3">
+                        <pre className="text-xs text-status-broken whitespace-pre-wrap break-all font-mono bg-bg-raised border border-border-muted px-3 py-2">
+                          {t.error_message}
+                        </pre>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })}
           </tbody>
         </table>
       )}
@@ -709,71 +771,6 @@ function DeviceDetail() {
       )}
     </div>
   );
-
-  // ── Role Assignment (in a separate section below tabs) ───────────────────
-
-  const renderRoleAssignment = () => (
-    <SectionCard title="Role Assignment">
-      <div className="space-y-3">
-        {assignedRole && (
-          <div className="p-3 bg-bg-raised border border-border">
-            <div className="text-sm font-medium text-text-primary">{assignedRole.name}</div>
-            <div className="text-xs text-text-secondary mt-0.5">{assignedRole.description ?? "No description"}</div>
-          </div>
-        )}
-        <div className="space-y-1">
-          <Label htmlFor="role-select" className="text-xs uppercase text-text-secondary tracking-wide">
-            Select Role
-          </Label>
-          <select
-            id="role-select"
-            value={selectedRoleId ?? ""}
-            onChange={(e) => setSelectedRoleId(e.target.value ? parseInt(e.target.value) : null)}
-            className="w-full bg-bg-base border border-border text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent"
-          >
-            <option value="">No role</option>
-            {availableRoles.map((role) => (
-              <option key={role.id} value={role.id}>
-                {role.name} ({role.os_name} {role.os_release})
-              </option>
-            ))}
-          </select>
-        </div>
-        <Button
-          variant="secondary"
-          onClick={handleAssignRole}
-          disabled={assigningRole || selectedRoleId === device.role_id}
-          className="w-full"
-        >
-          {assigningRole ? "Assigning..." : "Assign Role"}
-        </Button>
-      </div>
-    </SectionCard>
-  );
-
-  // ── Lifecycle management ─────────────────────────────────────────────────
-
-  const renderLifecycle = () => {
-    const STATES: DeviceLifecycle[] = ["new", "unprovisioned", "provisioned", "removed", "broken"];
-    return (
-      <SectionCard title="Lifecycle">
-        <div className="flex flex-wrap gap-2">
-          {STATES.map((state) => (
-            <Button
-              key={state}
-              variant={lifecycle === state ? "default" : "secondary"}
-              size="sm"
-              disabled={transitioning || lifecycle === state}
-              className="capitalize"
-              onClick={() => openTransitionDialog(state)}
-            >
-              {state}
-            </Button>
-          ))}
-        </div>
-      </SectionCard>
-    );
-  };
 
   // ── Danger zone ──────────────────────────────────────────────────────────
 
@@ -810,28 +807,32 @@ function DeviceDetail() {
   // Action buttons - contextual based on lifecycle
   const headerActions = (
     <div className="flex items-center gap-2">
-      {canAssignRole && (
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => setActiveTab("hardware")}
-        >
-          <UserCheck className="size-3.5" />
-          Assign Role
-        </Button>
+      {/* Unprovisioned: Provision (asks for role) + Decommission */}
+      {isUnprovisioned && (
+        <>
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setProvisionDialogOpen(true)}
+            disabled={transitioning}
+          >
+            <Zap className="size-3.5" />
+            Provision
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => openTransitionDialog("removed")}
+            disabled={transitioning}
+          >
+            <XCircle className="size-3.5" />
+            Decommission
+          </Button>
+        </>
       )}
-      {canProvision && (
-        <Button
-          variant="default"
-          size="sm"
-          onClick={() => openTransitionDialog("provisioned")}
-          disabled={transitioning}
-        >
-          <Zap className="size-3.5" />
-          Provision
-        </Button>
-      )}
-      {canDecommission && (
+
+      {/* Provisioned: Deprovision */}
+      {isProvisioned && (
         <Button
           variant="danger"
           size="sm"
@@ -839,9 +840,52 @@ function DeviceDetail() {
           disabled={transitioning}
         >
           <XCircle className="size-3.5" />
-          Decommission
+          Deprovision
         </Button>
       )}
+
+      {/* Broken: Deprovision + Provision (asks role) + Mark As Fixed + Decommission */}
+      {isBroken && (
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => openTransitionDialog("unprovisioned")}
+            disabled={transitioning}
+          >
+            <XCircle className="size-3.5" />
+            Deprovision
+          </Button>
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setProvisionDialogOpen(true)}
+            disabled={transitioning}
+          >
+            <Zap className="size-3.5" />
+            Provision
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => openTransitionDialog("unprovisioned")}
+            disabled={transitioning}
+          >
+            <CheckCircle2 className="size-3.5" />
+            Mark As Fixed
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={() => openTransitionDialog("removed")}
+            disabled={transitioning}
+          >
+            <WrenchIcon className="size-3.5" />
+            Decommission
+          </Button>
+        </>
+      )}
+      <Button variant="danger" size="sm" onClick={() => createPlan([ActionConsole], "boot into console")} disabled={transitioning}><WrenchIcon className="size-3.5" />Console</Button>
     </div>
   );
 
@@ -866,6 +910,21 @@ function DeviceDetail() {
         actions={headerActions}
       />
 
+      {/* Info banner */}
+      {info && (
+        <div className="mb-4 flex items-start gap-2 border border-error-border bg-error-bg px-3 py-2 text-sm text-status-broken">
+          <AlertCircle className="size-4 shrink-0 mt-0.5" />
+          <span>{info}</span>
+          <button
+            onClick={() => setError(null)}
+            className="ml-auto text-text-muted hover:text-status-broken cursor-pointer"
+            aria-label="Dismiss"
+          >
+            <XCircle className="size-4" />
+          </button>
+        </div>
+      )}
+
       {/* Error banner */}
       {error && (
         <div className="mb-4 flex items-start gap-2 border border-error-border bg-error-bg px-3 py-2 text-sm text-status-broken">
@@ -886,15 +945,7 @@ function DeviceDetail() {
 
       {/* Tab panels */}
       {activeTab === "overview" && renderOverview()}
-      {activeTab === "hardware" && (
-        <div className="space-y-4">
-          {renderHardware()}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {renderRoleAssignment()}
-            {renderLifecycle()}
-          </div>
-        </div>
-      )}
+      {activeTab === "hardware" && renderHardware()}
       {activeTab === "transitions" && renderTransitions()}
       {activeTab === "warnings" && renderWarnings()}
 
@@ -916,6 +967,14 @@ function DeviceDetail() {
         currentState={status?.current_lifecycle ?? "new"}
         targetState={targetState}
         onConfirm={handleTransition}
+      />
+
+      <ProvisionDialog
+        open={provisionDialogOpen}
+        onOpenChange={setProvisionDialogOpen}
+        availableRoles={availableRoles}
+        currentRoleId={device?.role_id}
+        onConfirm={handleProvision}
       />
 
       <DeleteConfirmationDialog

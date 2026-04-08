@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useLoaderData, useNavigate } from "react-router";
 import { Monitor } from "lucide-react";
-import type { Device, Platform, Role } from "@/lib/client";
+import type { Device, Platform, Role, PendingDevice } from "@/lib/client";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -11,11 +11,18 @@ interface DevicesLoaderData {
   devices: Device[];
   platforms: Platform[];
   roles: Role[];
+  pendingDevices: PendingDevice[];
 }
 
 function Devices() {
-  const { devices, platforms, roles } = useLoaderData() as DevicesLoaderData;
+  const { devices, platforms, roles, pendingDevices } = useLoaderData() as DevicesLoaderData;
   const navigate = useNavigate();
+
+  // Pending devices that haven't completed (not yet provisioned as real devices)
+  const activePendingDevices = useMemo(
+    () => pendingDevices.filter((p) => !p.completed_at),
+    [pendingDevices]
+  );
 
   const [search, setSearch] = useState("");
   const [lifecycleFilter, setLifecycleFilter] = useState("");
@@ -95,7 +102,7 @@ function Devices() {
           { label: "Devices" },
         ]}
         title="Devices"
-        description={`${devices.length} device${devices.length !== 1 ? "s" : ""} registered`}
+        description={`${devices.length} device${devices.length !== 1 ? "s" : ""} registered${activePendingDevices.length > 0 ? `, ${activePendingDevices.length} pending` : ""}`}
         actions={
           <Button onClick={() => navigate("/devices/pending/new")}>
             + Add Pending Device
@@ -182,6 +189,55 @@ function Devices() {
           </span>
         </div>
       </div>
+
+      {/* Pending Devices section */}
+      {activePendingDevices.length > 0 && (
+        <div className="mb-4">
+          <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">
+            Pending Devices ({activePendingDevices.length})
+          </div>
+          <div className="border border-border">
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="bg-bg-raised">
+                  {(["MAC Address", "Network", "Added", "Status"] as const).map((col) => (
+                    <th
+                      key={col}
+                      className="text-left text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] px-3 py-2 border-b border-border"
+                    >
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {activePendingDevices.map((pending, idx) => {
+                  const rowBg = idx % 2 === 0 ? "bg-bg-surface" : "bg-bg-base";
+                  return (
+                    <tr
+                      key={pending.id}
+                      className={`${rowBg} border-b border-border-muted last:border-b-0`}
+                    >
+                      <td className="px-3 py-2 text-xs text-text-primary font-mono">
+                        {pending.mac_address}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-text-secondary">
+                        Network #{pending.network_id}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-text-secondary">
+                        {new Date(pending.created_at).toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2">
+                        <StatusBadge status="new" />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Table */}
       <div className="border border-border">
