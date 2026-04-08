@@ -736,10 +736,7 @@ mod tests {
         crate::database::Connection,
     ) {
         // Create image store for testing
-        let store = ImageStore::new(crate::storage::ImageStoreConfig::Memory {
-            base_url: "http://localhost:8080/images".into(),
-        })
-        .unwrap();
+        let store = ImageStore::new(crate::storage::ImageStoreConfig::Memory {}).unwrap();
 
         // Create temporary directories needed for agent images and boot files
         let temp_dir = tempdir().unwrap();
@@ -772,6 +769,7 @@ mod tests {
             boot_file_provider,
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
+            bundled_osm_path: None,
         });
         (state, temp_dir, migration_conn)
     }

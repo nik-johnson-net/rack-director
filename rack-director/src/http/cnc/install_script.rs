@@ -1,6 +1,6 @@
 use crate::http::error::Error;
 use crate::templates;
-use crate::{database, dhcp, director::Director, operating_systems, roles};
+use crate::{database, dhcp, director::Director, roles};
 use anyhow::anyhow;
 use axum::{
     http::{StatusCode, header},
@@ -15,14 +15,17 @@ use uuid::Uuid;
 /// This function orchestrates the complete install script rendering process:
 /// 1. Retrieves device information and role assignment
 /// 2. Fetches OS and architecture configuration
-/// 3. Downloads the install script template from storage
+/// 3. Loads the install script template — from disk for bundled OSMs, or from
+///    the image store for uploaded OSMs
 /// 4. Gathers device network information from DHCP
 /// 5. Renders the template with device context
 ///
 /// # Arguments
 /// * `conn` - An open database connection
-/// * `image_store` - Image store for downloading script templates
+/// * `image_store` - Image store for downloading script templates (uploaded OSMs)
+/// * `bundled_osm_path` - Root directory for bundled OSM files on disk, if configured
 /// * `device_uuid` - UUID of the device requesting the install script
+/// * `root_url` - Base URL used in rendered template variables
 ///
 /// # Returns
 /// * `Ok(Response)` - HTTP response containing the rendered install script
@@ -30,6 +33,7 @@ use uuid::Uuid;
 pub async fn render_for_device(
     conn: &database::Connection,
     image_store: &crate::storage::ImageStore,
+    bundled_osm_path: Option<&std::path::Path>,
     device_uuid: &Uuid,
 ) -> Result<Response<String>, Error> {
     let director = Director::new(conn);
@@ -50,44 +54,24 @@ pub async fn render_for_device(
         .await
         .map_err(Error::ServerInternalError)?;
 
-    // Get device architecture
-    let arch = device.architecture;
+    // Resolve OS from OSM
+    let resolved = crate::osm::resolve_os(
+        conn,
+        &role.osm_module,
+        &role.os_name,
+        &role.os_release,
+        &role.os_arch,
+    )
+    .await
+    .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Failed to resolve OS: {}", e)))?;
 
-    // Get OS architecture configuration
-    let os_arch = operating_systems::store::get_architecture(conn, role.os_id, arch)
-        .await
-        .map_err(|e| Error::NotFound(format!("OS architecture not found: {}", e)))?;
-
-    // Get OS
-    let os = operating_systems::store::get(conn, role.os_id)
-        .await
-        .map_err(Error::ServerInternalError)?;
-
-    // Check if install script exists
-    let script_path = os_arch
-        .install_script_path
-        .ok_or_else(|| Error::NotFound("No install script for this OS architecture".to_string()))?;
-
-    // Download install script template from storage
-    let (stream, _size) = image_store.download(&script_path).await.map_err(|e| {
-        Error::ServerInternalError(anyhow::anyhow!("Failed to download script: {}", e))
-    })?;
-
-    // Collect stream into bytes (install scripts are small text files)
-    let script_bytes = stream
-        .try_fold(Vec::new(), |mut vec, data| async move {
-            vec.extend_from_slice(&data);
-            Ok(vec)
-        })
-        .await
-        .map_err(|e| {
-            log::warn!("Error retrieving install script {}: {}", script_path, e);
-            Error::ServerInternalError(anyhow!(""))
-        })?;
-
-    let template = String::from_utf8(script_bytes).map_err(|e| {
-        Error::ServerInternalError(anyhow::anyhow!("Script is not valid UTF-8: {}", e))
-    })?;
+    // Load install script template — bundled modules are served from disk,
+    // uploaded modules from the image store.
+    let template = if resolved.module.source == "bundled" {
+        load_bundled_template(bundled_osm_path, &resolved).await?
+    } else {
+        load_stored_template(image_store, &resolved).await?
+    };
 
     // Get device network info
     let network_info = get_device_network_info_with_db(conn, device_uuid).await?;
@@ -128,16 +112,20 @@ pub async fn render_for_device(
             &role.disk_layout
         };
 
-    // Render template with device context
-    let rendered = templates::render_install_script(
+    // Render with OSM function
+    let rendered = templates::render_install_script_osm(
         &template,
         &device_info,
-        &role,
-        &os,
+        &role.name,
+        &role.disk_layout,
+        &role.config_template,
+        &role.os_name,
+        &role.os_release,
         &network_info,
         resolved_disk_layout,
+        "http://localhost",
     )
-    .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Template rendering failed: {}", e)))?;
+    .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Template render failed: {}", e)))?;
 
     log::debug!("Rendered install script for {}:\n{}", device_uuid, rendered);
 
@@ -146,6 +134,59 @@ pub async fn render_for_device(
         .header(header::CONTENT_TYPE, "text/plain")
         .body(rendered)
         .expect("response building should never error"))
+}
+
+/// Load an install script template from the on-disk bundled OSM directory.
+///
+/// Bundled OSMs are never uploaded to the image store — their files live only
+/// on disk at `{bundled_osm_path}/{os_dir}/{install_template}`.
+async fn load_bundled_template(
+    bundled_osm_path: Option<&std::path::Path>,
+    resolved: &crate::osm::ResolvedOs,
+) -> Result<String, Error> {
+    let path = bundled_osm_path.ok_or_else(|| {
+        Error::ServerInternalError(anyhow::anyhow!(
+            "Bundled OSM '{}' requires --bundled-osm-path to be set",
+            resolved.module.name
+        ))
+    })?;
+    let disk_path = path
+        .join(&resolved.os.dir_name)
+        .join(&resolved.arch_config.install_template);
+    let bytes = tokio::fs::read(&disk_path).await.map_err(|e| {
+        Error::ServerInternalError(anyhow::anyhow!(
+            "Failed to read bundled install template {}: {}",
+            disk_path.display(),
+            e
+        ))
+    })?;
+    String::from_utf8(bytes).map_err(|e| {
+        Error::ServerInternalError(anyhow::anyhow!("Template is not valid UTF-8: {}", e))
+    })
+}
+
+/// Load an install script template from the image store (uploaded OSMs).
+async fn load_stored_template(
+    image_store: &crate::storage::ImageStore,
+    resolved: &crate::osm::ResolvedOs,
+) -> Result<String, Error> {
+    let template_path = resolved.install_template_storage_path();
+    let (stream, _size) = image_store.download(&template_path).await.map_err(|e| {
+        Error::ServerInternalError(anyhow::anyhow!("Failed to download template: {}", e))
+    })?;
+    let script_bytes = stream
+        .try_fold(Vec::new(), |mut vec, data| async move {
+            vec.extend_from_slice(&data);
+            Ok(vec)
+        })
+        .await
+        .map_err(|e| {
+            log::warn!("Error retrieving install script {}: {}", template_path, e);
+            Error::ServerInternalError(anyhow!(""))
+        })?;
+    String::from_utf8(script_bytes).map_err(|e| {
+        Error::ServerInternalError(anyhow::anyhow!("Script is not valid UTF-8: {}", e))
+    })
 }
 
 /// Inner implementation that accepts an already-opened database connection.
@@ -160,7 +201,13 @@ async fn get_device_network_info_with_db(
 
     if let Some(lease) = lease {
         // Get DHCP config for gateway and DNS
-        let network = dhcp::store::get_network(conn, lease.id).await?;
+        let network_id = lease.network_id.ok_or_else(|| {
+            Error::ServerInternalError(anyhow::anyhow!(
+                "Lease {} has no associated network",
+                lease.id
+            ))
+        })?;
+        let network = dhcp::store::get_network(conn, network_id).await?;
         let dns_servers = network.dns_servers;
 
         let subnet: Ipv4Subnet = network.subnet.parse().map_err(anyhow::Error::new)?;
@@ -206,7 +253,7 @@ mod tests {
         // Run migrations and retain the connection so the in-memory DB persists for the test
         let migration_conn = run_migrations(conn.as_ref()).await.unwrap();
 
-        let image_store = ImageStore::memory("http://localhost:8080");
+        let image_store = ImageStore::memory();
 
         // Create temporary directories needed for agent images and boot files
         let temp_dir = tempdir().unwrap();
@@ -228,6 +275,7 @@ mod tests {
             boot_file_provider,
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
+            bundled_osm_path: None,
         });
 
         (state, temp_dir, migration_conn)
@@ -330,7 +378,7 @@ mod tests {
         }
 
         let conn = state.connection_factory.open().await.unwrap();
-        let result = render_for_device(&conn, &state.image_store, &uuid).await;
+        let result = render_for_device(&conn, &state.image_store, None, &uuid).await;
         // Should get NotFound error when device has no role
         match result {
             Ok(_) => panic!("Expected error but got Ok"),

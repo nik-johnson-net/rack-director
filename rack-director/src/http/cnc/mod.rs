@@ -169,9 +169,7 @@ async fn ipxe_handler(
         }
     };
 
-    let ipxe_script = boot_target
-        .to_ipxe_script(&root_url, &state.image_store, Some(&uuid))
-        .await?;
+    let ipxe_script = boot_target.to_ipxe_script(&root_url, Some(&uuid)).await?;
 
     log::debug!("cnc/ipxe: returning script for {}:\n{}", uuid, ipxe_script);
 
@@ -192,7 +190,13 @@ async fn install_script_handler(
         .await
         .map_err(Error::ServerInternalError)?;
 
-    install_script::render_for_device(&conn, &state.image_store, &uuid).await
+    install_script::render_for_device(
+        &conn,
+        &state.image_store,
+        state.bundled_osm_path.as_deref(),
+        &uuid,
+    )
+    .await
 }
 
 async fn agent_images_handler(
@@ -598,7 +602,7 @@ mod tests {
         // Note: No default network is created. Tests that need networks should create them explicitly.
 
         // Create image store for testing
-        let image_store = ImageStore::memory("http://localhost:8080");
+        let image_store = ImageStore::memory();
 
         // Create agent-image directory with mock files for testing
         let agent_images_path = temp_dir.path().join("agent-image");
@@ -638,6 +642,7 @@ mod tests {
             boot_file_provider,
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
+            bundled_osm_path: None,
         });
         (state, temp_dir)
     }
@@ -1453,10 +1458,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Create OS and role with path-based layout
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
+        // Create role with path-based layout
         let layout = common::disk_layout::DiskLayout {
             disks: vec![common::disk_layout::DiskConfig {
                 device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
@@ -1477,8 +1479,12 @@ mod tests {
             &conn,
             "test-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             None,
         )
@@ -1611,9 +1617,6 @@ mod tests {
             .unwrap();
 
         // Create role with label-based layout
-        let os = crate::operating_systems::store::create(&conn, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
         let layout = common::disk_layout::DiskLayout {
             disks: vec![common::disk_layout::DiskConfig {
                 device: "ROOT".to_string(),
@@ -1634,8 +1637,12 @@ mod tests {
             &conn,
             "label-role",
             None,
-            os.id.unwrap(),
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
             &layout,
+            None,
             None,
             None,
         )
@@ -1703,7 +1710,7 @@ pub(super) mod test_helpers {
         let boot_file_provider =
             Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
-        let image_store = ImageStore::memory("http://localhost:8080");
+        let image_store = ImageStore::memory();
 
         let state = Arc::new(AppState {
             connection_factory: conn_factory,
@@ -1712,6 +1719,7 @@ pub(super) mod test_helpers {
             boot_file_provider,
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
+            bundled_osm_path: None,
         });
 
         (state, temp_dir, migration_conn)

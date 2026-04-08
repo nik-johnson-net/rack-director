@@ -38,7 +38,7 @@ pub async fn osm_file_handler(
     validate_path_components(&params)?;
 
     // Check whether this module is bundled so we can serve from disk.
-    if let Some(bundled_path) = None
+    if let Some(bundled_path) = &state.bundled_osm_path
         && let Ok(conn) = state.connection_factory.open().await
         && let Ok(module) = store::get_module_by_name(&conn, &params.module).await
         && module.source == "bundled"

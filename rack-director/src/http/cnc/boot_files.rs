@@ -127,11 +127,7 @@ mod tests {
         let storage_path = temp_dir.path().join("images");
         std::fs::create_dir_all(&storage_path).unwrap();
 
-        let image_store = ImageStore::new(ImageStoreConfig::Local {
-            path: storage_path,
-            base_url: "http://localhost:8080".into(),
-        })
-        .unwrap();
+        let image_store = ImageStore::new(ImageStoreConfig::Local { path: storage_path }).unwrap();
 
         let db_path = temp_dir.path().join("test.db");
 
@@ -150,6 +146,7 @@ mod tests {
             boot_file_provider,
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
+            bundled_osm_path: None,
         });
 
         (state, temp_dir)

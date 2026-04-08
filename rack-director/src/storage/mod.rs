@@ -18,10 +18,9 @@ pub type DataStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> +
 #[derive(Debug, Clone)]
 pub enum ImageStoreConfig {
     #[cfg(test)]
-    Memory { base_url: String },
+    Memory {},
     Local {
         path: PathBuf,
-        base_url: String, // HTTP URL base for serving files
     },
     S3 {
         endpoint: String,
@@ -29,7 +28,6 @@ pub enum ImageStoreConfig {
         region: String,
         access_key: String,
         secret_key: String,
-        base_url: String, // HTTP URL base for serving files (if using CDN or direct access)
     },
 }
 
@@ -53,15 +51,11 @@ pub enum ImageStoreConfig {
 //     /// List all files with the given prefix (currently only used in tests)
 //     #[allow(dead_code)]
 //     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
-
-//     /// Get the HTTP URL for a file (for iPXE to download)
-//     fn get_url(&self, path: &str) -> String;
 // }
 
 pub struct ImageStore {
     kind: String,
     location: String,
-    local_base_path: String,
     client: Arc<Box<dyn ObjectStore>>,
 }
 
@@ -69,7 +63,7 @@ impl ImageStore {
     pub fn new(config: ImageStoreConfig) -> Result<Self> {
         let store = match config {
             #[cfg(test)]
-            ImageStoreConfig::Memory { base_url } => {
+            ImageStoreConfig::Memory {} => {
                 use object_store::memory::InMemory;
 
                 let client = InMemory::new();
@@ -77,16 +71,14 @@ impl ImageStore {
                     kind: "memory".to_owned(),
                     location: "".to_owned(),
                     client: Arc::new(Box::new(client)),
-                    local_base_path: base_url,
                 }
             }
-            ImageStoreConfig::Local { path, base_url } => {
+            ImageStoreConfig::Local { path } => {
                 let client = LocalFileSystem::new_with_prefix(&path)?.with_automatic_cleanup(true);
                 ImageStore {
                     kind: "local".to_owned(),
                     location: path.to_string_lossy().to_string(),
                     client: Arc::new(Box::new(client)),
-                    local_base_path: base_url,
                 }
             }
             ImageStoreConfig::S3 {
@@ -95,7 +87,6 @@ impl ImageStore {
                 region,
                 access_key,
                 secret_key,
-                base_url,
             } => {
                 let client = AmazonS3Builder::from_env()
                     .with_access_key_id(access_key)
@@ -109,7 +100,6 @@ impl ImageStore {
                     kind: "S3".to_owned(),
                     location: format!("{}/{}", endpoint, bucket),
                     client: Arc::new(Box::new(client)),
-                    local_base_path: base_url,
                 }
             }
         };
@@ -125,11 +115,8 @@ impl ImageStore {
 
     /// Test Convenience method for creating an in-memory image store.
     #[cfg(test)]
-    pub fn memory<T: Into<String>>(base_url: T) -> Self {
-        Self::new(ImageStoreConfig::Memory {
-            base_url: base_url.into(),
-        })
-        .unwrap()
+    pub fn memory() -> Self {
+        Self::new(ImageStoreConfig::Memory {}).unwrap()
     }
 
     /// Upload data from a stream to the store at the given path
@@ -195,14 +182,5 @@ impl ImageStore {
             .map_err(|e| e.into())
             .try_collect()
             .await
-    }
-
-    /// Get the HTTP URL for a file (for iPXE to download)
-    pub async fn get_url(&self, path: &str) -> Result<String> {
-        Ok(format!(
-            "{}/{}",
-            self.local_base_path.trim_end_matches('/'),
-            path
-        ))
     }
 }

@@ -23,10 +23,8 @@ pub fn build_test_state(conn_factory: Arc<dyn database::ConnectionFactory>) -> A
     std::fs::create_dir_all(&boot_files_path).unwrap();
     let boot_file_provider =
         Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
-    let image_store = crate::storage::ImageStore::new(crate::storage::ImageStoreConfig::Memory {
-        base_url: "http://localhost/images".into(),
-    })
-    .unwrap();
+    let image_store =
+        crate::storage::ImageStore::new(crate::storage::ImageStoreConfig::Memory {}).unwrap();
     // Leak the TempDir so the paths remain valid for the test duration.
     std::mem::forget(temp_dir);
     Arc::new(AppState {
@@ -36,5 +34,6 @@ pub fn build_test_state(conn_factory: Arc<dyn database::ConnectionFactory>) -> A
         boot_file_provider,
         dhcp: crate::dhcp::DhcpControl::noop(),
         unprovisioned_sleep_secs: 0,
+        bundled_osm_path: None,
     })
 }

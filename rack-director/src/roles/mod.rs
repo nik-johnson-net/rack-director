@@ -13,8 +13,16 @@ pub struct Role {
     pub id: Option<i64>,
     pub name: String,
     pub description: Option<String>,
-    pub os_id: i64,
+    /// OSM module name (e.g., "Default")
+    pub osm_module: String,
+    /// OS name within the module (e.g., "Ubuntu")
+    pub os_name: String,
+    /// OS release (e.g., "22.04")
+    pub os_release: String,
+    /// Architecture (e.g., "x86-64")
+    pub os_arch: String,
     pub disk_layout: DiskLayout,
+    pub cmdline_args: Option<String>,
     pub config_template: Option<serde_json::Value>,
     /// Required firmware mode for devices assigned to this role.
     /// If set, only devices with the matching boot_mode can be assigned this role.
@@ -45,8 +53,12 @@ impl FromRow for Role {
             id: row.get("id")?,
             name: row.get("name")?,
             description: row.get("description")?,
-            os_id: row.get("os_id")?,
+            osm_module: row.get("osm_module")?,
+            os_name: row.get("os_name")?,
+            os_release: row.get("os_release")?,
+            os_arch: row.get("os_arch")?,
             disk_layout,
+            cmdline_args: row.get("cmdline_args")?,
             config_template,
             firmware_mode,
             created_at: row.get("created_at")?,
@@ -60,8 +72,16 @@ impl FromRow for Role {
 pub struct CreateRoleRequest {
     pub name: String,
     pub description: Option<String>,
-    pub os_id: i64,
+    /// OSM module name (e.g., "Default")
+    pub osm_module: String,
+    /// OS name within the module (e.g., "Ubuntu")
+    pub os_name: String,
+    /// OS release (e.g., "22.04")
+    pub os_release: String,
+    /// Architecture (e.g., "x86-64")
+    pub os_arch: String,
     pub disk_layout: DiskLayout,
+    pub cmdline_args: Option<String>,
     pub config_template: Option<serde_json::Value>,
     pub firmware_mode: Option<common::FirmwareMode>,
 }
@@ -71,8 +91,16 @@ pub struct CreateRoleRequest {
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub os_id: Option<i64>,
+    /// OSM module name (e.g., "Default")
+    pub osm_module: Option<String>,
+    /// OS name within the module (e.g., "Ubuntu")
+    pub os_name: Option<String>,
+    /// OS release (e.g., "22.04")
+    pub os_release: Option<String>,
+    /// Architecture (e.g., "x86-64")
+    pub os_arch: Option<String>,
     pub disk_layout: Option<DiskLayout>,
+    pub cmdline_args: Option<String>,
     pub config_template: Option<serde_json::Value>,
     pub firmware_mode: Option<common::FirmwareMode>,
     /// When true, clears firmware_mode to NULL regardless of the firmware_mode field.
@@ -85,13 +113,4 @@ pub struct UpdateRoleRequest {
 #[derive(Debug, Deserialize)]
 pub struct AssignRoleRequest {
     pub role_id: i64,
-}
-
-/// Role with associated operating system information
-#[derive(Debug, Serialize)]
-pub struct RoleWithOs {
-    #[serde(flatten)]
-    pub role: Role,
-    pub os_name: String,
-    pub os_version: String,
 }

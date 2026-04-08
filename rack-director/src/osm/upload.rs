@@ -696,6 +696,124 @@ install_template = "install.sh"
         );
     }
 
+    // ── extract_to_storage ────────────────────────────────────────────────────
+
+    /// `extract_to_storage` must upload every non-directory file from the
+    /// archive to the image store under the given prefix, without loading any
+    /// file fully into memory.
+    #[tokio::test]
+    async fn test_extract_to_storage_uploads_all_files() {
+        let manifest = manifest_toml("Extract Module");
+        let os_config = r#"
+name = "ExtractOS"
+release = "1.0"
+
+[[architectures]]
+arch = "x86-64"
+kernel = "vmlinuz"
+initramfs = "initrd.img"
+install_template = "install.sh"
+"#;
+
+        let archive_bytes = build_test_archive(&[
+            ("manifest.toml", manifest.as_bytes()),
+            ("test-os/OperatingSystem.toml", os_config.as_bytes()),
+            ("test-os/vmlinuz", b"fake kernel bytes"),
+            ("test-os/initrd.img", b"fake initramfs bytes"),
+            ("test-os/install.sh", b"#!/bin/bash\necho done"),
+        ]);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &archive_bytes).unwrap();
+
+        let store = crate::storage::ImageStore::memory();
+        let prefix = "osm/extract-module/1.0.0/";
+
+        extract_to_storage(tmp.path(), prefix, &store)
+            .await
+            .unwrap();
+
+        // Each file in the archive must be present in the store.
+        assert!(
+            store
+                .exists("osm/extract-module/1.0.0/manifest.toml")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .exists("osm/extract-module/1.0.0/test-os/OperatingSystem.toml")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .exists("osm/extract-module/1.0.0/test-os/vmlinuz")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .exists("osm/extract-module/1.0.0/test-os/initrd.img")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .exists("osm/extract-module/1.0.0/test-os/install.sh")
+                .await
+                .unwrap()
+        );
+    }
+
+    /// `extract_to_storage` must preserve file contents exactly.
+    #[tokio::test]
+    async fn test_extract_to_storage_preserves_file_contents() {
+        let manifest = manifest_toml("Content Module");
+        let os_config = r#"
+name = "ContentOS"
+release = "1.0"
+
+[[architectures]]
+arch = "x86-64"
+kernel = "vmlinuz"
+initramfs = "initrd.img"
+install_template = "install.sh"
+"#;
+        let kernel_data = b"kernel binary content 1234";
+
+        let archive_bytes = build_test_archive(&[
+            ("manifest.toml", manifest.as_bytes()),
+            ("test-os/OperatingSystem.toml", os_config.as_bytes()),
+            ("test-os/vmlinuz", kernel_data),
+            ("test-os/initrd.img", b"initrd"),
+            ("test-os/install.sh", b"#!/bin/bash"),
+        ]);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &archive_bytes).unwrap();
+
+        let store = crate::storage::ImageStore::memory();
+        let prefix = "osm/content-module/1.0.0/";
+
+        extract_to_storage(tmp.path(), prefix, &store)
+            .await
+            .unwrap();
+
+        let (mut stream, _size) = store
+            .download("osm/content-module/1.0.0/test-os/vmlinuz")
+            .await
+            .unwrap();
+
+        use futures::StreamExt;
+        let mut downloaded = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            downloaded.extend_from_slice(&chunk.unwrap());
+        }
+
+        assert_eq!(downloaded, kernel_data);
+    }
+
     // ── slugify ───────────────────────────────────────────────────────────────
 
     #[test]

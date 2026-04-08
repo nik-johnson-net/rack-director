@@ -193,7 +193,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         .unwrap_or_else(|| format!("http://{}:{}", server_identifier, args.http_address.port()));
 
     // Initialize storage (after public_url is known so it can be used as the default base URL)
-    let storage_config = build_storage_config(&args, &public_url)?;
+    let storage_config = build_storage_config(&args)?;
     let image_store = ImageStore::new(storage_config)?;
 
     // Remove stale OSM files left behind by interrupted grace-period cleanup tasks
@@ -239,6 +239,11 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     // Start DHCP Service first so the DhcpControl handle is available for HTTP.
     let dhcp_start_result = dhcp_server.serve(args.no_dhcp_broadcast).await?;
 
+    // Determine the bundled OSM path for serving bundled module files directly from disk.
+    let bundled_osm_path = bundled_osm
+        .as_ref()
+        .map(|_| std::path::PathBuf::from(&args.bundled_osm_path));
+
     // Start HTTP Service — each HTTP handler opens its own connection via the
     // shared factory, keeping it independent of DHCP and Director connections.
     let http_start_result = http::start(
@@ -249,6 +254,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         boot_file_provider,
         dhcp_start_result.control.clone(),
         args.unprovisioned_sleep_secs,
+        bundled_osm_path,
     )
     .await?;
 
@@ -269,19 +275,10 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
     })
 }
 
-fn build_storage_config(
-    args: &Args,
-    public_url: &str,
-) -> Result<storage::ImageStoreConfig, anyhow::Error> {
-    let base_url = args
-        .storage_base_url
-        .clone()
-        .unwrap_or_else(|| format!("{}/cnc/files", public_url));
-
+fn build_storage_config(args: &Args) -> Result<storage::ImageStoreConfig, anyhow::Error> {
     match args.storage_type.as_str() {
         "local" => Ok(storage::ImageStoreConfig::Local {
             path: std::path::PathBuf::from(&args.storage_path),
-            base_url,
         }),
         "s3" => {
             let endpoint = args
@@ -307,7 +304,6 @@ fn build_storage_config(
                 region: args.s3_region.clone(),
                 access_key,
                 secret_key,
-                base_url,
             })
         }
         _ => Err(anyhow::anyhow!(

@@ -1,4 +1,4 @@
-use super::{DiskLayout, Role, RoleWithOs};
+use super::{DiskLayout, Role};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 
@@ -8,8 +8,12 @@ use crate::database::{Connection, FromRow};
 pub struct UpdateRoleParams<'a> {
     pub name: Option<&'a str>,
     pub description: Option<&'a str>,
-    pub os_id: Option<i64>,
+    pub osm_module: Option<&'a str>,
+    pub os_name: Option<&'a str>,
+    pub os_release: Option<&'a str>,
+    pub os_arch: Option<&'a str>,
     pub disk_layout: Option<&'a DiskLayout>,
+    pub cmdline_args: Option<&'a str>,
     pub config_template: Option<&'a serde_json::Value>,
     pub firmware_mode: Option<common::FirmwareMode>,
     /// When true, sets firmware_mode to NULL regardless of the firmware_mode field.
@@ -22,8 +26,12 @@ pub async fn create(
     conn: &Connection,
     name: &str,
     description: Option<&str>,
-    os_id: i64,
+    osm_module: &str,
+    os_name: &str,
+    os_release: &str,
+    os_arch: &str,
     disk_layout: &DiskLayout,
+    cmdline_args: Option<&str>,
     config_template: Option<&serde_json::Value>,
     firmware_mode: Option<common::FirmwareMode>,
 ) -> Result<Role> {
@@ -33,9 +41,22 @@ pub async fn create(
     let firmware_mode_val = firmware_mode.map(|m| m.as_db_str());
 
     conn.execute(
-        "INSERT INTO roles (name, description, os_id, disk_layout, config_template, firmware_mode, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        (name.to_string(), description.map(|s| s.to_string()), os_id, disk_layout_json, config_json, firmware_mode_val, now, now),
+        "INSERT INTO roles (name, description, osm_module, os_name, os_release, os_arch, disk_layout, cmdline_args, config_template, firmware_mode, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        (
+            name.to_string(),
+            description.map(|s| s.to_string()),
+            osm_module.to_string(),
+            os_name.to_string(),
+            os_release.to_string(),
+            os_arch.to_string(),
+            disk_layout_json,
+            cmdline_args.map(|s| s.to_string()),
+            config_json,
+            firmware_mode_val,
+            now,
+            now,
+        ),
     )
     .await
     .context("Failed to insert role")?;
@@ -46,8 +67,12 @@ pub async fn create(
         id: Some(id),
         name: name.to_string(),
         description: description.map(|s| s.to_string()),
-        os_id,
+        osm_module: osm_module.to_string(),
+        os_name: os_name.to_string(),
+        os_release: os_release.to_string(),
+        os_arch: os_arch.to_string(),
         disk_layout: disk_layout.clone(),
+        cmdline_args: cmdline_args.map(|s| s.to_string()),
         config_template: config_template.cloned(),
         firmware_mode,
         created_at: Some(now),
@@ -59,7 +84,8 @@ pub async fn create(
 pub async fn get(conn: &Connection, id: i64) -> Result<Role> {
     let role = conn
         .query_one(
-            "SELECT id, name, description, os_id, disk_layout, config_template, firmware_mode, created_at, updated_at
+            "SELECT id, name, description, osm_module, os_name, os_release, os_arch,
+                    disk_layout, cmdline_args, config_template, firmware_mode, created_at, updated_at
              FROM roles WHERE id = ?1",
             (id,),
             Role::from_row,
@@ -70,53 +96,18 @@ pub async fn get(conn: &Connection, id: i64) -> Result<Role> {
     Ok(role)
 }
 
-/// Get a role with its associated OS information.
-pub async fn get_with_os(conn: &Connection, id: i64) -> Result<RoleWithOs> {
-    let role = conn
-        .query_one(
-            "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
-                    r.firmware_mode, r.created_at, r.updated_at,
-                    o.name AS os_name, o.version AS os_version
-             FROM roles r
-             JOIN operating_systems o ON r.os_id = o.id
-             WHERE r.id = ?1",
-            (id,),
-            row_to_role_with_os,
-        )
-        .await
-        .context("Role not found")?;
-
-    Ok(role)
-}
-
-/// List all roles with their OS information.
-pub async fn list_with_os(conn: &Connection) -> Result<Vec<RoleWithOs>> {
+/// List all roles.
+pub async fn list(conn: &Connection) -> Result<Vec<Role>> {
     let roles = conn
         .query(
-            "SELECT r.id, r.name, r.description, r.os_id, r.disk_layout, r.config_template,
-                    r.firmware_mode, r.created_at, r.updated_at,
-                    o.name AS os_name, o.version AS os_version
-             FROM roles r
-             JOIN operating_systems o ON r.os_id = o.id
-             ORDER BY r.name",
+            "SELECT id, name, description, osm_module, os_name, os_release, os_arch,
+                    disk_layout, cmdline_args, config_template, firmware_mode, created_at, updated_at
+             FROM roles ORDER BY name",
             (),
-            row_to_role_with_os,
+            Role::from_row,
         )
         .await?;
-
     Ok(roles)
-}
-
-/// Map a database row from the roles-joined-with-OS query into a `RoleWithOs`.
-///
-/// Relies on named column access so callers are not sensitive to SELECT column order.
-/// The query must alias `o.name` as `os_name` and `o.version` as `os_version`.
-fn row_to_role_with_os(row: &rusqlite::Row) -> rusqlite::Result<RoleWithOs> {
-    Ok(RoleWithOs {
-        role: Role::from_row(row)?,
-        os_name: row.get("os_name")?,
-        os_version: row.get("os_version")?,
-    })
 }
 
 /// Update a role.
@@ -134,14 +125,30 @@ pub async fn update(conn: &Connection, id: i64, params: UpdateRoleParams<'_>) ->
         updates.push("description = ?");
         values.push(rusqlite::types::Value::Text(description.to_string()));
     }
-    if let Some(os_id) = params.os_id {
-        updates.push("os_id = ?");
-        values.push(rusqlite::types::Value::Integer(os_id));
+    if let Some(osm_module) = params.osm_module {
+        updates.push("osm_module = ?");
+        values.push(rusqlite::types::Value::Text(osm_module.to_string()));
+    }
+    if let Some(os_name) = params.os_name {
+        updates.push("os_name = ?");
+        values.push(rusqlite::types::Value::Text(os_name.to_string()));
+    }
+    if let Some(os_release) = params.os_release {
+        updates.push("os_release = ?");
+        values.push(rusqlite::types::Value::Text(os_release.to_string()));
+    }
+    if let Some(os_arch) = params.os_arch {
+        updates.push("os_arch = ?");
+        values.push(rusqlite::types::Value::Text(os_arch.to_string()));
     }
     if let Some(disk_layout) = params.disk_layout {
         updates.push("disk_layout = ?");
         let json = serde_json::to_string(disk_layout)?;
         values.push(rusqlite::types::Value::Text(json));
+    }
+    if let Some(cmdline_args) = params.cmdline_args {
+        updates.push("cmdline_args = ?");
+        values.push(rusqlite::types::Value::Text(cmdline_args.to_string()));
     }
     if let Some(config_template) = params.config_template {
         updates.push("config_template = ?");
@@ -195,17 +202,8 @@ mod tests {
         crate::database::run_migrations(&factory).await.unwrap()
     }
 
-    #[tokio::test]
-    async fn test_create_and_get_role() {
-        let db = setup_db(test_connection_factory!()).await;
-
-        // Create OS first
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-
-        // Create role
-        let disk_layout = DiskLayout {
+    fn simple_disk_layout() -> DiskLayout {
+        DiskLayout {
             disks: vec![DiskConfig {
                 device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
                 partition_table: "gpt".to_string(),
@@ -220,14 +218,31 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
-        };
+        }
+    }
+
+    fn empty_disk_layout() -> DiskLayout {
+        DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_role() {
+        let db = setup_db(test_connection_factory!()).await;
 
         let role = create(
             &db,
             "web-server",
             Some("Web server role"),
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &simple_disk_layout(),
+            None,
             None,
             None,
         )
@@ -236,9 +251,17 @@ mod tests {
 
         assert!(role.id.is_some());
         assert_eq!(role.name, "web-server");
+        assert_eq!(role.osm_module, "Default");
+        assert_eq!(role.os_name, "Ubuntu");
+        assert_eq!(role.os_release, "24.04");
+        assert_eq!(role.os_arch, "x86-64");
 
         let retrieved = get(&db, role.id.unwrap()).await.unwrap();
         assert_eq!(retrieved.name, role.name);
+        assert_eq!(retrieved.osm_module, "Default");
+        assert_eq!(retrieved.os_name, "Ubuntu");
+        assert_eq!(retrieved.os_release, "24.04");
+        assert_eq!(retrieved.os_arch, "x86-64");
         assert_eq!(retrieved.disk_layout.disks.len(), 1);
         assert_eq!(retrieved.disk_layout.disks[0].partitions.len(), 1);
     }
@@ -247,75 +270,82 @@ mod tests {
     async fn test_list_roles() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
-        create(&db, "role1", None, os.id.unwrap(), &disk_layout, None, None)
-            .await
-            .unwrap();
-        create(&db, "role2", None, os.id.unwrap(), &disk_layout, None, None)
-            .await
-            .unwrap();
-
-        let list = list_with_os(&db).await.unwrap();
-        assert_eq!(list.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_get_with_os() {
-        let db = setup_db(test_connection_factory!()).await;
-
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
-        let role = create(
+        create(
             &db,
-            "web-server",
+            "role1",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "22.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        create(
+            &db,
+            "role2",
+            None,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             None,
         )
         .await
         .unwrap();
 
-        let role_with_os = get_with_os(&db, role.id.unwrap()).await.unwrap();
-        assert_eq!(role_with_os.os_name, "Ubuntu");
-        assert_eq!(role_with_os.os_version, "24.04");
+        let roles = list(&db).await.unwrap();
+        assert_eq!(roles.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_role_osm_fields_roundtrip() {
+        let db = setup_db(test_connection_factory!()).await;
+
+        let role = create(
+            &db,
+            "web-server",
+            None,
+            "MyModule",
+            "CentOS",
+            "10",
+            "arm64",
+            &empty_disk_layout(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let retrieved = get(&db, role.id.unwrap()).await.unwrap();
+        assert_eq!(retrieved.osm_module, "MyModule");
+        assert_eq!(retrieved.os_name, "CentOS");
+        assert_eq!(retrieved.os_release, "10");
+        assert_eq!(retrieved.os_arch, "arm64");
     }
 
     #[tokio::test]
     async fn test_update_role() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
         let role = create(
             &db,
             "web-server",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "22.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             None,
         )
@@ -328,8 +358,12 @@ mod tests {
             UpdateRoleParams {
                 name: Some("updated-name"),
                 description: Some("New description"),
-                os_id: None,
+                osm_module: None,
+                os_name: None,
+                os_release: None,
+                os_arch: None,
                 disk_layout: None,
+                cmdline_args: None,
                 config_template: None,
                 firmware_mode: None,
                 clear_firmware_mode: false,
@@ -340,27 +374,102 @@ mod tests {
 
         assert_eq!(updated.name, "updated-name");
         assert_eq!(updated.description, Some("New description".to_string()));
+        // Unchanged fields should be preserved
+        assert_eq!(updated.osm_module, "Default");
+        assert_eq!(updated.os_name, "Ubuntu");
+        assert_eq!(updated.os_release, "22.04");
+        assert_eq!(updated.os_arch, "x86-64");
+    }
+
+    #[tokio::test]
+    async fn test_update_role_osm_fields() {
+        let db = setup_db(test_connection_factory!()).await;
+
+        let role = create(
+            &db,
+            "web-server",
+            None,
+            "Default",
+            "Ubuntu",
+            "22.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let updated = update(
+            &db,
+            role.id.unwrap(),
+            UpdateRoleParams {
+                name: None,
+                description: None,
+                osm_module: Some("Custom"),
+                os_name: Some("Debian"),
+                os_release: Some("12"),
+                os_arch: Some("arm64"),
+                disk_layout: None,
+                cmdline_args: None,
+                config_template: None,
+                firmware_mode: None,
+                clear_firmware_mode: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.osm_module, "Custom");
+        assert_eq!(updated.os_name, "Debian");
+        assert_eq!(updated.os_release, "12");
+        assert_eq!(updated.os_arch, "arm64");
+    }
+
+    #[tokio::test]
+    async fn test_create_role_with_cmdline_args() {
+        let db = setup_db(test_connection_factory!()).await;
+
+        let role = create(
+            &db,
+            "web-server",
+            None,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            Some("console=ttyS0 quiet"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(role.cmdline_args, Some("console=ttyS0 quiet".to_string()));
+
+        let retrieved = get(&db, role.id.unwrap()).await.unwrap();
+        assert_eq!(
+            retrieved.cmdline_args,
+            Some("console=ttyS0 quiet".to_string())
+        );
     }
 
     #[tokio::test]
     async fn test_delete_role() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
         let role = create(
             &db,
             "web-server",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             None,
         )
@@ -375,21 +484,16 @@ mod tests {
     async fn test_create_role_with_uefi_firmware_mode() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
         let role = create(
             &db,
             "uefi-role",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             Some(common::FirmwareMode::Uefi),
         )
@@ -406,21 +510,16 @@ mod tests {
     async fn test_create_role_with_bios_firmware_mode() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
         let role = create(
             &db,
             "bios-role",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             Some(common::FirmwareMode::Bios),
         )
@@ -437,21 +536,16 @@ mod tests {
     async fn test_create_role_without_firmware_mode() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
         let role = create(
             &db,
             "no-firmware-mode-role",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             None,
         )
@@ -468,18 +562,21 @@ mod tests {
     async fn test_update_role_firmware_mode() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
-        let role = create(&db, "role", None, os.id.unwrap(), &disk_layout, None, None)
-            .await
-            .unwrap();
+        let role = create(
+            &db,
+            "role",
+            None,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let updated = update(
             &db,
@@ -487,8 +584,12 @@ mod tests {
             UpdateRoleParams {
                 name: None,
                 description: None,
-                os_id: None,
+                osm_module: None,
+                os_name: None,
+                os_release: None,
+                os_arch: None,
                 disk_layout: None,
+                cmdline_args: None,
                 config_template: None,
                 firmware_mode: Some(common::FirmwareMode::Uefi),
                 clear_firmware_mode: false,
@@ -507,22 +608,17 @@ mod tests {
     async fn test_clear_firmware_mode_sets_null() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
         // Create a role that starts with a firmware_mode set.
         let role = create(
             &db,
             "role",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             Some(common::FirmwareMode::Uefi),
         )
@@ -538,8 +634,12 @@ mod tests {
             UpdateRoleParams {
                 name: None,
                 description: None,
-                os_id: None,
+                osm_module: None,
+                os_name: None,
+                os_release: None,
+                os_arch: None,
                 disk_layout: None,
+                cmdline_args: None,
                 config_template: None,
                 firmware_mode: None,
                 clear_firmware_mode: true,
@@ -564,21 +664,16 @@ mod tests {
     async fn test_clear_firmware_mode_takes_precedence_over_firmware_mode_field() {
         let db = setup_db(test_connection_factory!()).await;
 
-        let os = crate::operating_systems::store::create(&db, "Ubuntu", "24.04", None)
-            .await
-            .unwrap();
-        let disk_layout = DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-        };
-
         let role = create(
             &db,
             "role",
             None,
-            os.id.unwrap(),
-            &disk_layout,
+            "Default",
+            "Ubuntu",
+            "24.04",
+            "x86-64",
+            &empty_disk_layout(),
+            None,
             None,
             Some(common::FirmwareMode::Uefi),
         )
@@ -592,8 +687,12 @@ mod tests {
             UpdateRoleParams {
                 name: None,
                 description: None,
-                os_id: None,
+                osm_module: None,
+                os_name: None,
+                os_release: None,
+                os_arch: None,
                 disk_layout: None,
+                cmdline_args: None,
                 config_template: None,
                 firmware_mode: Some(common::FirmwareMode::Bios),
                 clear_firmware_mode: true,

@@ -64,7 +64,7 @@ pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
 }
 
-const LATEST_VERSION: usize = 18;
+const LATEST_VERSION: usize = 19;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -84,6 +84,7 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/16.sql"),
     include_str!("migrations/17.sql"),
     include_str!("migrations/18.sql"),
+    include_str!("migrations/19.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -110,6 +111,32 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
     None,                                                                      // Migration 16
     None,                                                                      // Migration 17
     None,                                                                      // Migration 18
+    None,                                                                      // Migration 19
+];
+
+/// Pre-migration hooks run Rust code BEFORE the SQL for each migration version.
+/// Index corresponds to migration version (1-indexed, so PRE_MIGRATION_HOOKS[18] runs before migration 19).
+type PreMigrationHook = fn(&Connection) -> BoxFuture<Result<()>>;
+const PRE_MIGRATION_HOOKS: [Option<PreMigrationHook>; LATEST_VERSION] = [
+    None, // Migration 1
+    None, // Migration 2
+    None, // Migration 3
+    None, // Migration 4
+    None, // Migration 5
+    None, // Migration 6
+    None, // Migration 7
+    None, // Migration 8
+    None, // Migration 9
+    None, // Migration 10
+    None, // Migration 11
+    None, // Migration 12
+    None, // Migration 13
+    None, // Migration 14
+    None, // Migration 15
+    None, // Migration 16
+    None, // Migration 17
+    None, // Migration 18
+    Some(|conn| migrations::migration_19::warn_if_roles_exist(conn).boxed()), // Migration 19
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.
@@ -174,6 +201,12 @@ async fn perform_migrations(conn: &mut Connection, current_version: usize) -> Re
 }
 
 async fn perform_migration(conn: &Connection, version: usize) -> Result<()> {
+    // Run pre-migration hook if it exists
+    if let Some(ref hook) = PRE_MIGRATION_HOOKS[version - 1] {
+        log::debug!("Running pre-migration hook for version {}", version);
+        hook(conn).await?;
+    }
+
     // Run SQL migration
     if let Err(e) = conn.execute_batch(MIGRATIONS[version - 1]).await {
         log::error!("Couldn't update database. {e}");
@@ -419,9 +452,14 @@ mod tests {
         assert!(stored.contains("\"partitions\""));
         assert!(!stored.contains("\"disks\""));
 
-        // Run migration 14
-        let conn_factory = test_connection_factory!();
-        run_migrations(&conn_factory).await.unwrap();
+        // Run migration 14 only (not all migrations — later migrations drop the roles table)
+        conn.execute_batch(MIGRATIONS[14 - 1]).await.unwrap();
+        if let Some(hook) = POST_MIGRATION_HOOKS[14 - 1] {
+            hook(&conn).await.unwrap();
+        }
+        conn.execute("UPDATE migrations SET version = ?1", [14_usize])
+            .await
+            .unwrap();
 
         // Verify new format is stored
         let stored: String = conn
