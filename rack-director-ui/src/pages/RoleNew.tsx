@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
@@ -10,9 +10,13 @@ import { useFieldErrors } from "@/hooks/useFieldErrors";
 import { selectClassName } from "@/components/roles/styles";
 import {
   createRole,
+  getAllOsmOperatingSystems,
+  getOsmModules,
   ValidationError,
   type DiskLayout,
   type FirmwareMode,
+  type OsmOperatingSystem,
+  type OsmModule,
 } from "@/lib/client";
 
 function RoleNew() {
@@ -29,6 +33,43 @@ function RoleNew() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { fieldErrors, setErrors, clearAllErrors, clearFieldError } = useFieldErrors();
+
+  const [osmOsList, setOsmOsList] = useState<OsmOperatingSystem[]>([]);
+  const [osmModules, setOsmModules] = useState<OsmModule[]>([]);
+  const [loadingOs, setLoadingOs] = useState(true);
+  const [selectedOsKey, setSelectedOsKey] = useState<string>("");
+  const [availableArchs, setAvailableArchs] = useState<string[]>([]);
+
+  useEffect(() => {
+    const fetchOs = async () => {
+      try {
+        const [osList, modules] = await Promise.all([
+          getAllOsmOperatingSystems(),
+          getOsmModules(),
+        ]);
+        const enabled = osList.filter((os) => !os.disabled);
+        setOsmOsList(enabled);
+        setOsmModules(modules);
+        if (enabled.length > 0) {
+          const first = enabled[0];
+          const firstArch = first.config.architectures[0]?.arch || "x86-64";
+          const moduleName = modules.find((m) => m.id === first.module_id)?.name || "";
+          const key = `${moduleName}|${first.name}|${first.release}`;
+          setSelectedOsKey(key);
+          setOsmModule(moduleName);
+          setOsName(first.name);
+          setOsRelease(first.release);
+          setOsArch(firstArch);
+          setAvailableArchs(first.config.architectures.map((a) => a.arch));
+        }
+      } catch (err) {
+        setError("Failed to load operating systems");
+      } finally {
+        setLoadingOs(false);
+      }
+    };
+    fetchOs();
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,81 +166,138 @@ function RoleNew() {
                 />
               </div>
 
-              {/* OSM Module */}
-              <div className="space-y-1">
-                <Label htmlFor="osm_module" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                  OSM Module *
-                </Label>
-                <Input
-                  id="osm_module"
-                  value={osmModule}
-                  onChange={(e) => {
-                    setOsmModule(e.target.value);
-                    clearFieldError("osm_module");
-                  }}
-                  placeholder="e.g., centos"
-                  aria-invalid={!!fieldErrors["osm_module"]}
-                  className="h-8 text-xs"
-                />
-                <FormFieldError error={fieldErrors["osm_module"]} />
-              </div>
-
-              {/* OS Name / Release / Arch + Firmware row */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Operating System Selection */}
+              {loadingOs ? (
                 <div className="space-y-1">
-                  <Label htmlFor="os_name" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                    OS Name *
+                  <Label className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                    Operating System *
                   </Label>
-                  <Input
-                    id="os_name"
-                    value={osName}
-                    onChange={(e) => {
-                      setOsName(e.target.value);
-                      clearFieldError("os_name");
-                    }}
-                    placeholder="e.g., centos"
-                    aria-invalid={!!fieldErrors["os_name"]}
-                    className="h-8 text-xs"
-                  />
-                  <FormFieldError error={fieldErrors["os_name"]} />
+                  <div className="h-8 px-3 flex items-center bg-bg-base border border-border text-xs text-text-muted">
+                    Loading operating systems...
+                  </div>
                 </div>
-
+              ) : osmOsList.length === 0 ? (
                 <div className="space-y-1">
-                  <Label htmlFor="os_release" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                    Release *
+                  <Label className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                    Operating System *
                   </Label>
-                  <Input
-                    id="os_release"
-                    value={osRelease}
-                    onChange={(e) => {
-                      setOsRelease(e.target.value);
-                      clearFieldError("os_release");
-                    }}
-                    placeholder="e.g., 10"
-                    aria-invalid={!!fieldErrors["os_release"]}
-                    className="h-8 text-xs"
-                  />
-                  <FormFieldError error={fieldErrors["os_release"]} />
+                  <div className="px-3 py-2 border border-border bg-bg-base text-xs text-text-muted">
+                    No operating systems available. Upload an OS module first under{" "}
+                    <a href="/osm" className="text-accent underline">
+                      Operating System Modules
+                    </a>
+                    .
+                  </div>
                 </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <Label htmlFor="os_select" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                        Operating System *
+                      </Label>
+                      <select
+                        id="os_select"
+                        value={selectedOsKey}
+                        onChange={(e) => {
+                          const key = e.target.value;
+                          setSelectedOsKey(key);
+                          clearFieldError("osm_module");
+                          clearFieldError("os_name");
+                          clearFieldError("os_release");
+                          clearFieldError("os_arch");
+                          const [mod, name, release] = key.split("|");
+                          const matched = osmOsList.find(
+                            (os) =>
+                              os.name === name &&
+                              os.release === release &&
+                              osmModules.find((m) => m.id === os.module_id)?.name === mod
+                          );
+                          if (matched) {
+                            const archs = matched.config.architectures.map((a) => a.arch);
+                            setOsmModule(mod);
+                            setOsName(name);
+                            setOsRelease(release);
+                            setAvailableArchs(archs);
+                            setOsArch(archs[0] || "x86-64");
+                          }
+                        }}
+                        aria-invalid={
+                          !!(fieldErrors["osm_module"] || fieldErrors["os_name"] || fieldErrors["os_release"])
+                        }
+                        className={selectClassName}
+                      >
+                        {osmOsList.map((os) => {
+                          const moduleName = osmModules.find((m) => m.id === os.module_id)?.name || "";
+                          const key = `${moduleName}|${os.name}|${os.release}`;
+                          return (
+                            <option key={key} value={key}>
+                              {os.name} {os.release} ({moduleName})
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <FormFieldError
+                        error={fieldErrors["osm_module"] || fieldErrors["os_name"] || fieldErrors["os_release"]}
+                      />
+                    </div>
 
-                <div className="space-y-1">
-                  <Label htmlFor="os_arch" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                    Architecture *
-                  </Label>
-                  <Input
-                    id="os_arch"
-                    value={osArch}
-                    onChange={(e) => {
-                      setOsArch(e.target.value);
-                      clearFieldError("os_arch");
-                    }}
-                    placeholder="e.g., x86-64"
-                    aria-invalid={!!fieldErrors["os_arch"]}
-                    className="h-8 text-xs"
-                  />
-                  <FormFieldError error={fieldErrors["os_arch"]} />
-                </div>
-              </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="os_arch" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                        Architecture *
+                      </Label>
+                      <select
+                        id="os_arch"
+                        value={osArch}
+                        onChange={(e) => {
+                          setOsArch(e.target.value);
+                          clearFieldError("os_arch");
+                        }}
+                        aria-invalid={!!fieldErrors["os_arch"]}
+                        className={selectClassName}
+                      >
+                        {availableArchs.map((arch) => (
+                          <option key={arch} value={arch}>
+                            {arch}
+                          </option>
+                        ))}
+                      </select>
+                      <FormFieldError error={fieldErrors["os_arch"]} />
+                    </div>
+                  </div>
+
+                  {/* Template Variables Info */}
+                  {(() => {
+                    const [mod, name, release] = selectedOsKey.split("|");
+                    const matched = osmOsList.find(
+                      (os) =>
+                        os.name === name &&
+                        os.release === release &&
+                        osmModules.find((m) => m.id === os.module_id)?.name === mod
+                    );
+                    const vars = matched?.config.template_variables ?? [];
+                    if (vars.length === 0) return null;
+                    return (
+                      <div className="border border-border-muted bg-bg-raised px-3 py-2 space-y-1">
+                        <p className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                          Available Template Variables
+                        </p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                          {vars.map((v) => (
+                            <span key={v.name} className="text-xs font-mono text-text-muted">
+                              <span className="text-accent">{v.name}</span>
+                              <span className="text-text-muted"> ({v.type})</span>
+                              {v.required && (
+                                <span className="text-status-broken"> *</span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
 
               {/* Firmware Mode */}
               <div className="space-y-1">
