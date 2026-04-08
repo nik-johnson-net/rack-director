@@ -1,13 +1,31 @@
-import type { OperatingSystem } from "@/lib/client";
-import { useLoaderData, useNavigate } from "react-router";
-import { Button } from "@/components/ui/button";
+import { useState } from "react";
+import type { OsmOperatingSystem, OsmModule } from "@/lib/client";
+import { useLoaderData } from "react-router";
+import { Link } from "react-router";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
 import { HardDrive } from "lucide-react";
+import { selectClassName } from "@/components/roles/styles";
+
+type LoaderData = {
+  operatingSystems: OsmOperatingSystem[];
+  modules: OsmModule[];
+};
 
 function OperatingSystems() {
-  const data = useLoaderData<OperatingSystem[]>();
-  const navigate = useNavigate();
+  const { operatingSystems, modules } = useLoaderData<LoaderData>();
+  const [moduleFilter, setModuleFilter] = useState<string>("all");
+  const [showDisabled, setShowDisabled] = useState(false);
+
+  const moduleMap = new Map(modules.map((m) => [m.id, m]));
+
+  const filtered = operatingSystems.filter((os) => {
+    if (!showDisabled && os.disabled) return false;
+    if (moduleFilter !== "all" && os.module_id !== parseInt(moduleFilter)) return false;
+    return true;
+  });
+
+  const columns = ["Name", "Release", "Module", "Architectures", "Status"] as const;
 
   return (
     <div>
@@ -17,82 +35,118 @@ function OperatingSystems() {
           { label: "OS Images" },
         ]}
         title="Operating Systems"
-        description="OS images and install scripts for provisioning"
-        actions={
-          <Button onClick={() => navigate("/operating-systems/new")}>
-            + Add OS
-          </Button>
-        }
+        description="Operating system entries from installed OS modules"
       />
+
+      {/* Filter Controls */}
+      <div className="flex items-center gap-4 mb-3">
+        <select
+          value={moduleFilter}
+          onChange={(e) => setModuleFilter(e.target.value)}
+          className={`${selectClassName} w-auto min-w-[160px]`}
+          aria-label="Filter by module"
+        >
+          <option value="all">All Modules</option>
+          {modules.map((m) => (
+            <option key={m.id} value={String(m.id)}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+
+        <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showDisabled}
+            onChange={(e) => setShowDisabled(e.target.checked)}
+            className="accent-accent cursor-pointer"
+          />
+          Show disabled
+        </label>
+      </div>
 
       <div className="border border-border">
         <table className="w-full border-collapse">
           <thead>
             <tr className="bg-bg-raised">
-              {(["Name", "Version", "Architectures", "Used By", ""] as const).map(
-                (col, i) => (
-                  <th
-                    key={i}
-                    className="text-left text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] px-3 py-2 border-b border-border"
-                  >
-                    {col}
-                  </th>
-                )
-              )}
+              {columns.map((col, i) => (
+                <th
+                  key={i}
+                  className="text-left text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] px-3 py-2 border-b border-border"
+                >
+                  {col}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {data.length === 0 ? (
+            {filtered.length === 0 ? (
               <tr>
-                <td colSpan={5}>
+                <td colSpan={columns.length}>
                   <EmptyState
                     icon={HardDrive}
-                    title="No operating systems defined"
-                    description="Add an OS image to use when provisioning devices."
+                    title="No operating systems found"
+                    description="Upload an OS module to add operating system entries."
                     action={{
-                      label: "+ Add OS",
-                      onClick: () => navigate("/operating-systems/new"),
+                      label: "Upload OS Module",
+                      onClick: () => { window.location.href = "/osm/upload"; },
                     }}
                   />
                 </td>
               </tr>
             ) : (
-              data.map((os, idx) => {
+              filtered.map((os, idx) => {
                 const rowBg = idx % 2 === 0 ? "bg-bg-surface" : "bg-bg-base";
+                const mod = moduleMap.get(os.module_id);
+                const architectures = os.config.architectures
+                  .map((a) => a.arch)
+                  .join(", ") || "—";
+
                 return (
                   <tr
                     key={os.id}
-                    className={`${rowBg} hover:bg-bg-raised border-b border-border-muted last:border-b-0 transition-colors`}
+                    className={`${rowBg} hover:bg-bg-raised border-b border-border-muted last:border-b-0 transition-colors ${os.disabled ? "opacity-60" : ""}`}
                   >
                     {/* Name */}
                     <td className="px-3 py-2 text-xs text-text-primary font-semibold">
                       {os.name}
                     </td>
 
-                    {/* Version */}
+                    {/* Release */}
                     <td className="px-3 py-2 text-xs text-text-secondary">
-                      {os.version}
+                      {os.release || "—"}
                     </td>
 
-                    {/* Architectures — placeholder, OperatingSystem list type has no arch info */}
-                    <td className="px-3 py-2 text-xs text-text-muted">
-                      —
+                    {/* Module */}
+                    <td className="px-3 py-2 text-xs text-text-secondary">
+                      {mod ? (
+                        <Link
+                          to={`/osm/${os.module_id}`}
+                          className="text-accent hover:text-accent-hover transition-colors"
+                        >
+                          {mod.name}
+                        </Link>
+                      ) : (
+                        <span className="text-text-muted">—</span>
+                      )}
                     </td>
 
-                    {/* Used By */}
-                    <td className="px-3 py-2 text-xs text-text-muted">
-                      —
+                    {/* Architectures */}
+                    <td className="px-3 py-2 text-xs text-text-secondary">
+                      {architectures}
                     </td>
 
-                    {/* Edit link */}
-                    <td className="px-3 py-2">
-                      <button
-                        onClick={() => navigate(`/operating-systems/${os.id}`)}
-                        className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
-                        aria-label={`Edit ${os.name} ${os.version}`}
-                      >
-                        edit
-                      </button>
+                    {/* Status */}
+                    <td className="px-3 py-2 text-xs">
+                      {os.disabled ? (
+                        <span className="text-text-muted bg-bg-raised border border-border px-1.5 py-0.5 rounded-sm text-[10px] uppercase tracking-wider">
+                          Disabled
+                        </span>
+                      ) : (
+                        <span className="text-status-provisioned bg-status-provisioned-bg border border-status-provisioned px-1.5 py-0.5 rounded-sm text-[10px] uppercase tracking-wider">
+                          Enabled
+                        </span>
+                      )}
                     </td>
                   </tr>
                 );
