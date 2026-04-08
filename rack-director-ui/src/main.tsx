@@ -25,7 +25,10 @@ import PlatformNew from './pages/PlatformNew.tsx';
 import PlatformDetail from './pages/PlatformDetail.tsx';
 import PlatformEdit from './pages/PlatformEdit.tsx';
 import PendingDeviceNew from './pages/PendingDeviceNew.tsx';
-import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices, getPlatforms, getPlatform, getPlatformDevicesWithDetails } from './lib/client.ts';
+import OsmModules from './pages/OsmModules.tsx';
+import OsmUpload from './pages/OsmUpload.tsx';
+import OsmModuleDetail from './pages/OsmModuleDetail.tsx';
+import { getAllDevices, getOperatingSystems, getOperatingSystem, getRoles, getRole, getNetworks, getNetwork, getPoolsForNetwork, getStaticReservations, getLeasesForNetwork, getDhcpLeases, getPendingDevices, getPlatforms, getPlatform, getPlatformDevicesWithDetails, getOsmModules, getOsmUploads, getOsmModule, getOsmModuleOperatingSystems } from './lib/client.ts';
 import Loading from './pages/Loading.tsx';
 
 const router = createBrowserRouter([
@@ -83,6 +86,32 @@ const router = createBrowserRouter([
         path: "/platforms/:id/edit",
         loader: ({ params }) => getPlatform(parseInt(params.id!)),
         Component: PlatformEdit,
+        HydrateFallback: Loading
+      },
+      { path: "/osm/upload", Component: OsmUpload },
+      {
+        path: "/osm/:id",
+        loader: async ({ params }) => {
+          const id = parseInt(params.id!);
+          const [module, operatingSystems] = await Promise.all([
+            getOsmModule(id),
+            getOsmModuleOperatingSystems(id),
+          ]);
+          return { module, operatingSystems };
+        },
+        Component: OsmModuleDetail,
+        HydrateFallback: Loading
+      },
+      {
+        path: "/osm",
+        loader: async () => {
+          const [modules, uploads] = await Promise.all([
+            getOsmModules(),
+            getOsmUploads(),
+          ]);
+          return { modules, uploads };
+        },
+        Component: OsmModules,
         HydrateFallback: Loading
       },
       { path: "/networks", loader: getNetworks, Component: Networks, HydrateFallback: Loading },
