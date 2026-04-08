@@ -3,7 +3,6 @@ use uuid::Uuid;
 use crate::database::Connection;
 use crate::director::store::generate_hostname_from_uuid;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleTransition};
-use crate::operating_systems::Architecture;
 use crate::plans::actions::BootTarget;
 use crate::plans::{Plan, PlanStatus};
 use crate::{platforms, roles};
@@ -14,6 +13,34 @@ pub(crate) mod store;
 pub use common::device_attributes::NetworkInterface;
 pub use store::Device;
 pub use store::PendingDevice;
+
+/// Supported CPU architectures for devices managed by rack-director.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Architecture {
+    #[serde(rename = "x86-64")]
+    X86_64,
+}
+
+impl Architecture {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Architecture::X86_64 => "x86-64",
+        }
+    }
+
+    pub fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "x86-64" => Ok(Architecture::X86_64),
+            _ => Err(anyhow::anyhow!("Unknown architecture: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for Architecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
 
 /// Short-lived handle for executing device management operations against an open database
 /// connection.

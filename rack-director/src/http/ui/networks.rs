@@ -444,7 +444,7 @@ fn find_device_uuid_by_mac(devices: &[Device], mac: &str) -> Option<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operating_systems::Architecture;
+    use crate::director::Architecture;
     use common::device_attributes::{BmcInfo, DeviceAttributes, NetworkInterface};
 
     fn create_test_device(

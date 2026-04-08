@@ -10,7 +10,6 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | `devices.rs` | Device CRUD, lifecycle transitions, platform/role assignment, pending devices |
 | `networks.rs` | DHCP networks, pools, static reservations, per-network lease listing, make-static |
 | `dhcp.rs` | Global DHCP lease queries (all leases, by MAC) |
-| `operating_systems.rs` | OS and architecture CRUD, kernel/initramfs/module/install-script upload & download |
 | `platforms.rs` | Platform CRUD, platform-device listing |
 | `osm.rs` | OSM module CRUD, upload, export, OS enable/disable |
 | `roles.rs` | Role CRUD, role-device listing |
@@ -66,24 +65,6 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 |--------|------|-------------|
 | GET | `/ui/dhcp/leases` | List all leases |
 | GET | `/ui/dhcp/leases/{mac}` | Get lease by MAC address |
-
-### Operating Systems (`operating_systems.rs`)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/ui/operating_systems` | Create OS |
-| GET | `/ui/operating_systems` | List OSes |
-| GET | `/ui/operating_systems/{id}` | Get OS |
-| PUT | `/ui/operating_systems/{id}` | Update OS |
-| DELETE | `/ui/operating_systems/{id}` | Delete OS |
-| POST | `/ui/operating_systems/{id}/architectures` | Create OS architecture |
-| GET | `/ui/operating_systems/{id}/architectures/{arch}` | Get OS architecture |
-| DELETE | `/ui/operating_systems/{id}/architectures/{arch}` | Delete OS architecture |
-| POST | `/ui/operating_systems/{id}/architectures/{arch}/kernel` | Upload kernel image |
-| POST | `/ui/operating_systems/{id}/architectures/{arch}/initramfs` | Upload initramfs |
-| POST | `/ui/operating_systems/{id}/architectures/{arch}/modules` | Upload kernel module |
-| POST | `/ui/operating_systems/{id}/architectures/{arch}/install_script` | Upload install script |
-| GET | `/ui/operating_systems/{id}/architectures/{arch}/download/{component}` | Download component |
 
 ### OSM Modules (`osm.rs`)
 

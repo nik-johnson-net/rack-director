@@ -25,6 +25,8 @@
 /// verify that the generated scripts are valid Kickstart / Autoinstall configs.
 mod common;
 
+use std::io::Write as _;
+
 use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
@@ -69,56 +71,156 @@ async fn setup_director() -> Result<common::TestRackDirectorHandle> {
     Ok(handle)
 }
 
-/// Create an operating system record via the UI API. Returns the OS id.
-async fn create_os(http_port: u16, name: &str, version: &str) -> Result<i64> {
-    let client = reqwest::Client::new();
-    let response = client
-        .post(format!(
-            "http://127.0.0.1:{}/ui/operating_systems",
-            http_port
-        ))
-        .json(&json!({ "name": name, "version": version, "description": null }))
-        .send()
-        .await?
-        .error_for_status()?;
-    let body: serde_json::Value = response.json().await?;
-    Ok(body["id"].as_i64().unwrap())
-}
-
-/// Register the `x86-64` architecture for an OS, then upload an install script
-/// template from the fixture directory.
-async fn setup_os_arch_with_script(http_port: u16, os_id: i64, fixture_name: &str) -> Result<()> {
-    let client = reqwest::Client::new();
-
-    // Create the x86-64 architecture entry
-    client
-        .post(format!(
-            "http://127.0.0.1:{}/ui/operating_systems/{}/architectures",
-            http_port, os_id
-        ))
-        .json(&json!({ "architecture": "x86-64", "cmdline_args": "" }))
-        .send()
-        .await?
-        .error_for_status()?;
-
-    // Read fixture template from disk
+/// Build a tar.zst OSM archive in memory for the given OS configuration.
+///
+/// The archive contains:
+/// - `manifest.toml` — module metadata declaring one OS directory
+/// - `{os_dir}/OperatingSystem.toml` — OS config with one x86-64 architecture
+/// - `{os_dir}/x86-64/vmlinuz` — dummy kernel bytes
+/// - `{os_dir}/x86-64/initrd.img` — dummy initramfs bytes
+/// - `{os_dir}/x86-64/{fixture_name}` — the actual install script template
+fn create_osm_archive(
+    os_name: &str,
+    os_release: &str,
+    os_dir: &str,
+    fixture_name: &str,
+) -> Result<Vec<u8>> {
     let template_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/install_scripts")
         .join(fixture_name);
-    let template_bytes = tokio::fs::read(template_path).await?;
+    let template_bytes = std::fs::read(&template_path)?;
 
-    // Upload the install script
-    client
-        .post(format!(
-            "http://127.0.0.1:{}/ui/operating_systems/{}/architectures/x86-64/install_script",
-            http_port, os_id
-        ))
+    let manifest_toml = format!(
+        "name = \"{os_name}-Module\"\nversion = \"1.0.0\"\nauthor = \"Test\"\ndescription = \"Test OSM\"\noperating_systems = [\"{os_dir}\"]\n"
+    );
+    let os_config_toml = format!(
+        "name = \"{os_name}\"\nrelease = \"{os_release}\"\n\n[[architectures]]\narch = \"x86-64\"\nkernel = \"x86-64/vmlinuz\"\ninitramfs = \"x86-64/initrd.img\"\ninstall_template = \"x86-64/{fixture_name}\"\n"
+    );
+    let os_config_path = format!("{os_dir}/OperatingSystem.toml");
+    let kernel_path = format!("{os_dir}/x86-64/vmlinuz");
+    let initrd_path = format!("{os_dir}/x86-64/initrd.img");
+    let template_archive_path = format!("{os_dir}/x86-64/{fixture_name}");
+
+    let files: Vec<(&str, &[u8])> = vec![
+        ("manifest.toml", manifest_toml.as_bytes()),
+        (&os_config_path, os_config_toml.as_bytes()),
+        (&kernel_path, b"dummy-kernel"),
+        (&initrd_path, b"dummy-initramfs"),
+        (&template_archive_path, template_bytes.as_slice()),
+    ];
+
+    build_tar_zst_archive(&files)
+}
+
+/// Builds a zstd-compressed tar archive in memory from the given `(path, content)` pairs.
+fn build_tar_zst_archive(files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+    // Build uncompressed tar into a buffer first.
+    let tar_buf: Vec<u8> = Vec::new();
+    let mut tar_builder = tar::Builder::new(tar_buf);
+
+    for (path, content) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append_data(&mut header, path, *content)?;
+    }
+
+    let tar_bytes = tar_builder.into_inner()?;
+
+    // Compress with zstd.
+    let mut compressed = Vec::new();
+    let mut encoder = zstd::Encoder::new(&mut compressed, 1)?;
+    encoder.write_all(&tar_bytes)?;
+    encoder.finish()?;
+
+    Ok(compressed)
+}
+
+/// Upload an OSM archive to the running rack-director and wait for processing to complete.
+///
+/// Posts to `POST /ui/osm/upload` and polls `GET /ui/osm/uploads/{id}` until the
+/// status is `"complete"`. Returns the `module_id` from the completed upload record.
+async fn upload_osm_module(
+    http_port: u16,
+    archive_bytes: Vec<u8>,
+    module_name: &str,
+) -> Result<i64> {
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/ui/osm/upload", http_port))
         .header("content-type", "application/octet-stream")
-        .body(template_bytes)
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{module_name}.tar.zst\""),
+        )
+        .body(archive_bytes)
         .send()
         .await?
         .error_for_status()?;
 
+    let body: serde_json::Value = response.json().await?;
+    let upload_id = body["id"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("upload response missing 'id' field: {body}"))?;
+
+    // Poll until the upload finishes processing (up to 10 seconds).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let status_body: serde_json::Value = client
+            .get(format!(
+                "http://127.0.0.1:{}/ui/osm/uploads/{}",
+                http_port, upload_id
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let status = status_body["status"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned();
+
+        match status.as_str() {
+            "complete" => {
+                let module_id = status_body["module_id"].as_i64().ok_or_else(|| {
+                    anyhow::anyhow!("upload complete but 'module_id' is missing: {status_body}")
+                })?;
+                return Ok(module_id);
+            }
+            "failed" => {
+                let msg = status_body["error_message"]
+                    .as_str()
+                    .unwrap_or("unknown error");
+                return Err(anyhow::anyhow!("OSM upload failed: {msg}"));
+            }
+            _ => {}
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow::anyhow!(
+                "timed out waiting for OSM upload {upload_id} to complete (status: {status})"
+            ));
+        }
+    }
+}
+
+/// Create an OSM module and upload it to the running rack-director instance.
+async fn setup_os_with_osm(
+    http_port: u16,
+    os_name: &str,
+    os_release: &str,
+    os_dir: &str,
+    module_name: &str,
+    fixture_name: &str,
+) -> Result<()> {
+    let archive = create_osm_archive(os_name, os_release, os_dir, fixture_name)?;
+    upload_osm_module(http_port, archive, module_name).await?;
     Ok(())
 }
 
@@ -169,7 +271,7 @@ async fn get_install_script(http_port: u16, device_uuid: &Uuid) -> Result<String
 }
 
 /// Execute the complete install script test flow:
-/// register device → create OS + arch + script → create role → assign → fetch.
+/// register device → upload OSM module → create role → assign → fetch.
 ///
 /// Returns the rendered template text.
 #[allow(clippy::too_many_arguments)]
@@ -178,20 +280,32 @@ async fn run_install_script_test(
     dhcp_port: u16,
     mac: [u8; 6],
     device_uuid: Uuid,
+    module_name: &str,
     os_name: &str,
     os_version: &str,
+    os_dir: &str,
     fixture_name: &str,
     role_name: &str,
     disk_layout: serde_json::Value,
 ) -> Result<String> {
     common::register_test_device(http_port, dhcp_port, mac, device_uuid).await?;
 
-    let os_id = create_os(http_port, os_name, os_version).await?;
-    setup_os_arch_with_script(http_port, os_id, fixture_name).await?;
+    setup_os_with_osm(
+        http_port,
+        os_name,
+        os_version,
+        os_dir,
+        module_name,
+        fixture_name,
+    )
+    .await?;
 
     let role_body = json!({
         "name": role_name,
-        "os_id": os_id,
+        "osm_module": module_name,
+        "os_name": os_name,
+        "os_release": os_version,
+        "os_arch": "x86-64",
         "disk_layout": disk_layout,
         "config_template": null
     });
@@ -400,8 +514,10 @@ async fn test_rhel10_bios_simple_layout() -> Result<()> {
         dhcp_port,
         MAC_RHEL10_BIOS_SIMPLE,
         device_uuid,
+        "RHEL-Module",
         "RHEL",
         "10",
+        "rhel10",
         "rhel10.ks",
         "rhel10-bios-simple",
         rhel10_bios_simple_layout(),
@@ -438,8 +554,10 @@ async fn test_rhel10_bios_lvm_layout() -> Result<()> {
         dhcp_port,
         MAC_RHEL10_BIOS_LVM,
         device_uuid,
+        "RHEL-Module",
         "RHEL",
         "10",
+        "rhel10",
         "rhel10.ks",
         "rhel10-bios-lvm",
         rhel10_bios_lvm_layout(),
@@ -473,8 +591,10 @@ async fn test_rhel10_uefi_simple_layout() -> Result<()> {
         dhcp_port,
         MAC_RHEL10_UEFI_SIMPLE,
         device_uuid,
+        "RHEL-Module",
         "RHEL",
         "10",
+        "rhel10",
         "rhel10.ks",
         "rhel10-uefi-simple",
         rhel10_uefi_simple_layout(),
@@ -509,8 +629,10 @@ async fn test_rhel10_uefi_lvm_layout() -> Result<()> {
         dhcp_port,
         MAC_RHEL10_UEFI_LVM,
         device_uuid,
+        "RHEL-Module",
         "RHEL",
         "10",
+        "rhel10",
         "rhel10.ks",
         "rhel10-uefi-lvm",
         rhel10_uefi_lvm_layout(),
@@ -550,8 +672,10 @@ async fn test_ubuntu2404_bios_simple_layout() -> Result<()> {
         dhcp_port,
         MAC_UBUNTU_BIOS_SIMPLE,
         device_uuid,
+        "Ubuntu-Module",
         "Ubuntu",
         "24.04",
+        "ubuntu2404",
         "ubuntu2404.yaml",
         "ubuntu2404-bios-simple",
         ubuntu_bios_simple_layout(),
@@ -587,8 +711,10 @@ async fn test_ubuntu2404_bios_lvm_layout() -> Result<()> {
         dhcp_port,
         MAC_UBUNTU_BIOS_LVM,
         device_uuid,
+        "Ubuntu-Module",
         "Ubuntu",
         "24.04",
+        "ubuntu2404",
         "ubuntu2404.yaml",
         "ubuntu2404-bios-lvm",
         ubuntu_bios_lvm_layout(),
@@ -623,8 +749,10 @@ async fn test_ubuntu2404_uefi_simple_layout() -> Result<()> {
         dhcp_port,
         MAC_UBUNTU_UEFI_SIMPLE,
         device_uuid,
+        "Ubuntu-Module",
         "Ubuntu",
         "24.04",
+        "ubuntu2404",
         "ubuntu2404.yaml",
         "ubuntu2404-uefi-simple",
         ubuntu_uefi_simple_layout(),
@@ -659,8 +787,10 @@ async fn test_ubuntu2404_uefi_lvm_layout() -> Result<()> {
         dhcp_port,
         MAC_UBUNTU_UEFI_LVM,
         device_uuid,
+        "Ubuntu-Module",
         "Ubuntu",
         "24.04",
+        "ubuntu2404",
         "ubuntu2404.yaml",
         "ubuntu2404-uefi-lvm",
         ubuntu_uefi_lvm_layout(),

@@ -879,9 +879,18 @@ mod tests {
             .await
             .unwrap();
 
-        create_module(&conn, "TestMod", "1.0.0", "A", "A", "uploaded", "osm/TestMod/1.0.0/", None)
-            .await
-            .unwrap();
+        create_module(
+            &conn,
+            "TestMod",
+            "1.0.0",
+            "A",
+            "A",
+            "uploaded",
+            "osm/TestMod/1.0.0/",
+            None,
+        )
+        .await
+        .unwrap();
 
         crate::roles::store::create(
             &conn,
@@ -904,11 +913,15 @@ mod tests {
         .unwrap();
 
         // Case-insensitive match
-        let roles = get_roles_referencing_module(&conn, "testmod").await.unwrap();
+        let roles = get_roles_referencing_module(&conn, "testmod")
+            .await
+            .unwrap();
         assert_eq!(roles, vec!["web-server"]);
 
         // No match for different module
-        let roles = get_roles_referencing_module(&conn, "other-module").await.unwrap();
+        let roles = get_roles_referencing_module(&conn, "other-module")
+            .await
+            .unwrap();
         assert!(roles.is_empty());
     }
 
@@ -919,7 +932,9 @@ mod tests {
             .await
             .unwrap();
 
-        let roles = get_roles_referencing_module(&conn, "nonexistent").await.unwrap();
+        let roles = get_roles_referencing_module(&conn, "nonexistent")
+            .await
+            .unwrap();
         assert!(roles.is_empty());
     }
 }

@@ -4,13 +4,12 @@ Rack Director is the server component, written in rust. Database functionality i
 
 `src/database`: The database initialization code & migrations
 `src/dhcp`: DHCP Service, IPAM (IP Address Management) and PXE Boot next-server information.
-`src/director`: `Device` code and main business logic.
+`src/director`: `Device` code, main business logic, and the `Architecture` enum.
 `src/http`: All HTTP handlers. Divided into `api` for `/api/` routes (currently unused), `cnc` for `/cnc/` routes (devices use this for automation), and `ui` for `/ui/` routes (serves `rack-director-ui`).
 `src/lifecycle`: `Lifecycle` and transition code - provisiong states of `Devices` and how they transition from one to the next.
-`src/operating_systems`: `Operating System` code, configuration for what operating systems can be installed and how (legacy — being replaced by OSM).
 `src/osm`: Operating System Modules — archive parsing, validation, database storage, upload pipeline (streaming upload, validation, extraction, atomic DB replacement), and HTTP API for OSM packages.
 `src/plans`: `Plan` code - concrete `Actions` to move a `Device` from one `Lifecycle` state to another.
-`src/roles`: `Role` code - configuration for a group of `Devices`, including what `Operating System` to install.
+`src/roles`: `Role` code - configuration for a group of `Devices`. Roles reference OS via composite OSM fields (`osm_module`, `os_name`, `os_release`, `os_arch`).
 `src/storage`:  Interfaces for the storage layer. Used to store uploaded images for `Operating Systems`.
 `src/templates`: Location for storing templates and rendering functions that are needed by other modules.
 `tests/`: Integration tests that provide end-to-end testing.
@@ -206,48 +205,7 @@ History of device lifecycle state changes.
 
 **Migration:** v3
 
-## Role & OS Tables
-
-### operating_systems
-
-Operating system definitions.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER | Primary key |
-| `name` | TEXT | OS name (e.g., "Ubuntu") |
-| `version` | TEXT | OS version (e.g., "22.04") |
-| `description` | TEXT | Human-readable description |
-| `created_at` | DATETIME | Creation time |
-| `updated_at` | DATETIME | Last update time |
-
-**Unique:** `(name, version)`
-
-**Migration:** v5
-
-### os_architectures
-
-Architecture-specific OS configurations (kernel, initramfs, cmdline).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER | Primary key |
-| `os_id` | INTEGER | FK to operating_systems(id) |
-| `architecture` | TEXT | CPU architecture (x86-64) |
-| `kernel_path` | TEXT | Path to kernel image |
-| `initramfs_path` | TEXT | Path to initramfs image |
-| `kernel_filename` | TEXT | Original kernel filename |
-| `initramfs_filename` | TEXT | Original initramfs filename |
-| `modules` | TEXT | JSON array of module paths |
-| `cmdline_args` | TEXT | Base kernel cmdline arguments |
-| `install_script_path` | TEXT | Path to install script |
-| `install_script_filename` | TEXT | Original install script filename |
-| `created_at` | DATETIME | Creation time |
-| `updated_at` | DATETIME | Last update time |
-
-**Unique:** `(os_id, architecture)`
-
-**Migration:** v5, v6 (added filename columns)
+## Role Tables
 
 ### roles
 
@@ -258,16 +216,20 @@ Device role definitions (groups of devices with same configuration).
 | `id` | INTEGER | Primary key |
 | `name` | TEXT | Role name (unique) |
 | `description` | TEXT | Human-readable description |
-| `os_id` | INTEGER | FK to operating_systems(id) |
+| `osm_module` | TEXT | OSM module name (e.g., "Default") |
+| `os_name` | TEXT | OS name within the module (e.g., "Ubuntu") |
+| `os_release` | TEXT | OS release (e.g., "22.04") |
+| `os_arch` | TEXT | Architecture (e.g., "x86-64") |
 | `disk_layout` | TEXT | JSON disk partition layout |
 | `cmdline_args` | TEXT | Role-specific kernel cmdline args |
 | `config_template` | TEXT | JSON additional configuration |
+| `firmware_mode` | TEXT | Optional firmware constraint (bios/uefi) |
 | `created_at` | DATETIME | Creation time |
 | `updated_at` | DATETIME | Last update time |
 
-**Indexes:** `name`, `os_id`
+**Indexes:** `name`, `(osm_module, os_name, os_release)`
 
-**Migration:** v5, v10 (added cmdline_args)
+**Migration:** v5, v10 (cmdline_args), v19 (OSM composite reference, dropped os_id)
 
 ## DHCP Tables
 
@@ -371,8 +333,7 @@ Devices with DHCP leases but not yet registered.
 ```
 devices
   ├─► role_id → roles
-  │                ├─► os_id → operating_systems
-  │                │              └─► os_architectures
+  │                ├─► osm_module (references OSM module by name)
   │                └─► disk_layout (JSON)
   │
   ├─► uuid ← plans (device_uuid)
@@ -386,12 +347,21 @@ devices
                                       ├─► dhcp_pools
                                       └─► dhcp_static_reservations
 
+osm_modules
+  └─► osm_operating_systems (module_id, ON DELETE CASCADE)
+
 pending_devices
   ├─► network_id → dhcp_networks
   └─► device_uuid → devices (after registration)
 ```
 
 ## Recent Schema Changes
+
+### Migration v19 (2026-04)
+- Replaced `roles.os_id` FK with composite OSM reference: `osm_module`, `os_name`, `os_release`, `os_arch`
+- Added `firmware_mode` column to roles
+- Dropped legacy `operating_systems` and `os_architectures` tables
+- Roles now reference OS configuration via OSM modules instead of the legacy OS tables
 
 ### Migration v10 (2026-01, commit 7c6b810)
 - Added `cmdline_args` column to `roles` table
@@ -413,10 +383,9 @@ pending_devices
 
 ### Get Device with Role and OS
 ```sql
-SELECT d.*, r.name as role_name, os.name as os_name, os.version as os_version
+SELECT d.*, r.name as role_name, r.osm_module, r.os_name, r.os_release, r.os_arch
 FROM devices d
 LEFT JOIN roles r ON d.role_id = r.id
-LEFT JOIN operating_systems os ON r.os_id = os.id
 WHERE d.uuid = ?;
 ```
 
