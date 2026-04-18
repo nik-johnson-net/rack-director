@@ -30,6 +30,7 @@ impl From<&Action> for PollAction {
             Action::PartitionDisks => PollAction::PartitionDisks,
             Action::RebootDevice => PollAction::RebootDevice,
             Action::InstallOs => PollAction::InstallOs,
+            Action::Console => PollAction::Console,
         }
     }
 }
@@ -244,5 +245,6 @@ mod tests {
             PollAction::RebootDevice
         );
         assert_eq!(PollAction::from(&Action::InstallOs), PollAction::InstallOs);
+        assert_eq!(PollAction::from(&Action::Console), PollAction::Console);
     }
 }

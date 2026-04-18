@@ -13,6 +13,7 @@ pub enum PollAction {
     PartitionDisks,
     RebootDevice,
     InstallOs,
+    Console,
 }
 
 /// Envelope wrapping a [`PollAction`] sent from rack-director to the agent daemon.
