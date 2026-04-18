@@ -20,6 +20,7 @@ pub enum Action {
     InstallOs,
     PartitionDisks,
     RebootDevice,
+    Console,
 }
 
 /// Context required for converting Actions to BootTargets
@@ -41,6 +42,7 @@ impl Action {
                 generate_agent_boot_target("daemon")
             }
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
+            Action::Console => generate_agent_boot_target("console"),
             // All other actions default to local disk boot
             _ => Ok(BootTarget::LocalDisk),
         }

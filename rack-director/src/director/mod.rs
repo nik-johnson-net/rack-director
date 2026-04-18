@@ -1033,7 +1033,7 @@ mod tests {
         // Verify the device gets BMC config boot target for second action
         let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         assert!(
-            matches!(boot_target, BootTarget::AgentImage { action, cmdline } if action == "daemon")
+            matches!(boot_target, BootTarget::AgentImage { action, cmdline: _ } if action == "daemon")
         );
 
         // Simulate BMC configuration completion

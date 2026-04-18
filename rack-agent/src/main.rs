@@ -4,7 +4,10 @@ use clap::Parser;
 use clap::Subcommand;
 use log::{error, info, warn};
 
+use crate::console::start_console_command;
+
 mod bmc;
+mod console;
 mod daemon;
 mod partition;
 mod scan;
@@ -19,6 +22,8 @@ enum Command {
     PartitionDisks,
     /// Continuously polls rack-director for actions and executes them without rebooting between actions.
     Daemon,
+    /// Give a shell
+    Console,
 }
 
 #[derive(Parser, Debug)]
@@ -59,6 +64,7 @@ async fn main() {
             Command::ConfigureBmc => bmc::bmc_configure(&client).await,
             Command::PartitionDisks => partition::partition_disks(&client).await,
             Command::Daemon => daemon::run_daemon(&client).await,
+            Command::Console => start_console_command(&client).await,
         }
     } else {
         // Read action from --action flag or /proc/cmdline
@@ -76,6 +82,7 @@ async fn main() {
             "configure-bmc" => bmc::bmc_configure(&client).await,
             "partition-disks" => partition::partition_disks(&client).await,
             "daemon" => daemon::run_daemon(&client).await,
+            "console" => start_console_command(&client).await,
             _ => {
                 error!("Unknown action: {}", action);
                 std::process::exit(1);

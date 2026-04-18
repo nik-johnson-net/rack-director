@@ -3,7 +3,7 @@ use log::{error, info, warn};
 
 use common::cnc::{CncClient, PollAction, PollResponse};
 
-use crate::{bmc, partition, scan};
+use crate::{bmc, console::start_console, partition, scan};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -40,7 +40,7 @@ pub async fn run_daemon(client: &CncClient) -> Result<()> {
             Ok(None) => LoopControl::SleepThenPoll,
             Ok(Some(PollResponse::Action { payload })) => {
                 info!("Received action: {:?}", payload);
-                dispatch_action(client, &payload).await
+                dispatch_action(client, &uuid, &payload).await
             }
         };
 
@@ -61,7 +61,7 @@ pub async fn run_daemon(client: &CncClient) -> Result<()> {
 /// rack-director via [`RackDirector::action_success`] /
 /// [`RackDirector::action_failed`]. The daemon only observes the outcome to
 /// decide whether to poll again immediately or stop.
-async fn dispatch_action(client: &CncClient, action: &PollAction) -> LoopControl {
+async fn dispatch_action(client: &CncClient, uuid: &str, action: &PollAction) -> LoopControl {
     match action {
         PollAction::DiscoverHardware => {
             let args = scan::DeviceScanArgs::new(false);
@@ -112,6 +112,12 @@ async fn dispatch_action(client: &CncClient, action: &PollAction) -> LoopControl
             // no timeout. This requires manual intervention to reset the plan.
             LoopControl::Exit
         }
+        PollAction::Console => {
+            if let Err(e) = start_console(client, uuid).await {
+                error!("Console failed: {e}");
+            }
+            LoopControl::PollImmediately
+        }
     }
 }
 
@@ -134,7 +140,7 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let control = dispatch_action(&client, &PollAction::RebootDevice).await;
+        let control = dispatch_action(&client, "", &PollAction::RebootDevice).await;
 
         assert!(matches!(control, LoopControl::Exit));
     }
@@ -149,7 +155,7 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let control = dispatch_action(&client, &PollAction::InstallOs).await;
+        let control = dispatch_action(&client, "", &PollAction::InstallOs).await;
 
         assert!(matches!(control, LoopControl::Exit));
     }
@@ -170,7 +176,7 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let control = dispatch_action(&client, &PollAction::DiscoverHardware).await;
+        let control = dispatch_action(&client, "", &PollAction::DiscoverHardware).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
     }
@@ -186,7 +192,7 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let control = dispatch_action(&client, &PollAction::PartitionDisks).await;
+        let control = dispatch_action(&client, "", &PollAction::PartitionDisks).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
     }
@@ -202,7 +208,7 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let control = dispatch_action(&client, &PollAction::ConfigureBmc).await;
+        let control = dispatch_action(&client, "", &PollAction::ConfigureBmc).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
     }
