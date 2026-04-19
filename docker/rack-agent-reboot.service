@@ -4,6 +4,7 @@ After=rack-agent.service
 
 [Service]
 Type=oneshot
+ExecStart=sleep 5
 ExecStart=/usr/bin/systemctl --force reboot
 
 [Install]

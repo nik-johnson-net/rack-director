@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use common::disk_layout::{
     DiskConfig, DiskLayout, PartitionConfig, VolumeGroup, ZfsPool, partition_path,
 };
-use log::{debug, info};
+use log::info;
 
 use common::cnc::CncClient;
 
@@ -77,7 +77,7 @@ async fn apply_disk_layout(layout: &DiskLayout) -> Result<()> {
         wipe_and_partition_disk(disk).await?;
     }
 
-    // Step 2: Wait for udev to settle
+    // Step 2: Wait for udev to settle after partition changes
     run_command("udevadm", &["settle", "--timeout=10"]).await?;
 
     // Step 3: LVM setup
@@ -154,9 +154,6 @@ async fn wipe_and_partition_disk(disk: &DiskConfig) -> Result<()> {
         }
     }
 
-    // Notify kernel of partition changes
-    run_command("partprobe", &[device]).await?;
-
     Ok(())
 }
 
@@ -200,9 +197,39 @@ async fn setup_volume_group(vg: &VolumeGroup, disks: &[DiskConfig]) -> Result<()
         info!("Creating logical volume: {}/{}", vg.name, lv.name);
 
         if is_last && (lv.size == "100%FREE" || lv.size == "rest") {
-            run_command("lvcreate", &["-l", "100%FREE", "-n", &lv.name, &vg.name]).await?;
+            run_command(
+                "lvcreate",
+                &[
+                    "-l",
+                    "100%FREE",
+                    "--zero",
+                    "y",
+                    "--wipesignatures",
+                    "y",
+                    "-y",
+                    "-n",
+                    &lv.name,
+                    &vg.name,
+                ],
+            )
+            .await?;
         } else {
-            run_command("lvcreate", &["-L", &lv.size, "-n", &lv.name, &vg.name]).await?;
+            run_command(
+                "lvcreate",
+                &[
+                    "-L",
+                    &lv.size,
+                    "--zero",
+                    "y",
+                    "--wipesignatures",
+                    "y",
+                    "-y",
+                    "-n",
+                    &lv.name,
+                    &vg.name,
+                ],
+            )
+            .await?;
         }
 
         // Format the logical volume
@@ -349,7 +376,7 @@ async fn format_filesystem(device: &str, filesystem: &str) -> Result<()> {
 
 /// Execute a command and return error on non-zero exit
 async fn run_command(cmd: &str, args: &[&str]) -> Result<()> {
-    debug!("Running: {} {}", cmd, args.join(" "));
+    info!("Running: {} {}", cmd, args.join(" "));
 
     let output = tokio::process::Command::new(cmd)
         .args(args)
@@ -427,7 +454,7 @@ fn parse_size(size_str: &str) -> Result<u64> {
 /// Returns `Some(bytes)` for fixed sizes and percentages, `None` for "rest".
 /// Percentages are resolved against `usable_size`.
 fn parse_partition_size(size_str: &str, usable_size: u64) -> Result<Option<u64>> {
-    if size_str == "rest" {
+    if size_str == "rest" || size_str == "*" {
         Ok(None)
     } else if size_str.ends_with('%') {
         let pct: f64 = size_str
@@ -775,6 +802,12 @@ mod tests {
     #[test]
     fn test_parse_partition_size_rest() {
         let result = parse_partition_size("rest", 1024 * 1024 * 1024).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_partition_size_star() {
+        let result = parse_partition_size("*", 1024 * 1024 * 1024).unwrap();
         assert_eq!(result, None);
     }
 
