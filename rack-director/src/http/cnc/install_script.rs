@@ -35,6 +35,7 @@ pub async fn render_for_device(
     image_store: &crate::storage::ImageStore,
     bundled_osm_path: Option<&std::path::Path>,
     device_uuid: &Uuid,
+    root_url: &str,
 ) -> Result<Response<String>, Error> {
     let director = Director::new(conn);
 
@@ -123,7 +124,7 @@ pub async fn render_for_device(
         &role.os_release,
         &network_info,
         resolved_disk_layout,
-        "http://localhost",
+        root_url,
     )
     .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Template render failed: {}", e)))?;
 
@@ -438,7 +439,8 @@ mod tests {
         }
 
         let conn = state.connection_factory.open().await.unwrap();
-        let result = render_for_device(&conn, &state.image_store, None, &uuid).await;
+        let result =
+            render_for_device(&conn, &state.image_store, None, &uuid, "http://localhost").await;
         // Should get NotFound error when device has no role
         match result {
             Ok(_) => panic!("Expected error but got Ok"),

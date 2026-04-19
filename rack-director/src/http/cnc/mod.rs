@@ -179,7 +179,9 @@ async fn ipxe_handler(
 async fn install_script_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<IpxeQuery>,
+    Host(host): Host,
 ) -> Result<Response<String>, Error> {
+    let root_url = format!("http://{host}");
     let uuid = params
         .uuid
         .ok_or_else(|| Error::BadRequest("Missing uuid parameter".to_string()))?;
@@ -195,6 +197,7 @@ async fn install_script_handler(
         &state.image_store,
         state.bundled_osm_path.as_deref(),
         &uuid,
+        &root_url,
     )
     .await
 }

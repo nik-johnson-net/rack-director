@@ -587,7 +587,7 @@ mod tests {
             "22.04",
             &make_network(),
             &empty_disk_layout(),
-            "",
+            "http://127.0.0.1:3000",
         )
         .unwrap();
         assert_eq!(result, "hostname: server01\nos: Ubuntu 22.04");
