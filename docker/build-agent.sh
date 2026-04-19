@@ -49,6 +49,10 @@ EOF
 chroot /agent-image systemctl enable systemd-networkd.service
 chroot /agent-image systemctl enable systemd-networkd-wait-online.service
 
+# Mask lvm2 so we don't autoload pvs
+chroot /agent-image systemctl mask lvm2-monitor.service
+chroot /agent-image systemctl mask lvm-activate-boot.service
+
 # ============================================
 # Clean up unnecessary files to reduce size
 # ============================================
