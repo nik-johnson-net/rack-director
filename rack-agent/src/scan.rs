@@ -147,6 +147,29 @@ async fn scan_network_interfaces() -> Result<Vec<NetworkInterface>> {
             }
         };
 
+        // Skip interfaces with all-zero MAC (e.g., unconfigured virtual interfaces
+        // that passed the device/ filter, or interfaces before firmware initialises them)
+        if mac_address == "00:00:00:00:00:00" {
+            debug!(
+                "Skipping interface {} with all-zero MAC address",
+                interface_name
+            );
+            continue;
+        }
+
+        // Deduplicate by MAC address: some systems expose the same physical NIC under
+        // multiple names (e.g., predictable name + legacy name). Report only the first.
+        if interfaces
+            .iter()
+            .any(|i: &NetworkInterface| i.mac_address == mac_address)
+        {
+            debug!(
+                "Skipping interface {} - MAC {} already recorded under another name",
+                interface_name, mac_address
+            );
+            continue;
+        }
+
         // Read link speed (may not be available if link is down)
         let speed_mbps = read_interface_speed(&iface_path, &interface_name).await;
 
@@ -256,6 +279,27 @@ async fn scan_disks() -> Result<Vec<DiskInfo>> {
         };
 
         debug!("Resolved {} -> {}", path_name, device_name);
+
+        // Skip partition devices by checking /sys/block/: only top-level block devices
+        // (not partitions) are listed directly under /sys/block/. A partition (e.g., sda1)
+        // would appear as /sys/block/sda/sda1, not as /sys/block/sda1.
+        if !std::path::Path::new(&format!("/sys/block/{}", device_name)).exists() {
+            debug!(
+                "Skipping {} - not a top-level block device (likely a partition)",
+                device_name
+            );
+            continue;
+        }
+
+        // Deduplicate: skip if we already have an entry for this device
+        // (multiple by-path symlinks may point to the same device)
+        if disks.iter().any(|d: &DiskInfo| d.name == device_name) {
+            debug!(
+                "Skipping duplicate entry for {}: already recorded",
+                device_name
+            );
+            continue;
+        }
 
         // Skip removable devices (CD-ROMs, floppy drives, etc.)
         if is_removable_device(&device_name) {
