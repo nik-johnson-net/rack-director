@@ -142,9 +142,10 @@ async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<Boot
 
     // Append role-level cmdline args if present
     if let Some(ref role_cmdline) = role.cmdline_args
-        && !role_cmdline.is_empty() {
-            cmdline = format!("{} {}", cmdline, role_cmdline);
-        }
+        && !role_cmdline.is_empty()
+    {
+        cmdline = format!("{} {}", cmdline, role_cmdline);
+    }
 
     Ok(BootTarget::NetBoot {
         ramdisk: resolved.initramfs_storage_path(),
