@@ -1,6 +1,7 @@
 [workspace]
 members = [ "common", "osm", "rack-agent",
     "rack-director",
+    "rack-director-osm",
     "rack-simulator",
 ]
 resolver = "3"

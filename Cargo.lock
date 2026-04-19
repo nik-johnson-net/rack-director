@@ -1937,6 +1937,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rack-director-osm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "mockito",
+ "osm",
+ "reqwest",
+ "serde",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml",
+ "zstd",
+]
+
+[[package]]
 name = "rack-simulator"
 version = "0.1.0"
 dependencies = [
