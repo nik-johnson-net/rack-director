@@ -64,7 +64,7 @@ pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
 }
 
-const LATEST_VERSION: usize = 20;
+const LATEST_VERSION: usize = 21;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -86,6 +86,7 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/18.sql"),
     include_str!("migrations/19.sql"),
     include_str!("migrations/20.sql"),
+    include_str!("migrations/21.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -114,6 +115,7 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
     None,                                                                          // Migration 18
     None,                                                                          // Migration 19
     Some(|conn| migrations::migration_20::backfill_boot_partitions(conn).boxed()), // Migration 20
+    None,                                                                          // Migration 21
 ];
 
 /// Pre-migration hooks run Rust code BEFORE the SQL for each migration version.
@@ -139,7 +141,8 @@ const PRE_MIGRATION_HOOKS: [Option<PreMigrationHook>; LATEST_VERSION] = [
     None,                                                                     // Migration 17
     None,                                                                     // Migration 18
     Some(|conn| migrations::migration_19::warn_if_roles_exist(conn).boxed()), // Migration 19
-    None,
+    None,                                                                     // Migration 20
+    None,                                                                     // Migration 21
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.

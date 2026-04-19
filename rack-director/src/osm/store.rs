@@ -17,6 +17,11 @@ pub struct OsmModule {
     pub source: String,
     /// Storage-layer prefix under which the module's files are stored.
     pub storage_prefix: String,
+    /// True if this is the built-in default module.
+    ///
+    /// Used by the UI to hide the delete button and by routing to decide
+    /// whether to serve files from disk or the image store.
+    pub is_default: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,7 +73,8 @@ pub struct OsmUpload {
 /// Insert a new OSM module record and return it.
 ///
 /// `source` must be either `"bundled"` or `"uploaded"` (enforced by a DB
-/// CHECK constraint).
+/// CHECK constraint).  Set `is_default` to `true` for the built-in Default
+/// module so the UI can distinguish it from user-uploaded modules.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_module(
     conn: &Connection,
@@ -78,11 +84,12 @@ pub async fn create_module(
     description: &str,
     source: &str,
     storage_prefix: &str,
+    is_default: bool,
     archive_path: Option<&str>,
 ) -> Result<OsmModule> {
     conn.execute(
-        "INSERT INTO osm_modules (name, version, author, description, source, storage_prefix, archive_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO osm_modules (name, version, author, description, source, storage_prefix, is_default, archive_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         (
             name.to_string(),
             version.to_string(),
@@ -90,6 +97,7 @@ pub async fn create_module(
             description.to_string(),
             source.to_string(),
             storage_prefix.to_string(),
+            is_default as i32,
             archive_path.map(|s| s.to_string()),
         ),
     )
@@ -103,8 +111,8 @@ pub async fn create_module(
 /// Fetch a single OSM module by primary key.
 pub async fn get_module(conn: &Connection, id: i64) -> Result<OsmModule> {
     conn.query_one(
-        "SELECT id, name, version, author, description, source, storage_prefix, archive_path,
-                created_at, updated_at
+        "SELECT id, name, version, author, description, source, storage_prefix, is_default,
+                archive_path, created_at, updated_at
          FROM osm_modules WHERE id = ?1",
         (id,),
         module_from_row,
@@ -116,8 +124,8 @@ pub async fn get_module(conn: &Connection, id: i64) -> Result<OsmModule> {
 /// Fetch a single OSM module by name (case-insensitive).
 pub async fn get_module_by_name(conn: &Connection, name: &str) -> Result<OsmModule> {
     conn.query_one(
-        "SELECT id, name, version, author, description, source, storage_prefix, archive_path,
-                created_at, updated_at
+        "SELECT id, name, version, author, description, source, storage_prefix, is_default,
+                archive_path, created_at, updated_at
          FROM osm_modules WHERE LOWER(name) = LOWER(?1)",
         (name.to_string(),),
         module_from_row,
@@ -129,8 +137,8 @@ pub async fn get_module_by_name(conn: &Connection, name: &str) -> Result<OsmModu
 /// Return all OSM modules sorted by name.
 pub async fn list_modules(conn: &Connection) -> Result<Vec<OsmModule>> {
     conn.query(
-        "SELECT id, name, version, author, description, source, storage_prefix, archive_path,
-                created_at, updated_at
+        "SELECT id, name, version, author, description, source, storage_prefix, is_default,
+                archive_path, created_at, updated_at
          FROM osm_modules ORDER BY name",
         (),
         module_from_row,
@@ -170,6 +178,25 @@ pub async fn update_module(
         )
         .await
         .context("Failed to update OSM module")?;
+
+    if rows == 0 {
+        return Err(anyhow!("OSM module not found"));
+    }
+    Ok(())
+}
+
+/// Update the source of an OSM module.
+///
+/// Used when an uploaded archive replaces a previously-bundled module, or when
+/// a startup sync restores a bundled module's source after a user upload.
+pub async fn update_module_source(conn: &Connection, id: i64, source: &str) -> Result<()> {
+    let rows = conn
+        .execute(
+            "UPDATE osm_modules SET source = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            (source.to_string(), id),
+        )
+        .await
+        .context("Failed to update OSM module source")?;
 
     if rows == 0 {
         return Err(anyhow!("OSM module not found"));
@@ -440,6 +467,7 @@ pub async fn get_upload(conn: &Connection, upload_id: i64) -> Result<OsmUpload> 
 // ── Private row-mapping helpers ───────────────────────────────────────────────
 
 fn module_from_row(row: &rusqlite::Row) -> rusqlite::Result<OsmModule> {
+    let is_default_int: i32 = row.get(7)?;
     Ok(OsmModule {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -448,9 +476,10 @@ fn module_from_row(row: &rusqlite::Row) -> rusqlite::Result<OsmModule> {
         description: row.get(4)?,
         source: row.get(5)?,
         storage_prefix: row.get(6)?,
-        archive_path: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        is_default: is_default_int != 0,
+        archive_path: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -541,6 +570,7 @@ mod tests {
             "Ubuntu OSM",
             "bundled",
             "osm/ubuntu",
+            false,
             None,
         )
         .await
@@ -565,7 +595,7 @@ mod tests {
             .unwrap();
 
         create_module(
-            &conn, "Ubuntu", "1.0", "Team", "desc", "bundled", "prefix", None,
+            &conn, "Ubuntu", "1.0", "Team", "desc", "bundled", "prefix", false, None,
         )
         .await
         .unwrap();
@@ -584,10 +614,10 @@ mod tests {
             .await
             .unwrap();
 
-        create_module(&conn, "zebra", "1", "A", "d", "bundled", "p", None)
+        create_module(&conn, "zebra", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
-        create_module(&conn, "alpha", "1", "A", "d", "bundled", "p", None)
+        create_module(&conn, "alpha", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
 
@@ -604,7 +634,7 @@ mod tests {
             .await
             .unwrap();
 
-        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", None)
+        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
 
@@ -632,11 +662,11 @@ mod tests {
             .await
             .unwrap();
 
-        create_module(&conn, "dup", "1", "A", "d", "bundled", "p", None)
+        create_module(&conn, "dup", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
 
-        let result = create_module(&conn, "dup", "2", "B", "e", "uploaded", "q", None).await;
+        let result = create_module(&conn, "dup", "2", "B", "e", "uploaded", "q", false, None).await;
         assert!(result.is_err());
     }
 
@@ -649,7 +679,7 @@ mod tests {
             .await
             .unwrap();
 
-        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", None)
+        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
 
@@ -676,7 +706,7 @@ mod tests {
             .await
             .unwrap();
 
-        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", None)
+        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
 
@@ -727,7 +757,7 @@ mod tests {
         assert_eq!(mid.received_bytes, 512);
 
         // Create a module so we can link it.
-        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", None)
+        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
 
@@ -810,7 +840,7 @@ mod tests {
             .await
             .unwrap();
 
-        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", None)
+        let module = create_module(&conn, "mod", "1", "A", "d", "bundled", "p", false, None)
             .await
             .unwrap();
 
@@ -847,10 +877,10 @@ mod tests {
             .await
             .unwrap();
 
-        let mod1 = create_module(&conn, "mod1", "1", "A", "d", "bundled", "p1", None)
+        let mod1 = create_module(&conn, "mod1", "1", "A", "d", "bundled", "p1", false, None)
             .await
             .unwrap();
-        let mod2 = create_module(&conn, "mod2", "1", "A", "d", "bundled", "p2", None)
+        let mod2 = create_module(&conn, "mod2", "1", "A", "d", "bundled", "p2", false, None)
             .await
             .unwrap();
 
@@ -887,6 +917,7 @@ mod tests {
             "A",
             "uploaded",
             "osm/TestMod/1.0.0/",
+            false,
             None,
         )
         .await
@@ -936,5 +967,44 @@ mod tests {
             .await
             .unwrap();
         assert!(roles.is_empty());
+    }
+
+    // ── update_module_source tests ───────────────────────────────────────────
+
+    /// `update_module_source` changes the source field and touches updated_at.
+    #[tokio::test]
+    async fn test_update_module_source_success() {
+        let conn = database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+
+        let module = create_module(&conn, "mymod", "1.0", "A", "d", "bundled", "p", true, None)
+            .await
+            .unwrap();
+
+        assert_eq!(module.source, "bundled");
+        assert!(module.is_default);
+
+        update_module_source(&conn, module.id, "uploaded")
+            .await
+            .unwrap();
+
+        let updated = get_module(&conn, module.id).await.unwrap();
+        assert_eq!(updated.source, "uploaded");
+        // is_default must not be affected
+        assert!(updated.is_default);
+    }
+
+    /// `update_module_source` returns an error when the module ID does not exist.
+    #[tokio::test]
+    async fn test_update_module_source_not_found() {
+        let conn = database::run_migrations(&test_connection_factory!())
+            .await
+            .unwrap();
+
+        let result = update_module_source(&conn, 9999, "uploaded").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not found"), "unexpected error: {msg}");
     }
 }

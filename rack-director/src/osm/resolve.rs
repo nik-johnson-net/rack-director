@@ -121,6 +121,7 @@ mod tests {
             "Test",
             "bundled",
             "osm/Default/1.0.0/",
+            false,
             None,
         )
         .await

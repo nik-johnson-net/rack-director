@@ -293,6 +293,7 @@ mod tests {
             "Test module",
             "bundled",
             "osm/Default/1.0.0/",
+            false,
             None,
         )
         .await
