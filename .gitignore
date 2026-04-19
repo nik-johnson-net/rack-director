@@ -7,3 +7,5 @@ db.sqlite
 
 /.local-storage
 /.build
+/default-osm/.build
+/default-osm/Default.osm

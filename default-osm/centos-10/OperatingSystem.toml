@@ -1,0 +1,40 @@
+name = "CentOS"
+release = "10 Stream"
+
+[[architectures]]
+arch = "x86-64"
+kernel = "vmlinuz-amd64"
+initramfs = "initrd-amd64.img"
+install_template = "centos-10-amd64.ks"
+cmdline = "inst.ks={{install_script_url}} inst.nomux"
+
+[[template_variables]]
+name = "packages"
+type = "list"
+description = "Additional packages to install"
+
+[[template_variables]]
+name = "rootpw"
+type = "string"
+required = true
+description = "Encrypted password to use for root"
+
+[[template_variables]]
+name = "postinstall"
+type = "string"
+default = ""
+description = "Post install script to run"
+
+[[template_variables]]
+name = "halt"
+type = "boolean"
+default = false
+description = "Halt instead of reboot after installation"
+
+[[build.file_download]]
+filename = "vmlinuz-amd64"
+url = "https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/images/pxeboot/vmlinuz"
+
+[[build.file_download]]
+filename = "initrd-amd64.img"
+url = "https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/images/pxeboot/initrd.img"

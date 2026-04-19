@@ -17,18 +17,20 @@ RUN --mount=type=cache,target=/build/rack-director-ui/node_modules --mount=type=
 EOT
 
 FROM redhat/ubi10 AS bin-builder
-RUN dnf -y install glibc-devel gcc openssl-devel
+RUN dnf -y install glibc-devel gcc openssl-devel zstd
 RUN mkdir -p /build/target && mkdir -p /root/.cargo
 RUN --mount=type=cache,target=/root/.cargo curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-COPY --exclude=rack-director-ui . /build
+COPY --exclude=default-osm --exclude=rack-director-ui . /build
 RUN  --mount=type=cache,target=/build/target --mount=type=cache,target=/root/.cargo <<EOT
   set -ex
   source $HOME/.cargo/env
   cd build
   cargo build --release --bin rack-director
+  cargo build --release --bin rack-director-osm
   cargo build --release --bin rack-agent
   mkdir /output/
   cp /build/target/release/rack-director /output/
+  cp /build/target/release/rack-director-osm /output/
   cp /build/target/release/rack-agent /output/
 EOT
 
@@ -98,6 +100,18 @@ FROM scratch AS rack-director-e2e-export
 COPY --from=director-image-builder /output/vmlinuz-director /vmlinuz-director
 COPY --from=director-image-builder /output/director-initramfs.img /director-initramfs.img
 
+FROM redhat/ubi10 AS default-osm-builder
+RUN dnf -y install zstd
+COPY default-osm/ /build/
+COPY --from=bin-builder /output/rack-director-osm /bin/rack-director-osm
+RUN  --mount=type=cache,target=/build/target --mount=type=cache,target=/root/.cargo <<EOT
+  set -ex
+  cd /build
+  /bin/rack-director-osm build
+  mkdir /output/
+  tar -C /output -I /usr/bin/unzstd -xf Default.osm
+EOT
+
 FROM redhat/ubi10
 ADD https://boot.ipxe.org/x86_64-pcbios/undionly.kpxe /opt/rack-director/firmware/undionly.kpxe
 ADD https://boot.ipxe.org/x86_64-efi/snponly.efi /opt/rack-director/firmware/snponly.efi
@@ -105,5 +119,7 @@ COPY --from=bin-builder /output/rack-director /opt/rack-director/bin/rack-direct
 COPY --from=web-builder /output/ui /opt/rack-director/ui
 COPY --from=agent-image-builder /output/vmlinuz /opt/rack-director/agent/vmlinuz
 COPY --from=agent-image-builder /output/initramfs.img /opt/rack-director/agent/initramfs.img
+RUN mkdir -p /opt/rack-director/osm/default && mkdir -p /var/lib/rack-director/images
+COPY --from=default-osm-builder /output/ /opt/rack-director/osm/default/
 VOLUME [ "/var/lib/rack-director" ]
 ENTRYPOINT [ "/opt/rack-director/bin/rack-director" ]

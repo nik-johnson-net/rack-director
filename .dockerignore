@@ -1,9 +1,9 @@
+/.build
+/.claude
+/.git
+/.local-storage
+/db.sqlite
+/rack-director-ui/node_modules
+/rack-director-ui/dist
+/rack-director-ui/dist.build
 target
-/target
-.local-storage
-.claude
-.build
-db.sqlite
-rack-director-ui/node_modules
-rack-director-ui/dist
-rack-director-ui/dist.build
