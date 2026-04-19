@@ -113,7 +113,7 @@ impl Plan {
         matches!(self.status, PlanStatus::Pending | PlanStatus::Running)
     }
 
-    pub fn advance_step(&mut self) -> bool {
+    fn advance_step(&mut self) -> bool {
         if self.current_step < self.total_steps - 1 {
             self.current_step += 1;
             true
@@ -126,8 +126,7 @@ impl Plan {
         if self.advance_step() {
             ActionResult::Continue
         } else {
-            self.status = PlanStatus::Success;
-            self.completed_at = Some(Utc::now());
+            self.mark_completed();
             ActionResult::PlanCompleted
         }
     }
@@ -143,7 +142,21 @@ impl Plan {
         if self.status == PlanStatus::Pending {
             self.status = PlanStatus::Running;
             self.started_at = Some(Utc::now());
+
+            // Some transitions may have no actions. Immediately mark success
+            if self.no_more_actions() {
+                self.mark_completed();
+            }
         }
+    }
+
+    fn no_more_actions(&self) -> bool {
+        self.current_step >= self.total_steps
+    }
+
+    fn mark_completed(&mut self) {
+        self.status = PlanStatus::Success;
+        self.completed_at = Some(Utc::now());
     }
 }
 
@@ -226,5 +239,17 @@ mod tests {
         let current = plan.get_current_action();
         assert!(current.is_some());
         assert_eq!(*current.unwrap(), Action::DiscoverHardware);
+    }
+
+    #[test]
+    fn empty_plan_success_on_start() {
+        let actions = vec![];
+        let mut plan = Plan::new(
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            actions,
+        );
+
+        plan.start();
+        assert!(plan.is_completed())
     }
 }
