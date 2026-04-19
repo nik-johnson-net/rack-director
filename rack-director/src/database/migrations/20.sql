@@ -1,0 +1,4 @@
+-- Migration 20: Boot partitions are now stored explicitly in roles.disk_layout.
+-- The post-migration hook (migration_20::backfill_boot_partitions) prepends the
+-- appropriate boot partition(s) to the ROOT disk of each role whose layout does not
+-- already contain them, based on the role's firmware_mode.

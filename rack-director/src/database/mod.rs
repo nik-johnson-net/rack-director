@@ -64,7 +64,7 @@ pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
 }
 
-const LATEST_VERSION: usize = 19;
+const LATEST_VERSION: usize = 20;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -85,6 +85,7 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/17.sql"),
     include_str!("migrations/18.sql"),
     include_str!("migrations/19.sql"),
+    include_str!("migrations/20.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -93,50 +94,52 @@ use futures::{FutureExt, future::BoxFuture};
 /// Index corresponds to migration version (1-indexed, so POST_MIGRATION_HOOKS[10] runs after migration 11)
 type PostMigrationHook = fn(&Connection) -> BoxFuture<Result<()>>;
 const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
-    None,                                                                      // Migration 1
-    None,                                                                      // Migration 2
-    None,                                                                      // Migration 3
-    None,                                                                      // Migration 4
-    None,                                                                      // Migration 5
-    None,                                                                      // Migration 6
-    None,                                                                      // Migration 7
-    None,                                                                      // Migration 8
-    None,                                                                      // Migration 9
-    None,                                                                      // Migration 10
-    Some(|conn| migrations::migration_11::convert_uuids(conn).boxed()),        // Migration 11
-    None,                                                                      // Migration 12
-    None,                                                                      // Migration 13
-    Some(|conn| migrations::migration_14::convert_disk_layouts(conn).boxed()), // Migration 14
-    Some(|conn| migrations::migration_15::strip_disk_paths(conn).boxed()),     // Migration 15
-    None,                                                                      // Migration 16
-    None,                                                                      // Migration 17
-    None,                                                                      // Migration 18
-    None,                                                                      // Migration 19
+    None,                                                                          // Migration 1
+    None,                                                                          // Migration 2
+    None,                                                                          // Migration 3
+    None,                                                                          // Migration 4
+    None,                                                                          // Migration 5
+    None,                                                                          // Migration 6
+    None,                                                                          // Migration 7
+    None,                                                                          // Migration 8
+    None,                                                                          // Migration 9
+    None,                                                                          // Migration 10
+    Some(|conn| migrations::migration_11::convert_uuids(conn).boxed()),            // Migration 11
+    None,                                                                          // Migration 12
+    None,                                                                          // Migration 13
+    Some(|conn| migrations::migration_14::convert_disk_layouts(conn).boxed()),     // Migration 14
+    Some(|conn| migrations::migration_15::strip_disk_paths(conn).boxed()),         // Migration 15
+    None,                                                                          // Migration 16
+    None,                                                                          // Migration 17
+    None,                                                                          // Migration 18
+    None,                                                                          // Migration 19
+    Some(|conn| migrations::migration_20::backfill_boot_partitions(conn).boxed()), // Migration 20
 ];
 
 /// Pre-migration hooks run Rust code BEFORE the SQL for each migration version.
 /// Index corresponds to migration version (1-indexed, so PRE_MIGRATION_HOOKS[18] runs before migration 19).
 type PreMigrationHook = fn(&Connection) -> BoxFuture<Result<()>>;
 const PRE_MIGRATION_HOOKS: [Option<PreMigrationHook>; LATEST_VERSION] = [
-    None, // Migration 1
-    None, // Migration 2
-    None, // Migration 3
-    None, // Migration 4
-    None, // Migration 5
-    None, // Migration 6
-    None, // Migration 7
-    None, // Migration 8
-    None, // Migration 9
-    None, // Migration 10
-    None, // Migration 11
-    None, // Migration 12
-    None, // Migration 13
-    None, // Migration 14
-    None, // Migration 15
-    None, // Migration 16
-    None, // Migration 17
-    None, // Migration 18
+    None,                                                                     // Migration 1
+    None,                                                                     // Migration 2
+    None,                                                                     // Migration 3
+    None,                                                                     // Migration 4
+    None,                                                                     // Migration 5
+    None,                                                                     // Migration 6
+    None,                                                                     // Migration 7
+    None,                                                                     // Migration 8
+    None,                                                                     // Migration 9
+    None,                                                                     // Migration 10
+    None,                                                                     // Migration 11
+    None,                                                                     // Migration 12
+    None,                                                                     // Migration 13
+    None,                                                                     // Migration 14
+    None,                                                                     // Migration 15
+    None,                                                                     // Migration 16
+    None,                                                                     // Migration 17
+    None,                                                                     // Migration 18
     Some(|conn| migrations::migration_19::warn_if_roles_exist(conn).boxed()), // Migration 19
+    None,
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.

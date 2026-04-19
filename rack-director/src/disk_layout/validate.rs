@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use common::FirmwareMode;
 use common::disk_layout::DiskLayout;
 
 use super::layout_uses_labels;
@@ -13,15 +14,27 @@ const VALID_PARTITION_TABLES: &[&str] = &["gpt", "msdos"];
 /// first failure. Error keys use dot-path format that matches the frontend field names, e.g.
 /// `"disks.0.partitions.1.size"`.
 ///
+/// The `firmware_mode` parameter controls boot partition validation:
+/// - `Some(FirmwareMode::Uefi)`: ROOT disk must have a partition with the `esp` flag.
+/// - `Some(FirmwareMode::Bios)` + GPT: ROOT disk must have a partition with the `bios_grub` flag.
+/// - `Some(FirmwareMode::Bios)` + MBR: no boot partition requirement.
+/// - `None`: ROOT disk must have at least one of `esp` or `bios_grub` (layout works on either).
+///
+/// Path-based layouts (no ROOT label) skip boot partition validation entirely.
+///
 /// Returns `Ok(())` when the layout is valid, or `Err(HashMap<String, String>)` containing
 /// all detected validation errors keyed by field path.
-pub fn validate_disk_layout(layout: &DiskLayout) -> Result<(), HashMap<String, String>> {
+pub fn validate_disk_layout(
+    layout: &DiskLayout,
+    firmware_mode: Option<FirmwareMode>,
+) -> Result<(), HashMap<String, String>> {
     let mut errors = HashMap::new();
 
     validate_at_least_one_disk(layout, &mut errors);
     validate_root_disk_required(layout, &mut errors);
     validate_disks(layout, &mut errors);
     validate_volume_groups(layout, &mut errors);
+    validate_boot_partitions(layout, firmware_mode, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -253,9 +266,82 @@ fn validate_logical_volume_filesystems(
     }
 }
 
+/// Validate that the ROOT disk contains the required boot partition(s) for the given firmware mode.
+///
+/// Rules:
+/// - UEFI: ROOT disk must have at least one partition with the `esp` flag.
+/// - BIOS + GPT: ROOT disk must have at least one partition with the `bios_grub` flag.
+/// - BIOS + MBR: no boot-partition requirement (GRUB embeds in the MBR gap).
+/// - None (any) + GPT: ROOT disk must have at least one of (esp OR bios_grub).
+/// - None (any) + msdos: no boot-partition requirement (GRUB embeds in the MBR gap).
+///
+/// Path-based layouts (no ROOT label) are skipped — operator is expected to be explicit.
+fn validate_boot_partitions(
+    layout: &DiskLayout,
+    firmware_mode: Option<FirmwareMode>,
+    errors: &mut HashMap<String, String>,
+) {
+    // Only applies to label-based layouts with a ROOT disk.
+    let Some(root_disk) = layout.disks.iter().find(|d| d.device == "ROOT") else {
+        return;
+    };
+
+    let has_flag = |flag: &str| -> bool {
+        root_disk.partitions.iter().any(|p| {
+            p.flags
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|f| f == flag)
+        })
+    };
+
+    match firmware_mode {
+        Some(FirmwareMode::Uefi) => {
+            if !has_flag("esp") {
+                errors.insert(
+                    "disk_layout".to_string(),
+                    "ROOT disk is missing an EFI System Partition (esp flag). \
+                     Add a partition with the 'esp' flag (e.g. 300 MiB vfat at /boot/efi)."
+                        .to_string(),
+                );
+            }
+        }
+        Some(FirmwareMode::Bios) => {
+            if root_disk.partition_table == "gpt" && !has_flag("bios_grub") {
+                errors.insert(
+                    "disk_layout".to_string(),
+                    "ROOT disk (GPT) is missing a BIOS GRUB partition (bios_grub flag). \
+                     Add a 1 MiB partition with the 'bios_grub' flag."
+                        .to_string(),
+                );
+            }
+            // msdos partition table: no boot partition required.
+        }
+        None => {
+            // msdos: GRUB embeds in the MBR gap — no partition flag required.
+            if root_disk.partition_table == "gpt" {
+                let has_esp = has_flag("esp");
+                let has_bios_grub = has_flag("bios_grub");
+                if !has_esp && !has_bios_grub {
+                    errors.insert(
+                        "disk_layout".to_string(),
+                        "ROOT disk (GPT) is missing boot partitions. \
+                         When firmware mode is unspecified, add at least one of: \
+                         an EFI System Partition (esp flag) for UEFI, or a BIOS GRUB partition \
+                         (bios_grub flag) for BIOS+GPT."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::FirmwareMode;
     use common::disk_layout::{
         DiskConfig, DiskLayout, LogicalVolume, PartitionConfig, VolumeGroup,
     };
@@ -267,14 +353,24 @@ mod tests {
             disks: vec![DiskConfig {
                 device: "ROOT".to_string(),
                 partition_table: "gpt".to_string(),
-                partitions: vec![PartitionConfig {
-                    label: "root".to_string(),
-                    size: "rest".to_string(),
-                    filesystem: Some("ext4".to_string()),
-                    mount_point: Some("/".to_string()),
-                    flags: None,
-                    volume_group: None,
-                }],
+                partitions: vec![
+                    PartitionConfig {
+                        label: "efi".to_string(),
+                        size: "300MiB".to_string(),
+                        filesystem: Some("vfat".to_string()),
+                        mount_point: Some("/boot/efi".to_string()),
+                        flags: Some(vec!["esp".to_string()]),
+                        volume_group: None,
+                    },
+                    PartitionConfig {
+                        label: "root".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: Some("ext4".to_string()),
+                        mount_point: Some("/".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    },
+                ],
             }],
             volume_groups: None,
             zfs_pools: None,
@@ -309,7 +405,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(
@@ -339,7 +435,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("disk_layout"));
@@ -349,14 +445,14 @@ mod tests {
     #[test]
     fn test_label_layout_with_root_is_ok() {
         let layout = simple_layout_with_root();
-        assert!(validate_disk_layout(&layout).is_ok());
+        assert!(validate_disk_layout(&layout, Some(FirmwareMode::Uefi)).is_ok());
     }
 
     #[test]
     fn test_path_layout_without_root_label_is_ok() {
         // Layouts that use absolute paths do not require a ROOT label.
         let layout = simple_layout_with_path();
-        assert!(validate_disk_layout(&layout).is_ok());
+        assert!(validate_disk_layout(&layout, None).is_ok());
     }
 
     // ===== partition table =====
@@ -372,7 +468,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("disks.0.partition_table"));
@@ -399,7 +495,7 @@ mod tests {
                 zfs_pools: None,
             };
             assert!(
-                validate_disk_layout(&layout).is_ok(),
+                validate_disk_layout(&layout, None).is_ok(),
                 "partition_table '{}' should be valid",
                 table
             );
@@ -436,7 +532,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         // Each offending partition gets its own per-field error key.
@@ -481,7 +577,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         // Both partitions with "*" size should be flagged individually.
@@ -500,7 +596,7 @@ mod tests {
     #[test]
     fn test_one_rest_partition_is_ok() {
         let layout = simple_layout_with_path();
-        assert!(validate_disk_layout(&layout).is_ok());
+        assert!(validate_disk_layout(&layout, None).is_ok());
     }
 
     // ===== partition filesystem =====
@@ -523,7 +619,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("disks.0.partitions.0.filesystem"));
@@ -550,7 +646,7 @@ mod tests {
                 zfs_pools: None,
             };
             assert!(
-                validate_disk_layout(&layout).is_ok(),
+                validate_disk_layout(&layout, None).is_ok(),
                 "filesystem '{}' should be valid",
                 fs
             );
@@ -584,7 +680,7 @@ mod tests {
             }]),
             zfs_pools: None,
         };
-        assert!(validate_disk_layout(&layout).is_ok());
+        assert!(validate_disk_layout(&layout, None).is_ok());
     }
 
     // ===== LVM partition must have volume_group =====
@@ -607,7 +703,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("disks.0.partitions.0.volume_group"));
@@ -632,7 +728,7 @@ mod tests {
             volume_groups: None, // no VGs defined!
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("disks.0.partitions.0.volume_group"));
@@ -667,7 +763,7 @@ mod tests {
             }]),
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(
@@ -706,7 +802,7 @@ mod tests {
             }]),
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         assert!(errors.contains_key("volume_groups.0.logical_volumes.0.filesystem"));
@@ -757,7 +853,7 @@ mod tests {
             }]),
             zfs_pools: None,
         };
-        assert!(validate_disk_layout(&layout).is_ok());
+        assert!(validate_disk_layout(&layout, None).is_ok());
     }
 
     // ===== all errors collected =====
@@ -781,7 +877,7 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        let result = validate_disk_layout(&layout);
+        let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
         // Both errors must be present.
@@ -827,6 +923,279 @@ mod tests {
             volume_groups: None,
             zfs_pools: None,
         };
-        assert!(validate_disk_layout(&layout).is_ok());
+        assert!(validate_disk_layout(&layout, Some(FirmwareMode::Uefi)).is_ok());
+    }
+
+    // ===== boot partition validation =====
+
+    #[test]
+    fn test_uefi_missing_esp_returns_error() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let result = validate_disk_layout(&layout, Some(FirmwareMode::Uefi));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(
+            errors.contains_key("disk_layout"),
+            "expected disk_layout error key"
+        );
+        assert!(
+            errors["disk_layout"].contains("esp"),
+            "error should mention esp flag"
+        );
+    }
+
+    #[test]
+    fn test_uefi_with_esp_is_ok() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![
+                    PartitionConfig {
+                        label: "efi".to_string(),
+                        size: "300MiB".to_string(),
+                        filesystem: Some("vfat".to_string()),
+                        mount_point: Some("/boot/efi".to_string()),
+                        flags: Some(vec!["esp".to_string()]),
+                        volume_group: None,
+                    },
+                    PartitionConfig {
+                        label: "root".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: Some("ext4".to_string()),
+                        mount_point: Some("/".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    },
+                ],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, Some(FirmwareMode::Uefi)).is_ok());
+    }
+
+    #[test]
+    fn test_bios_gpt_missing_bios_grub_returns_error() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let result = validate_disk_layout(&layout, Some(FirmwareMode::Bios));
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("disk_layout"));
+        assert!(errors["disk_layout"].contains("bios_grub"));
+    }
+
+    #[test]
+    fn test_bios_msdos_no_boot_partition_required() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "msdos".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, Some(FirmwareMode::Bios)).is_ok());
+    }
+
+    #[test]
+    fn test_firmware_none_missing_any_boot_partition_returns_error() {
+        // firmware_mode=None requires at least one of esp or bios_grub
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let result = validate_disk_layout(&layout, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("disk_layout"));
+    }
+
+    #[test]
+    fn test_firmware_none_with_esp_is_ok() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![
+                    PartitionConfig {
+                        label: "efi".to_string(),
+                        size: "300MiB".to_string(),
+                        filesystem: Some("vfat".to_string()),
+                        mount_point: Some("/boot/efi".to_string()),
+                        flags: Some(vec!["esp".to_string()]),
+                        volume_group: None,
+                    },
+                    PartitionConfig {
+                        label: "root".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: Some("ext4".to_string()),
+                        mount_point: Some("/".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    },
+                ],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, None).is_ok());
+    }
+
+    #[test]
+    fn test_bios_gpt_with_bios_grub_is_ok() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![
+                    PartitionConfig {
+                        label: "bios_grub".to_string(),
+                        size: "1MiB".to_string(),
+                        filesystem: None,
+                        mount_point: None,
+                        flags: Some(vec!["bios_grub".to_string()]),
+                        volume_group: None,
+                    },
+                    PartitionConfig {
+                        label: "root".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: Some("ext4".to_string()),
+                        mount_point: Some("/".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    },
+                ],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, Some(FirmwareMode::Bios)).is_ok());
+    }
+
+    #[test]
+    fn test_firmware_none_with_bios_grub_is_ok() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![
+                    PartitionConfig {
+                        label: "bios_grub".to_string(),
+                        size: "1MiB".to_string(),
+                        filesystem: None,
+                        mount_point: None,
+                        flags: Some(vec!["bios_grub".to_string()]),
+                        volume_group: None,
+                    },
+                    PartitionConfig {
+                        label: "root".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: Some("ext4".to_string()),
+                        mount_point: Some("/".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    },
+                ],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, None).is_ok());
+    }
+
+    #[test]
+    fn test_firmware_none_msdos_no_boot_partition_required() {
+        // firmware_mode=None with msdos partition table: GRUB embeds in MBR gap, no flag required.
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "msdos".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, None).is_ok());
+    }
+
+    #[test]
+    fn test_path_based_layout_skips_boot_partition_validation() {
+        // Path-based layouts (device = "/dev/...") skip boot partition validation.
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "root".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: Some("/".to_string()),
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        // No boot partition, but path-based — should be OK even with UEFI mode.
+        assert!(validate_disk_layout(&layout, Some(FirmwareMode::Uefi)).is_ok());
     }
 }
