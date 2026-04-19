@@ -160,6 +160,9 @@ async fn apply_module_update(
     )
     .await?;
 
+    // Restore source to "bundled" — the bundled version now owns this module record.
+    store::update_module_source(conn, module.id, "bundled").await?;
+
     replace_os_entries(conn, module.id, &bundled.os_configs).await?;
 
     log::info!(
@@ -226,6 +229,7 @@ async fn insert_fresh_module(conn: &Connection, bundled: &BundledOsm) -> Result<
         &bundled.manifest.description,
         "bundled",
         &storage_prefix,
+        true,
         None,
     )
     .await?;
@@ -385,6 +389,10 @@ install_template = "x86-64/autoinstall.yaml.hbs"
         assert_eq!(module.name, "Default");
         assert_eq!(module.version, "1.0.0");
         assert_eq!(module.source, "bundled");
+        assert!(
+            module.is_default,
+            "fresh insert of Default OSM must set is_default = true"
+        );
 
         let os_list = store::list_operating_systems(&conn, module.id)
             .await
@@ -438,6 +446,7 @@ operating_systems = ["ubuntu"]
             "User uploaded",
             "uploaded",
             "osm/Default/3.0.0/",
+            false,
             Some("archives/Default-3.0.0.tar.zst"),
         )
         .await
@@ -468,6 +477,7 @@ operating_systems = ["ubuntu"]
             "Old upload",
             "uploaded",
             "osm/Default/0.5.0/",
+            false,
             Some("archives/Default-0.5.0.tar.zst"),
         )
         .await
@@ -480,8 +490,8 @@ operating_systems = ["ubuntu"]
         let module = sync_default_osm(&conn, &bundled).await.unwrap();
 
         assert_eq!(module.version, "1.0.0");
-        // source remains "uploaded" because we updated the existing row —
-        // name and source are immutable on the record, only version/files change
+        // Startup sync restores source to "bundled" so routing serves from disk.
+        assert_eq!(module.source, "bundled");
     }
 
     #[tokio::test]

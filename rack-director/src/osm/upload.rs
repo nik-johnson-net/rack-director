@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
-use futures::stream;
+use tokio_util::io::ReaderStream;
 
 use crate::database::{Connection, ConnectionFactory};
 use crate::storage::ImageStore;
@@ -309,64 +308,150 @@ fn toml_value_to_json(v: &toml::Value) -> serde_json::Value {
 
 /// Uploads every file in the archive to `image_store` under `storage_prefix`.
 ///
-/// The archive is read synchronously into memory first (as a `Vec<(path, bytes)>`),
-/// then the async uploads are performed.  This avoids holding a `tar::Archive`
-/// iterator — which is not `Send` due to internal `RefCell` usage — across an
-/// `.await` point, which would prevent the future from being sent between threads.
+/// The archive is extracted to a temporary directory on disk using
+/// `spawn_blocking` (avoiding the `!Send` `tar::Archive` iterator across await
+/// points and eliminating the OOM risk of buffering multi-GB files in memory).
+/// After extraction each file is streamed individually to the image store via
+/// `tokio::fs::File` + `ReaderStream`, then the temporary directory is removed.
 async fn extract_to_storage(
     temp_path: &Path,
     storage_prefix: &str,
     image_store: &ImageStore,
 ) -> Result<()> {
-    let entries = read_archive_entries(temp_path)?;
+    let temp_dir = build_extract_temp_dir();
+    let temp_path_owned = temp_path.to_owned();
+    let temp_dir_clone = temp_dir.clone();
 
-    for (path_str, data) in entries {
-        let storage_path = format!("{storage_prefix}{path_str}");
-        let bytes = Bytes::from(data);
-        let data_stream = Box::pin(stream::once(
-            async move { Ok::<Bytes, std::io::Error>(bytes) },
-        ));
+    // Extract the archive on a blocking thread to avoid holding `!Send` types
+    // across await points and to keep the async runtime unblocked.
+    tokio::task::spawn_blocking(move || unpack_archive_to_dir(&temp_path_owned, &temp_dir_clone))
+        .await
+        .context("blocking extraction task panicked")??;
 
-        image_store
-            .upload(&storage_path, data_stream)
-            .await
-            .with_context(|| format!("failed to upload '{storage_path}'"))?;
+    // Walk extracted files and stream-upload each one individually.
+    let result = upload_extracted_files(&temp_dir, storage_prefix, image_store).await;
+
+    // Always remove the temp directory, even on error.
+    if let Err(e) = tokio::fs::remove_dir_all(&temp_dir).await {
+        log::warn!("Failed to remove extraction temp dir {:?}: {e}", temp_dir);
+    }
+
+    result
+}
+
+/// Constructs a unique temporary directory path for archive extraction.
+///
+/// A random 64-bit nonce ensures no collisions between concurrent uploads.
+fn build_extract_temp_dir() -> PathBuf {
+    let nonce: u64 = rand::random();
+    std::env::temp_dir().join(format!("osm-extract-{nonce:016x}"))
+}
+
+/// Unpacks the tar.zst archive at `src` into `dest_dir`.
+///
+/// This is a blocking operation and must be called via `spawn_blocking`.
+fn unpack_archive_to_dir(src: &Path, dest_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("failed to create extraction dir {:?}", dest_dir))?;
+
+    let file =
+        std::fs::File::open(src).with_context(|| format!("failed to open temp file {:?}", src))?;
+
+    let decoder = zstd::Decoder::new(file).context("failed to create zstd decoder")?;
+    let mut archive = tar::Archive::new(decoder);
+
+    archive
+        .unpack(dest_dir)
+        .with_context(|| format!("failed to unpack archive into {:?}", dest_dir))?;
+
+    Ok(())
+}
+
+/// Walks `base_dir` recursively and streams each file to the image store.
+///
+/// The storage path for each file is `storage_prefix` + the file's path
+/// relative to `base_dir`, using forward slashes.
+async fn upload_extracted_files(
+    base_dir: &Path,
+    storage_prefix: &str,
+    image_store: &ImageStore,
+) -> Result<()> {
+    let files = collect_files_recursive(base_dir).await?;
+
+    for abs_path in files {
+        let rel = abs_path
+            .strip_prefix(base_dir)
+            .context("extracted file path not under base dir")?;
+
+        // Normalize to forward slashes for storage keys.
+        let rel_str = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let storage_path = format!("{storage_prefix}{rel_str}");
+
+        stream_file_to_storage(&abs_path, &storage_path, image_store).await?;
     }
 
     Ok(())
 }
 
-/// Reads all non-directory entries from the archive at `temp_path` into memory.
-///
-/// Returns a list of `(normalized_path, bytes)` pairs.  This is intentionally
-/// synchronous so callers can drop the archive before entering async code,
-/// avoiding `!Send` types across await points.
-fn read_archive_entries(temp_path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
-    let file = std::fs::File::open(temp_path)
-        .with_context(|| format!("failed to open temp file {:?}", temp_path))?;
+/// Recursively collects all file paths under `dir`, skipping directories.
+async fn collect_files_recursive(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut result = Vec::new();
+    collect_files_inner(dir, &mut result).await?;
+    Ok(result)
+}
 
-    let decoder = zstd::Decoder::new(file).context("failed to create zstd decoder")?;
-    let mut archive = tar::Archive::new(decoder);
-    let mut entries = Vec::new();
+/// Inner recursive helper for [`collect_files_recursive`].
+async fn collect_files_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let mut read_dir = tokio::fs::read_dir(dir)
+        .await
+        .with_context(|| format!("failed to read directory {:?}", dir))?;
 
-    for entry_result in archive.entries().context("failed to read tar entries")? {
-        let mut entry = entry_result.context("failed to read tar entry")?;
-        let path = entry.path().context("invalid entry path")?;
-        let path_str = normalize_path(&path.to_string_lossy());
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .with_context(|| format!("failed to iterate directory {:?}", dir))?
+    {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .await
+            .with_context(|| format!("failed to stat {:?}", path))?;
 
-        if entry.header().entry_type().is_dir() {
-            continue;
+        if file_type.is_dir() {
+            // Recurse — defined as a separate async fn to avoid recursive async closures.
+            Box::pin(collect_files_inner(&path, out)).await?;
+        } else if file_type.is_file() {
+            out.push(path);
         }
-
-        let mut data: Vec<u8> = Vec::new();
-        entry
-            .read_to_end(&mut data)
-            .with_context(|| format!("failed to read archive entry '{path_str}'"))?;
-
-        entries.push((path_str, data));
+        // Symlinks are intentionally skipped.
     }
 
-    Ok(entries)
+    Ok(())
+}
+
+/// Opens `path` and streams its contents to the image store at `storage_path`.
+async fn stream_file_to_storage(
+    path: &Path,
+    storage_path: &str,
+    image_store: &ImageStore,
+) -> Result<()> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("failed to open extracted file {:?}", path))?;
+
+    let stream = Box::pin(ReaderStream::new(file));
+
+    image_store
+        .upload(storage_path, stream)
+        .await
+        .with_context(|| format!("failed to upload '{storage_path}'"))?;
+
+    Ok(())
 }
 
 // ── Database commit ───────────────────────────────────────────────────────────
@@ -418,6 +503,12 @@ async fn atomic_db_update(
             )
             .await?;
 
+            // Update source to "uploaded" — the existing record may have been "bundled"
+            // (e.g. when a user uploads a replacement for the Default module).
+            store::update_module_source(conn, old_module.id, "uploaded")
+                .await
+                .context("failed to update module source to 'uploaded'")?;
+
             store::delete_operating_systems_for_module(conn, old_module.id).await?;
 
             create_os_entries(conn, old_module.id, &parsed.os_configs, &disabled_by_dir).await?;
@@ -437,6 +528,7 @@ async fn atomic_db_update(
                 &manifest.description,
                 "uploaded",
                 storage_prefix,
+                false,
                 Some(&archive_storage_path),
             )
             .await?;
@@ -479,23 +571,23 @@ async fn create_os_entries(
     Ok(())
 }
 
-/// Reads the archive from `temp_path` and uploads it to `storage_path` in the
-/// image store so it can be retrieved or re-processed later.
+/// Streams the archive at `temp_path` to `storage_path` in the image store.
+///
+/// Uses async file I/O and `ReaderStream` to avoid loading the entire archive
+/// into memory, preventing OOM on large uploads.
 async fn upload_archive(
     temp_path: &Path,
     storage_path: &str,
     image_store: &ImageStore,
 ) -> Result<()> {
-    let data = std::fs::read(temp_path)
-        .with_context(|| format!("failed to read temp file {:?}", temp_path))?;
+    let file = tokio::fs::File::open(temp_path)
+        .await
+        .with_context(|| format!("failed to open temp file {:?}", temp_path))?;
 
-    let bytes = Bytes::from(data);
-    let data_stream = Box::pin(stream::once(
-        async move { Ok::<Bytes, std::io::Error>(bytes) },
-    ));
+    let stream = Box::pin(ReaderStream::new(file));
 
     image_store
-        .upload(storage_path, data_stream)
+        .upload(storage_path, stream)
         .await
         .with_context(|| format!("failed to upload archive to '{storage_path}'"))?;
 

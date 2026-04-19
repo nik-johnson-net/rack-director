@@ -104,9 +104,9 @@ async fn delete_module(
         .await
         .map_err(|_| HttpError::NotFound(format!("OSM module {id} not found")))?;
 
-    if module.name.to_lowercase() == "default" {
+    if module.is_default {
         return Err(HttpError::BadRequest(
-            "The built-in 'default' module cannot be deleted".into(),
+            "The built-in default module cannot be deleted".into(),
         ));
     }
 
