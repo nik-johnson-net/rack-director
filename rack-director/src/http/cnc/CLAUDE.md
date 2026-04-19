@@ -126,6 +126,11 @@ d-i netcfg/get_nameservers string {{ device.dns_servers }}
 
 Disk layouts are configured at the role level and applied by the `partition_disks` action.
 
+**Boot partitions are WYSIWYG — they must be explicitly stored in the role's `disk_layout`.** rack-director does NOT auto-inject `esp` or `bios_grub` partitions at runtime. The server validates that:
+- `firmware_mode = uefi` → ROOT disk must contain an `esp`-flagged partition
+- `firmware_mode = bios` + GPT → ROOT disk must contain a `bios_grub`-flagged partition
+- `firmware_mode` unset + GPT → ROOT disk must contain at least one of `esp` or `bios_grub`
+
 Supported partition flags: `esp`, `boot`, `lvm`, `bios_grub`.
 
 - `esp` — EFI System Partition (UEFI boot)
@@ -158,11 +163,12 @@ disks = [
 ```
 
 ```toml
-# LVM layout
+# LVM layout (UEFI — note: esp partition is required)
 [disk_layout]
 disks = [
   { device = "ROOT", partition_table = "gpt", partitions = [
-    { label = "boot", size = "1GiB", filesystem = "ext4", mount_point = "/boot", flags = ["boot"] },
+    { label = "efi", size = "300MiB", filesystem = "vfat", mount_point = "/boot/efi", flags = ["esp"] },
+    { label = "boot", size = "1GiB", filesystem = "ext4", mount_point = "/boot" },
     { label = "lvm", size = "rest", volume_group = "vg0", flags = ["lvm"] }
   ]}
 ]

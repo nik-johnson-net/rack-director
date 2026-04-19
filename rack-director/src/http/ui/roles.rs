@@ -25,7 +25,9 @@ async fn create_role(
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<Role>), HttpError> {
     // Validate the disk layout before persisting.
-    if let Err(errors) = crate::disk_layout::validate_disk_layout(&req.disk_layout) {
+    if let Err(errors) =
+        crate::disk_layout::validate_disk_layout(&req.disk_layout, req.firmware_mode)
+    {
         return Err(HttpError::ValidationError(errors));
     }
 
@@ -86,7 +88,8 @@ async fn update_role(
 ) -> Result<Json<Role>, HttpError> {
     // Validate the new disk layout before applying any changes.
     if let Some(ref disk_layout) = req.disk_layout
-        && let Err(errors) = crate::disk_layout::validate_disk_layout(disk_layout)
+        && let Err(errors) =
+            crate::disk_layout::validate_disk_layout(disk_layout, req.firmware_mode)
     {
         return Err(HttpError::ValidationError(errors));
     }
