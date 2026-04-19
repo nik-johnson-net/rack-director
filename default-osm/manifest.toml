@@ -1,0 +1,6 @@
+name = "Default"
+version = "0.1.0"
+author = "Rack Director"
+description = "Bundled Operating System Module"
+
+operating_systems = ["almalinux-10.1", "centos-10"]

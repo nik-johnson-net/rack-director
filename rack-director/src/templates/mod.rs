@@ -592,4 +592,141 @@ mod tests {
         .unwrap();
         assert_eq!(result, "hostname: server01\nos: Ubuntu 22.04");
     }
+
+    /// Verifies that the CentOS 10 kickstart template renders correctly for a
+    /// GPT + LVM + biosboot disk layout. This is the canonical layout used for
+    /// BIOS-mode provisioning: one bios_grub partition, one /boot partition,
+    /// and one LVM PV that backs a vg0 VG with root and swap LVs.
+    ///
+    /// NOTE: This test may fail if the kickstart template has not yet been
+    /// updated to use the new context fields (disk_name, is_bios_grub, is_esp,
+    /// volume_groups). The test is intentionally written against the final
+    /// expected output so it will pass once the template is updated.
+    #[test]
+    fn test_centos10_kickstart_gpt_lvm_biosboot() {
+        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("default-osm/centos-10/centos-10-amd64.ks");
+        let template = std::fs::read_to_string(&template_path).unwrap();
+
+        let disk_device = "/dev/disk/by-path/pci-0000:04:00.0-virtio-pci-virtio0".to_string();
+        let disk_layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: disk_device.clone(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![
+                    // Partition 1: BIOS boot (no filesystem, no mount point)
+                    PartitionConfig {
+                        label: "biosboot".to_string(),
+                        size: "1MiB".to_string(),
+                        filesystem: None,
+                        mount_point: None,
+                        flags: Some(vec!["bios_grub".to_string()]),
+                        volume_group: None,
+                    },
+                    // Partition 2: /boot ext4
+                    PartitionConfig {
+                        label: "boot".to_string(),
+                        size: "1GiB".to_string(),
+                        filesystem: Some("ext4".to_string()),
+                        mount_point: Some("/boot".to_string()),
+                        flags: None,
+                        volume_group: None,
+                    },
+                    // Partition 3: LVM PV (no filesystem, no mount point)
+                    PartitionConfig {
+                        label: "lvm".to_string(),
+                        size: "rest".to_string(),
+                        filesystem: None,
+                        mount_point: None,
+                        flags: Some(vec!["lvm".to_string()]),
+                        volume_group: Some("vg0".to_string()),
+                    },
+                ],
+            }],
+            volume_groups: Some(vec![VolumeGroup {
+                name: "vg0".to_string(),
+                logical_volumes: vec![
+                    LogicalVolume {
+                        name: "root".to_string(),
+                        size: "14G".to_string(),
+                        filesystem: "xfs".to_string(),
+                        mount_point: Some("/".to_string()),
+                    },
+                    LogicalVolume {
+                        name: "swap".to_string(),
+                        size: "2G".to_string(),
+                        filesystem: "swap".to_string(),
+                        mount_point: None,
+                    },
+                ],
+            }]),
+            zfs_pools: None,
+        };
+
+        let config_template = Some(serde_json::json!({
+            "rootpw": "$6$fakehash",
+            "packages": ["vim", "curl"],
+            "postinstall": "echo done",
+        }));
+
+        let device = DeviceInfo {
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            hostname: Some("server01".to_string()),
+            boot_mode: Some(common::FirmwareMode::Bios),
+        };
+
+        let result = render_install_script_osm(
+            &template,
+            &device,
+            "centos10-role",
+            &disk_layout,
+            &config_template,
+            "CentOS",
+            "10",
+            &make_network(),
+            &disk_layout,
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+
+        // Kickstart must instruct Anaconda to zero the MBR and restrict the
+        // install to only the target disk.
+        assert!(
+            result.contains("zerombr"),
+            "expected 'zerombr' in rendered output"
+        );
+        assert!(
+            result.contains("ignoredisk --only-use="),
+            "expected 'ignoredisk --only-use=' in rendered output"
+        );
+
+        // The biosboot partition must be declared so GRUB can write its core
+        // image into it.
+        assert!(
+            result.contains("part biosboot --fstype=biosboot"),
+            "expected biosboot part directive in rendered output"
+        );
+
+        // The LVM PV declaration uses Anaconda's 'part pv.' syntax.
+        assert!(
+            result.contains("part pv."),
+            "expected 'part pv.' LVM PV declaration in rendered output"
+        );
+
+        // Each VG must be declared with --useexisting since partition_disks
+        // already created it before the OS installer runs.
+        assert!(
+            result.contains("volgroup vg0 --useexisting"),
+            "expected 'volgroup vg0 --useexisting' in rendered output"
+        );
+
+        // The bootloader directive must specify the drive so GRUB is installed
+        // to the correct MBR.
+        assert!(
+            result.contains("bootloader --boot-drive="),
+            "expected 'bootloader --boot-drive=' in rendered output"
+        );
+    }
 }

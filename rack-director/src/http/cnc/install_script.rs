@@ -153,6 +153,17 @@ async fn load_bundled_template(
     let disk_path = path
         .join(&resolved.os.dir_name)
         .join(&resolved.arch_config.install_template);
+
+    // Guard against path traversal: `dir_name` and `install_template` come from
+    // the database and could contain `..` components if a corrupt or malicious OSM
+    // archive was accepted. Reject any path that escapes the base directory.
+    if !path_is_within_base(path, &disk_path) {
+        return Err(Error::ServerInternalError(anyhow::anyhow!(
+            "Install template path '{}' is outside the bundled OSM directory",
+            disk_path.display()
+        )));
+    }
+
     let bytes = tokio::fs::read(&disk_path).await.map_err(|e| {
         Error::ServerInternalError(anyhow::anyhow!(
             "Failed to read bundled install template {}: {}",
@@ -163,6 +174,26 @@ async fn load_bundled_template(
     String::from_utf8(bytes).map_err(|e| {
         Error::ServerInternalError(anyhow::anyhow!("Template is not valid UTF-8: {}", e))
     })
+}
+
+/// Returns `true` if `path` is lexically within `base` after resolving all `..` components.
+///
+/// This is a defence-in-depth check — it catches `..`-based traversals without requiring
+/// filesystem access (no symlink resolution).  A separate `canonicalize` check would be
+/// needed to block symlink-based traversals, but those are not a realistic threat for
+/// bundled OSM files shipped with the binary.
+fn path_is_within_base(base: &std::path::Path, path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            c => normalized.push(c),
+        }
+    }
+    normalized.starts_with(base)
 }
 
 /// Load an install script template from the image store (uploaded OSMs).
@@ -229,6 +260,35 @@ async fn get_device_network_info_with_db(
 mod tests {
     use super::*;
     use crate::database::{DatabaseConnectionFactory, run_migrations};
+
+    // ── path_is_within_base ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_path_within_base_safe_path() {
+        let base = std::path::Path::new("/bundled");
+        let path = base.join("almalinux-10").join("install.ks");
+        assert!(path_is_within_base(base, &path));
+    }
+
+    #[test]
+    fn test_path_within_base_dotdot_traversal_rejected() {
+        let base = std::path::Path::new("/bundled");
+        let path = base.join("../escape").join("install.ks");
+        assert!(!path_is_within_base(base, &path));
+    }
+
+    #[test]
+    fn test_path_within_base_deeply_nested_traversal_rejected() {
+        let base = std::path::Path::new("/bundled");
+        let path = base.join("subdir/../../etc/passwd");
+        assert!(!path_is_within_base(base, &path));
+    }
+
+    #[test]
+    fn test_path_within_base_exact_base_ok() {
+        let base = std::path::Path::new("/bundled");
+        assert!(path_is_within_base(base, base));
+    }
     use crate::http::AppState;
     use crate::storage::ImageStore;
     use crate::test_database_path;
