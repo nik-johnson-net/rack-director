@@ -1,0 +1,21 @@
+[package]
+name = "rack-director-osm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+osm = { version = "0.1.0", path = "../osm" }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+tokio = { workspace = true }
+toml = "0.8"
+zstd = "0.13"
+tar = "0.4"
+
+[dev-dependencies]
+mockito = "1.6.1"
+tempfile = { workspace = true }

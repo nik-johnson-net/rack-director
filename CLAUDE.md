@@ -12,6 +12,10 @@ A development tool named rack-simulator exists to simulate machine interactions 
 
 Rust code that is shared between multiple projects is kept in common.
 
+The `osm` library crate contains shared OSM types (Manifest, OperatingSystemConfig, archive parsing, validation) extracted from rack-director so they can be used by other tools without depending on rack-director internals.
+
+The `rack-director-osm` binary crate is a CLI tool for building and validating OSM archives.
+
 ## Boot Process
 
 A server that boots will first request a DHCP lease in both BIOS and UEFI modes, requesting boot options. Rack-director will respond with a DHCP lease containing boot options pointing to an iPXE image, which has more features and provides a common configuration across any device type. BIOS servers will load iPXE over TFTP, while UEFI may load iPXE over TFTP or HTTP. Once the server boots into iPXE, it will again request a DHCP Lease. This time the rack-director DHCP server will recognize the request as coming from iPXE firmware, and will instruct it to load a config from the rack-director HTTP server.
@@ -97,6 +101,12 @@ make devserver
 
 # Build UI (from rack-director-ui/)
 npm run build
+
+# Build an OSM from the current directory
+cargo run -p rack-director-osm -- build
+
+# Validate an OSM archive
+cargo run -p rack-director-osm -- validate <file.osm>
 ```
 
 # Gotchas
