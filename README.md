@@ -1,31 +1,27 @@
 # Rack Director
 
-Rack Director provides low level machine inventory and control for a rack using netboot techniques and IPMI. It is stateful; allowing for runtime configuration.
+Rack Director provides PXEBoot services for automated server installations and web service for viewing and provisioning servers. Rack Director makes it easy to install Operating Systems to new servers or reinstall your existing ones.
 
-## System Design
+## Building
 
-Rack Director can be configured in conjunction with an external DHCP server, or use its internal one. Both require a static IP address to be allocated to the Rack Director.
+The build system is fully docker based. To build, just run:
 
-Rack Director commands machines in its control by netbooting a control image. At first boot, a machine's information is recorded by Rack Director, IPMI can be reset and configured, and the machine can automatically boot into a net installer.
+```
+docker build -f docker/Dockerfile .
+```
 
-Rack Director is not highly-available. It supports either an S3-like interface, or local file storage for images.
+## Quick Start
 
-## Devices
+First decide how Rack Director will be deployed and what IP address assignment to Rack Director will look like. Rack Director can be deployed to serve the local network segment (L2 Network) or remote network segments via DHCP Relay services, or both simultaneously. DHCP works on broadcast packets and thus Rack Director doesn't need a dedicated IP address, but DHCP Relay will forward based on IP addresses and Rack Director will need to be assigned an address that the DHCP Relay services know about.
 
-A Device is any networked chassis that can be booted by rack-director. Devices may be uniquely identified by MAC Address, Rack Position, or UUID, though a device may have multiple NICs and thus multiple MAC addresses.
+The second decision is how Rack Director's persistent storage will work. Rack Director uses a persistent volume for its database at `/var/lib/rack-director`. This directory may also be used for uploaded OSMs.
 
-## Lifecycle
+Then deploy Rack Director's container on the platform of your choice. This container will require NET_ADMIN priviledges and the `host` network mode, and will require traffic on ports UDP 67 and 68 for DHCP, UDP 69 and many high level ports for TFTP, and TCP 3000 for web.
 
-Devices can be in one of several states. Devices move between states by executing a series a steps, or plans. A Device that has been created in rack-director but not seen on the network is "new". A device then seen on the network, or auto-discovered, are then moved to "Unprovisioned" by running steps such as memtest, part enumeration, firmware updates, BMC configuration, etc. At this point the node is ready to be provisioned in an Infrastructure-as-a-Service (IaaS) manner.
+Now Rack Director is up and running. It won't be doing anything useful, since no networks are configured. Navigate to the web interface and then to the Networks page. Create a new Network, and then the address pool for that network. Rack Director will now be responding to DHCP requests for that network, though requests through a relay will require the relay agent to be configured as well.
 
-Provisioning a node moves it to the Provisioned state, which is accomplished by configuring NICs, disks, and installing an operating system. Unprovisioning a node moves it back to the Unprovisioned state, which can include wiping the disks. Finally, a machine can be "Removed", keeping its history but not allowing more actions.
+Devices should be configured to network boot first. When a device boots on the configured network, Rack Director will respond to its DHCP requests. If Autodiscovery is enabled, Rack Director will also provide PXEBoot instructions to load its agent and run hardware discovery on the device. If autodiscovery is disabled, you will need to add the device by MAC address through the web interface either through the Devices page or through the Networks page by viewing active leases. The discovered device will first be assigned a "New" state, and after going through discovery will be assigned the "Unprovisioned" state.
 
-Hardware is, well, hard. Failures can happen at any point. Failures in a transition are handled by moving the device to a "Broken" state, requiring intervention to debug and fix issues. Devices can then be moved back to "Unprovisioned", which will re-run discovery, disk-wipes, etc.
+You will notice the Device was also assigned a Platform during discovery. Platforms are a way to deal with hardware quirks across like machines, you do not need to worry about them for now.
 
-Lifecycle transitions are tracked in the lifecycle_transition table.
-
-## Actions
-
-Actions are the underlying instructions for a device to take some action, like reboot, install an OS, or wipe disks. Actions can take parameters, useful for configuring login details or what OS to install. Actions are organized into Plans, useful for linking back to Lifecycles.
-
-A table called plans is used to store a list of actions, their parameters, and the current step.
+Provisioning a Device requires assigning it to a Role, which defines how the machine should be configured. Navigate to the Roles page and click Create Role. You will be presented with a form to select its Operating System and Disk Layout. Disk Layouts can be quite complex, but a sane default is presented for you. With a Role created, you can now navigate to the Devices page, and provision a device to that role. This will kick off the automated installation process.
