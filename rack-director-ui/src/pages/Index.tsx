@@ -205,7 +205,7 @@ function Index() {
           <Button variant="secondary" onClick={() => navigate("/roles/new")}>
             Create Role
           </Button>
-          <Button variant="secondary" onClick={() => navigate("/operating-systems/new")}>
+          <Button variant="secondary" onClick={() => navigate("/osm/upload")}>
             Add OS Image
           </Button>
         </div>
