@@ -6,6 +6,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FormFieldError } from "@/components/ui/form-field-error";
 import DiskLayoutEditor from "@/components/roles/disk-layout-editor";
+import {
+  OsVariableForm,
+  findOsByKey,
+  buildDefaultValues,
+  mergeOsValues,
+  buildSubmitConfig,
+  validateRequiredVars,
+} from "@/components/roles/os-variable-form";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
 import { selectClassName } from "@/components/roles/styles";
 import {
@@ -64,7 +72,7 @@ function RoleNew() {
     defaultDiskLayoutForFirmwareMode(undefined)
   );
   const [firmwareMode, setFirmwareMode] = useState<FirmwareMode | undefined>(undefined);
-  const [configTemplate, setConfigTemplate] = useState("");
+  const [osConfigValues, setOsConfigValues] = useState<Record<string, unknown>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { fieldErrors, setErrors, clearAllErrors, clearFieldError } = useFieldErrors();
@@ -104,6 +112,7 @@ function RoleNew() {
           setOsRelease(first.release);
           setOsArch(firstArch);
           setAvailableArchs(first.config.architectures.map((a) => a.arch));
+          setOsConfigValues(buildDefaultValues(first.config.template_variables));
         }
       } catch (err) {
         setError("Failed to load operating systems");
@@ -114,20 +123,22 @@ function RoleNew() {
     fetchOs();
   }, []);
 
+  const matchedOs = findOsByKey(selectedOsKey, osmOsList, osmModules);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     clearAllErrors();
 
-    let parsedConfig = undefined;
-    if (configTemplate.trim()) {
-      try {
-        parsedConfig = JSON.parse(configTemplate);
-      } catch (err) {
-        setError("Invalid JSON in config template");
-        return;
-      }
+    const templateVars = matchedOs?.config.template_variables ?? [];
+
+    const missing = validateRequiredVars(templateVars, osConfigValues);
+    if (missing.length > 0) {
+      setError(`Required fields missing: ${missing.join(", ")}`);
+      return;
     }
+
+    const parsedConfig = buildSubmitConfig(osConfigValues, templateVars);
 
     setIsSubmitting(true);
 
@@ -233,113 +244,78 @@ function RoleNew() {
                   </div>
                 </div>
               ) : (
-                <>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <Label htmlFor="os_select" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                        Operating System *
-                      </Label>
-                      <select
-                        id="os_select"
-                        value={selectedOsKey}
-                        onChange={(e) => {
-                          const key = e.target.value;
-                          setSelectedOsKey(key);
-                          clearFieldError("osm_module");
-                          clearFieldError("os_name");
-                          clearFieldError("os_release");
-                          clearFieldError("os_arch");
-                          const [mod, name, release] = key.split("|");
-                          const matched = osmOsList.find(
-                            (os) =>
-                              os.name === name &&
-                              os.release === release &&
-                              osmModules.find((m) => m.id === os.module_id)?.name === mod
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <Label htmlFor="os_select" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                      Operating System *
+                    </Label>
+                    <select
+                      id="os_select"
+                      value={selectedOsKey}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        setSelectedOsKey(key);
+                        clearFieldError("osm_module");
+                        clearFieldError("os_name");
+                        clearFieldError("os_release");
+                        clearFieldError("os_arch");
+                        const [mod, , release] = key.split("|");
+                        const os = findOsByKey(key, osmOsList, osmModules);
+                        if (os) {
+                          const archs = os.config.architectures.map((a) => a.arch);
+                          setOsmModule(mod);
+                          setOsName(os.name);
+                          setOsRelease(release);
+                          setAvailableArchs(archs);
+                          setOsArch(archs[0] || "x86-64");
+                          setOsConfigValues((prev) =>
+                            mergeOsValues(prev, os.config.template_variables)
                           );
-                          if (matched) {
-                            const archs = matched.config.architectures.map((a) => a.arch);
-                            setOsmModule(mod);
-                            setOsName(name);
-                            setOsRelease(release);
-                            setAvailableArchs(archs);
-                            setOsArch(archs[0] || "x86-64");
-                          }
-                        }}
-                        aria-invalid={
-                          !!(fieldErrors["osm_module"] || fieldErrors["os_name"] || fieldErrors["os_release"])
                         }
-                        className={selectClassName}
-                      >
-                        {osmOsList.map((os) => {
-                          const moduleName = osmModules.find((m) => m.id === os.module_id)?.name || "";
-                          const key = `${moduleName}|${os.name}|${os.release}`;
-                          return (
-                            <option key={key} value={key}>
-                              {os.name} {os.release} ({moduleName})
-                            </option>
-                          );
-                        })}
-                      </select>
-                      <FormFieldError
-                        error={fieldErrors["osm_module"] || fieldErrors["os_name"] || fieldErrors["os_release"]}
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <Label htmlFor="os_arch" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                        Architecture *
-                      </Label>
-                      <select
-                        id="os_arch"
-                        value={osArch}
-                        onChange={(e) => {
-                          setOsArch(e.target.value);
-                          clearFieldError("os_arch");
-                        }}
-                        aria-invalid={!!fieldErrors["os_arch"]}
-                        className={selectClassName}
-                      >
-                        {availableArchs.map((arch) => (
-                          <option key={arch} value={arch}>
-                            {arch}
+                      }}
+                      aria-invalid={
+                        !!(fieldErrors["osm_module"] || fieldErrors["os_name"] || fieldErrors["os_release"])
+                      }
+                      className={selectClassName}
+                    >
+                      {osmOsList.map((os) => {
+                        const moduleName = osmModules.find((m) => m.id === os.module_id)?.name || "";
+                        const key = `${moduleName}|${os.name}|${os.release}`;
+                        return (
+                          <option key={key} value={key}>
+                            {os.name} {os.release} ({moduleName})
                           </option>
-                        ))}
-                      </select>
-                      <FormFieldError error={fieldErrors["os_arch"]} />
-                    </div>
+                        );
+                      })}
+                    </select>
+                    <FormFieldError
+                      error={fieldErrors["osm_module"] || fieldErrors["os_name"] || fieldErrors["os_release"]}
+                    />
                   </div>
 
-                  {/* Template Variables Info */}
-                  {(() => {
-                    const [mod, name, release] = selectedOsKey.split("|");
-                    const matched = osmOsList.find(
-                      (os) =>
-                        os.name === name &&
-                        os.release === release &&
-                        osmModules.find((m) => m.id === os.module_id)?.name === mod
-                    );
-                    const vars = matched?.config.template_variables ?? [];
-                    if (vars.length === 0) return null;
-                    return (
-                      <div className="border border-border-muted bg-bg-raised px-3 py-2 space-y-1">
-                        <p className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                          Available Template Variables
-                        </p>
-                        <div className="flex flex-wrap gap-x-4 gap-y-1">
-                          {vars.map((v) => (
-                            <span key={v.name} className="text-xs font-mono text-text-muted">
-                              <span className="text-accent">{v.name}</span>
-                              <span className="text-text-muted"> ({v.type})</span>
-                              {v.required && (
-                                <span className="text-status-broken"> *</span>
-                              )}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </>
+                  <div className="space-y-1">
+                    <Label htmlFor="os_arch" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
+                      Architecture *
+                    </Label>
+                    <select
+                      id="os_arch"
+                      value={osArch}
+                      onChange={(e) => {
+                        setOsArch(e.target.value);
+                        clearFieldError("os_arch");
+                      }}
+                      aria-invalid={!!fieldErrors["os_arch"]}
+                      className={selectClassName}
+                    >
+                      {availableArchs.map((arch) => (
+                        <option key={arch} value={arch}>
+                          {arch}
+                        </option>
+                      ))}
+                    </select>
+                    <FormFieldError error={fieldErrors["os_arch"]} />
+                  </div>
+                </div>
               )}
 
               {/* Firmware Mode */}
@@ -400,22 +376,15 @@ function RoleNew() {
               <span className="text-sm font-semibold text-text-primary">Configuration Template</span>
             </div>
             <div className="px-4 py-4">
-              <div className="space-y-1">
-                <Label htmlFor="config" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                  JSON Configuration
-                </Label>
-                <textarea
-                  id="config"
-                  value={configTemplate}
-                  onChange={(e) => setConfigTemplate(e.target.value)}
-                  placeholder={'{\n  "packages": ["nginx", "postgresql"],\n  "custom_setting": "value"\n}'}
-                  rows={8}
-                  className="w-full bg-bg-base border border-border text-text-primary text-xs px-3 py-2 font-mono focus:outline-none focus:border-accent resize-y rounded-sm placeholder:text-text-muted"
+              {loadingOs ? (
+                <p className="text-xs text-text-muted">Loading...</p>
+              ) : (
+                <OsVariableForm
+                  variables={matchedOs?.config.template_variables ?? []}
+                  values={osConfigValues}
+                  onChange={setOsConfigValues}
                 />
-                <p className="text-xs text-text-muted">
-                  Optional JSON accessible in install scripts via template variables
-                </p>
-              </div>
+              )}
             </div>
           </div>
 
