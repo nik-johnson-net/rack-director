@@ -282,36 +282,45 @@ export default function DiskLayoutEditor({
           </button>
         </div>
       ) : (
-        layout.disks.map((disk, diskIndex) => (
-          <DiskSection
-            key={diskIndex}
-            disk={disk}
-            diskIndex={diskIndex}
-            vgNames={vgNames}
-            canRemove={layout.disks.length > 1}
-            onUpdateLabel={(label) =>
-              dispatch({ type: "UPDATE_DISK_LABEL", diskIndex, label })
-            }
-            onUpdateTable={(table) =>
-              dispatch({ type: "UPDATE_DISK_TABLE", diskIndex, table })
-            }
-            onRemove={() => dispatch({ type: "REMOVE_DISK", diskIndex })}
-            onAddPartition={() => dispatch({ type: "ADD_PARTITION", diskIndex })}
-            onRemovePartition={(partIndex) =>
-              dispatch({ type: "REMOVE_PARTITION", diskIndex, partIndex })
-            }
-            onUpdatePartition={(partIndex, partition) =>
-              dispatch({ type: "UPDATE_PARTITION", diskIndex, partIndex, partition })
-            }
-            errors={errors}
-            errorPrefix={`disks.${diskIndex}`}
-            onClearError={onClearError}
-            firmwareMode={firmwareMode}
-            onPrependPartition={(partition) =>
-              dispatch({ type: "PREPEND_PARTITION", diskIndex, partition })
-            }
-          />
-        ))
+        <>
+          {layout.disks.map((disk, diskIndex) => (
+            <DiskSection
+              key={diskIndex}
+              disk={disk}
+              diskIndex={diskIndex}
+              vgNames={vgNames}
+              canRemove={layout.disks.length > 1}
+              onUpdateLabel={(label) =>
+                dispatch({ type: "UPDATE_DISK_LABEL", diskIndex, label })
+              }
+              onUpdateTable={(table) =>
+                dispatch({ type: "UPDATE_DISK_TABLE", diskIndex, table })
+              }
+              onRemove={() => dispatch({ type: "REMOVE_DISK", diskIndex })}
+              onAddPartition={() => dispatch({ type: "ADD_PARTITION", diskIndex })}
+              onRemovePartition={(partIndex) =>
+                dispatch({ type: "REMOVE_PARTITION", diskIndex, partIndex })
+              }
+              onUpdatePartition={(partIndex, partition) =>
+                dispatch({ type: "UPDATE_PARTITION", diskIndex, partIndex, partition })
+              }
+              errors={errors}
+              errorPrefix={`disks.${diskIndex}`}
+              onClearError={onClearError}
+              firmwareMode={firmwareMode}
+              onPrependPartition={(partition) =>
+                dispatch({ type: "PREPEND_PARTITION", diskIndex, partition })
+              }
+            />
+          ))}
+          <button
+            type="button"
+            onClick={() => dispatch({ type: "ADD_DISK" })}
+            className="text-xs text-accent hover:text-accent-hover transition-colors cursor-pointer"
+          >
+            + Add Device
+          </button>
+        </>
       )}
 
       {/* Volume Groups */}
