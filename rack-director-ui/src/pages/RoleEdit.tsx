@@ -6,6 +6,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FormFieldError } from "@/components/ui/form-field-error";
 import DiskLayoutEditor from "@/components/roles/disk-layout-editor";
+import {
+  OsVariableForm,
+  findOsByKey,
+  mergeOsValues,
+  buildSubmitConfig,
+  validateRequiredVars,
+} from "@/components/roles/os-variable-form";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
 import { selectClassName } from "@/components/roles/styles";
@@ -43,8 +50,8 @@ function RoleEdit() {
   const [firmwareMode, setFirmwareMode] = useState<FirmwareMode | undefined>(
     data.firmware_mode
   );
-  const [configTemplate, setConfigTemplate] = useState(
-    data.config_template ? JSON.stringify(data.config_template, null, 2) : ""
+  const [osConfigValues, setOsConfigValues] = useState<Record<string, unknown>>(
+    data.config_template ?? {}
   );
   const [assignedDevices, setAssignedDevices] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -92,6 +99,9 @@ function RoleEdit() {
         });
         if (currentOs) {
           setAvailableArchs(currentOs.config.architectures.map((a) => a.arch));
+          setOsConfigValues((prev) =>
+            mergeOsValues(prev, currentOs.config.template_variables)
+          );
         }
       } catch (err) {
         setError("Failed to load data");
@@ -106,21 +116,23 @@ function RoleEdit() {
     if (saveSuccess) window.scrollTo({ top: 0, behavior: "smooth" });
   }, [saveSuccess]);
 
+  const matchedOs = findOsByKey(selectedOsKey, osmOsList, osmModules);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSaveSuccess(false);
     clearAllErrors();
 
-    let parsedConfig = undefined;
-    if (configTemplate.trim()) {
-      try {
-        parsedConfig = JSON.parse(configTemplate);
-      } catch (err) {
-        setError("Invalid JSON in config template");
-        return;
-      }
+    const templateVars = matchedOs?.config.template_variables ?? [];
+
+    const missing = validateRequiredVars(templateVars, osConfigValues);
+    if (missing.length > 0) {
+      setError(`Required fields missing: ${missing.join(", ")}`);
+      return;
     }
+
+    const parsedConfig = buildSubmitConfig(osConfigValues, templateVars);
 
     setIsSubmitting(true);
 
@@ -274,20 +286,18 @@ function RoleEdit() {
                             clearFieldError("os_name");
                             clearFieldError("os_release");
                             clearFieldError("os_arch");
-                            const [mod, name, release] = key.split("|");
-                            const matched = osmOsList.find(
-                              (os) =>
-                                os.name === name &&
-                                os.release === release &&
-                                osmModules.find((m) => m.id === os.module_id)?.name === mod
-                            );
-                            if (matched) {
-                              const archs = matched.config.architectures.map((a) => a.arch);
+                            const [mod, , release] = key.split("|");
+                            const os = findOsByKey(key, osmOsList, osmModules);
+                            if (os) {
+                              const archs = os.config.architectures.map((a) => a.arch);
                               setOsmModule(mod);
-                              setOsName(name);
+                              setOsName(os.name);
                               setOsRelease(release);
                               setAvailableArchs(archs);
                               setOsArch(archs[0] || "x86-64");
+                              setOsConfigValues((prev) =>
+                                mergeOsValues(prev, os.config.template_variables)
+                              );
                             }
                           }}
                           aria-invalid={
@@ -338,36 +348,6 @@ function RoleEdit() {
                     </div>
                   </div>
 
-                  {/* Template Variables Info */}
-                  {(() => {
-                    const [mod, name, release] = selectedOsKey.split("|");
-                    const matched = osmOsList.find(
-                      (os) =>
-                        os.name === name &&
-                        os.release === release &&
-                        osmModules.find((m) => m.id === os.module_id)?.name === mod
-                    );
-                    const vars = matched?.config.template_variables ?? [];
-                    if (vars.length === 0) return null;
-                    return (
-                      <div className="border border-border-muted bg-bg-raised px-3 py-2 space-y-1">
-                        <p className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                          Available Template Variables
-                        </p>
-                        <div className="flex flex-wrap gap-x-4 gap-y-1">
-                          {vars.map((v) => (
-                            <span key={v.name} className="text-xs font-mono text-text-muted">
-                              <span className="text-accent">{v.name}</span>
-                              <span className="text-text-muted"> ({v.type})</span>
-                              {v.required && (
-                                <span className="text-status-broken"> *</span>
-                              )}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })()}
                 </>
               )}
 
@@ -417,22 +397,15 @@ function RoleEdit() {
               <span className="text-sm font-semibold text-text-primary">Configuration Template</span>
             </div>
             <div className="px-4 py-4">
-              <div className="space-y-1">
-                <Label htmlFor="config" className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                  JSON Configuration
-                </Label>
-                <textarea
-                  id="config"
-                  value={configTemplate}
-                  onChange={(e) => setConfigTemplate(e.target.value)}
-                  placeholder={'{\n  "packages": ["nginx", "postgresql"],\n  "custom_setting": "value"\n}'}
-                  rows={8}
-                  className="w-full bg-bg-base border border-border text-text-primary text-xs px-3 py-2 font-mono focus:outline-none focus:border-accent resize-y rounded-sm placeholder:text-text-muted"
+              {loadingOs ? (
+                <p className="text-xs text-text-muted">Loading...</p>
+              ) : (
+                <OsVariableForm
+                  variables={matchedOs?.config.template_variables ?? []}
+                  values={osConfigValues}
+                  onChange={setOsConfigValues}
                 />
-                <p className="text-xs text-text-muted">
-                  Optional JSON accessible in install scripts via template variables
-                </p>
-              </div>
+              )}
             </div>
           </div>
 
