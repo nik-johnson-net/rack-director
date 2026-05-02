@@ -344,20 +344,8 @@ function RoleNew() {
 
           {/* Disk Layout card */}
           <div className="border border-border bg-bg-surface">
-            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+            <div className="px-4 py-3 border-b border-border">
               <span className="text-sm font-semibold text-text-primary">Disk Layout</span>
-              <button
-                type="button"
-                onClick={() => {
-                  // Trigger add disk in the editor via a custom event isn't ideal,
-                  // so we rely on the "+ Add Device" inside the editor empty state.
-                  // This button is shown here for visual consistency per spec.
-                }}
-                className="text-xs text-text-secondary border border-border px-2 py-1 hover:border-accent hover:text-text-primary transition-colors rounded-sm cursor-not-allowed opacity-50"
-                title="Use the '+ Add Device' button below when no disks are defined"
-              >
-                + Add Device
-              </button>
             </div>
             <div className="px-4 py-4">
               <DiskLayoutEditor
