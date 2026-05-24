@@ -959,7 +959,9 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // No active plan is now a silent no-op (plan may have been cancelled while agent
+        // was in-flight), so the handler returns 204 NoContent rather than 500.
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

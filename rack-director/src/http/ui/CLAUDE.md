@@ -27,6 +27,7 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | PATCH | `/ui/devices/{uuid}/attributes` | Update device attributes (hostname, BMC config, cmdline, etc.) |
 | GET | `/ui/devices/{uuid}/lifecycle` | Get lifecycle history |
 | POST | `/ui/devices/{uuid}/lifecycle/transition` | Start a lifecycle transition |
+| POST | `/ui/devices/{uuid}/lifecycle/cancel` | Cancel the active lifecycle transition |
 | GET | `/ui/devices/{uuid}/transitions` | List all transitions |
 | GET | `/ui/devices/{uuid}/transitions/active` | Get active transition |
 | GET | `/ui/devices/{uuid}/status` | Get current plan step/status |

@@ -78,6 +78,24 @@ pub async fn get_active_plan_for_device(
     Ok(plan)
 }
 
+/// Cancel the active plan for a device using a conditional (CAS-style) UPDATE.
+///
+/// Only cancels if the plan is still in `pending` or `running` status, which
+/// prevents a race with a concurrent `action_success` call. Returns `true` if
+/// a plan was cancelled, `false` if none was found (already completed, or no
+/// active plan exists).
+pub async fn cancel_active_plan_for_device(conn: &Connection, device_uuid: &Uuid) -> Result<bool> {
+    let now = chrono::Utc::now();
+    let rows = conn
+        .execute(
+            "UPDATE plans SET status = 'cancelled', error_message = 'Cancelled by user', completed_at = ?1
+             WHERE device_uuid = ?2 AND status IN ('pending', 'running')",
+            (now, *device_uuid),
+        )
+        .await?;
+    Ok(rows > 0)
+}
+
 pub async fn update_plan_status(
     conn: &Connection,
     plan_id: i64,
@@ -97,7 +115,7 @@ pub async fn update_plan_status(
             )
             .await?;
         }
-        PlanStatus::Success | PlanStatus::Failed => {
+        PlanStatus::Success | PlanStatus::Failed | PlanStatus::Cancelled => {
             conn.execute(
                 "UPDATE plans SET status = ?1, current_step = ?2, error_message = ?3, completed_at = ?4 WHERE id = ?5",
                 (status_str, current_step, error_owned, now, plan_id),
