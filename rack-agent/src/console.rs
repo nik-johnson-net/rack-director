@@ -11,7 +11,7 @@ pub async fn start_console_command(client: &CncClient) -> Result<()> {
     let uuid = scan::read_dmi_for_uuid()
         .await?
         .ok_or(anyhow!("uuid not found"))?;
-    start_console(&client, &uuid).await
+    start_console(client, &uuid).await
 }
 
 // Start the console when the UUID can be provided. Saves a DMI table scan.
