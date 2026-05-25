@@ -78,19 +78,24 @@ pub async fn get_active_transition_for_device(
     Ok(transition)
 }
 
+/// Mark a lifecycle transition as complete. Only updates rows where `success IS NULL`
+/// (i.e., still open), making this safe to call multiple times. Returns the number of
+/// rows updated (0 if the transition was already closed by a concurrent path).
 pub async fn complete_transition(
     conn: &Connection,
     transition_id: i64,
     success: bool,
     error_message: Option<&str>,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE lifecycle_transitions SET success = ?1, error_message = ?2, completed_at = CURRENT_TIMESTAMP WHERE id = ?3",
-        (success, error_message.map(|s| s.to_string()), transition_id),
-    )
-    .await?;
+) -> Result<usize> {
+    let rows = conn
+        .execute(
+            "UPDATE lifecycle_transitions SET success = ?1, error_message = ?2, completed_at = CURRENT_TIMESTAMP
+             WHERE id = ?3 AND success IS NULL",
+            (success, error_message.map(|s| s.to_string()), transition_id),
+        )
+        .await?;
 
-    Ok(())
+    Ok(rows)
 }
 
 pub async fn get_transitions_for_device(

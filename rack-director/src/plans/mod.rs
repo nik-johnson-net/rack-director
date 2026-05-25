@@ -15,6 +15,7 @@ pub enum PlanStatus {
     Running,
     Success,
     Failed,
+    Cancelled,
 }
 
 impl From<String> for PlanStatus {
@@ -24,6 +25,7 @@ impl From<String> for PlanStatus {
             "running" => PlanStatus::Running,
             "success" => PlanStatus::Success,
             "failed" => PlanStatus::Failed,
+            "cancelled" => PlanStatus::Cancelled,
             _ => PlanStatus::Pending,
         }
     }
@@ -36,6 +38,7 @@ impl From<PlanStatus> for String {
             PlanStatus::Running => "running".to_string(),
             PlanStatus::Success => "success".to_string(),
             PlanStatus::Failed => "failed".to_string(),
+            PlanStatus::Cancelled => "cancelled".to_string(),
         }
     }
 }
@@ -105,7 +108,10 @@ impl Plan {
 
     #[allow(unused)]
     pub fn is_completed(&self) -> bool {
-        matches!(self.status, PlanStatus::Success | PlanStatus::Failed)
+        matches!(
+            self.status,
+            PlanStatus::Success | PlanStatus::Failed | PlanStatus::Cancelled
+        )
     }
 
     #[allow(unused)]

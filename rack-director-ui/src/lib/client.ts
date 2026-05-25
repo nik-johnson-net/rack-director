@@ -485,6 +485,18 @@ export async function transitionDeviceLifecycle(uuid: string, toState: DeviceLif
   });
 }
 
+export async function cancelDeviceTransition(uuid: string): Promise<void> {
+  return fetch(`/ui/devices/${uuid}/lifecycle/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  }).then((response) => {
+    if (!response.ok) {
+      console.error('Error cancelling device transition:', response.statusText);
+      throw new Error('Failed to cancel transition');
+    }
+  });
+}
+
 export async function getDeviceTransitions(uuid: string, includeCompleted: boolean = false): Promise<LifecycleTransition[]> {
   const params = new URLSearchParams();
   if (includeCompleted) {

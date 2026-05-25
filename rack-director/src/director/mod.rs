@@ -272,16 +272,20 @@ impl<'a> Director<'a> {
 
     pub async fn mark_action_success(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
         // Get the current active plan
-        let mut plan =
-            match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await? {
-                Some(plan) => plan,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "No active plan found for device {}",
-                        device_uuid
-                    ));
-                }
-            };
+        let mut plan = match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
+            .await?
+        {
+            Some(plan) => plan,
+            None => {
+                // No active plan: the plan was likely cancelled while the agent was in-flight.
+                // This is expected and not an error from the agent's perspective.
+                log::debug!(
+                    "action_success for {} but no active plan found — ignoring (plan may have been cancelled)",
+                    device_uuid
+                );
+                return Ok(());
+            }
+        };
 
         // Start the plan if it's pending
         if plan.status == PlanStatus::Pending {
@@ -316,16 +320,19 @@ impl<'a> Director<'a> {
         error_message: &str,
     ) -> anyhow::Result<()> {
         // Get the current active plan
-        let mut plan =
-            match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await? {
-                Some(plan) => plan,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "No active plan found for device {}",
-                        device_uuid
-                    ));
-                }
-            };
+        let mut plan = match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
+            .await?
+        {
+            Some(plan) => plan,
+            None => {
+                // No active plan: the plan was likely cancelled while the agent was in-flight.
+                log::debug!(
+                    "action_failed for {} but no active plan found — ignoring (plan may have been cancelled)",
+                    device_uuid
+                );
+                return Ok(());
+            }
+        };
 
         // Mark current action as failed
         let _result = plan.mark_action_failed(error_message.to_string());
@@ -815,6 +822,50 @@ impl<'a> Director<'a> {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    /// Cancel the active lifecycle transition for a device.
+    ///
+    /// Uses a CAS-style conditional UPDATE on the plan so that a concurrent
+    /// `action_success` report that completes the plan first will be detected,
+    /// and the cancel will return an error rather than overwriting a successful
+    /// completion with Broken. The transition close is idempotent (`WHERE success
+    /// IS NULL`) so a partial failure (lifecycle updated but transition close
+    /// fails) is safe to retry.
+    pub async fn cancel_active_transition(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
+        let transition =
+            crate::lifecycle::store::get_active_transition_for_device(self.conn, device_uuid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("No active transition to cancel"))?;
+
+        let plan_cancelled =
+            crate::plans::store::cancel_active_plan_for_device(self.conn, device_uuid).await?;
+
+        if !plan_cancelled {
+            // A concurrent action_success (or action_failed) already completed the plan.
+            // The transition will be closed by its completion handler; bail out here so we
+            // don't overwrite a successful provisioning with Broken.
+            return Err(anyhow::anyhow!(
+                "Transition already completed; nothing to cancel"
+            ));
+        }
+
+        crate::lifecycle::store::update_device_lifecycle(
+            self.conn,
+            device_uuid,
+            DeviceLifecycle::Broken,
+        )
+        .await?;
+
+        crate::lifecycle::store::complete_transition(
+            self.conn,
+            transition.id.unwrap(),
+            false,
+            Some("Cancelled by user"),
+        )
+        .await?;
 
         Ok(())
     }
@@ -2470,6 +2521,80 @@ mod tests {
         assert!(
             matches!(boot_target, BootTarget::LocalDisk),
             "Expected LocalDisk for Provisioned device, got {boot_target:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_transition_success() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440099").unwrap();
+
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Start a transition (New -> Unprovisioned)
+        director
+            .start_lifecycle_transition(&test_uuid, DeviceLifecycle::Unprovisioned)
+            .await
+            .unwrap();
+
+        // Cancel the transition
+        director.cancel_active_transition(&test_uuid).await.unwrap();
+
+        // Device should now be Broken
+        let lifecycle = director.get_device_lifecycle(&test_uuid).await.unwrap();
+        assert_eq!(lifecycle, Some(DeviceLifecycle::Broken));
+
+        // No active transition should remain
+        let active_transition = director
+            .get_active_transition_for_device(&test_uuid)
+            .await
+            .unwrap();
+        assert!(active_transition.is_none());
+
+        // No active plan should remain
+        let active_plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap();
+        assert!(active_plan.is_none());
+
+        // The completed transition should show failure with cancel message
+        let transitions = director
+            .get_device_transitions(&test_uuid, true)
+            .await
+            .unwrap();
+        assert_eq!(transitions.len(), 1);
+        let transition = &transitions[0];
+        assert_eq!(transition.success, Some(false));
+        assert_eq!(
+            transition.error_message.as_deref(),
+            Some("Cancelled by user")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_transition_no_active_transition() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440098").unwrap();
+
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // No active transition exists — cancel should return an error
+        let result = director.cancel_active_transition(&test_uuid).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No active transition to cancel")
         );
     }
 }

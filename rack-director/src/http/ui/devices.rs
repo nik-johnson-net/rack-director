@@ -253,6 +253,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
             post(start_lifecycle_transition),
         )
         .route(
+            "/ui/devices/{uuid}/lifecycle/cancel",
+            post(cancel_lifecycle_transition),
+        )
+        .route(
             "/ui/devices/{uuid}/transitions",
             get(get_device_transitions),
         )
@@ -499,6 +503,31 @@ async fn start_lifecycle_transition(
             transition_id,
             message: format!("Started lifecycle transition for device {}", uuid),
         })),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
+async fn cancel_lifecycle_transition(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let conn = state.connection_factory.open().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })?;
+    let director = Director::new(&conn);
+
+    match director.cancel_active_transition(&uuid).await {
+        Ok(()) => Ok(Json(serde_json::json!({}))),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {

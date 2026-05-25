@@ -17,6 +17,7 @@ import {
   getRoles,
   assignRoleToDevice,
   transitionDeviceLifecycle,
+  cancelDeviceTransition,
   getStaticReservationByMac,
   makeLeaseStatic,
   getNetworks,
@@ -42,6 +43,7 @@ import { AlertCircle, Pin, Trash2, Zap, XCircle, WrenchIcon, CheckCircle2 } from
 import { EditableHostname } from "@/components/devices/editable-hostname";
 import { MakeStaticDialog } from "@/components/networks/make-static-dialog";
 import { TransitionDialog } from "@/components/devices/transition-dialog";
+import { CancelTransitionDialog } from "@/components/devices/cancel-transition-dialog";
 import { ProvisionDialog } from "@/components/devices/provision-dialog";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
 import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
@@ -209,6 +211,7 @@ function DeviceDetail() {
   const [targetState, setTargetState] = useState<DeviceLifecycle>("new");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [provisionDialogOpen, setProvisionDialogOpen] = useState(false);
+  const [cancelTransitionDialogOpen, setCancelTransitionDialogOpen] = useState(false);
 
   // Expandable error rows in transitions tab
   const [expandedTransitionIds, setExpandedTransitionIds] = useState<Set<number>>(new Set());
@@ -311,6 +314,27 @@ function DeviceDetail() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to provision device");
       throw err;
+    } finally {
+      setTransitioning(false);
+    }
+  };
+
+  const handleCancelTransition = async () => {
+    if (!uuid) return;
+    setTransitioning(true);
+    setError(null);
+    try {
+      await cancelDeviceTransition(uuid);
+      const [updatedStatus, updatedTransitions, updatedDevice] = await Promise.all([
+        getDeviceStatus(uuid),
+        getDeviceTransitions(uuid, true),
+        getDevice(uuid),
+      ]);
+      setStatus(updatedStatus);
+      setTransitions(updatedTransitions);
+      setDevice(updatedDevice);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel transition");
     } finally {
       setTransitioning(false);
     }
@@ -885,6 +909,18 @@ function DeviceDetail() {
           </Button>
         </>
       )}
+      {/* Cancel Transition: shown when a transition is in progress */}
+      {status?.active_transition && !status.active_transition.completed_at && (
+        <Button
+          variant="danger"
+          size="sm"
+          onClick={() => setCancelTransitionDialogOpen(true)}
+          disabled={transitioning}
+        >
+          <XCircle className="size-3.5" />
+          Cancel Transition
+        </Button>
+      )}
       <Button variant="danger" size="sm" onClick={() => createPlan([ActionConsole], "boot into console")} disabled={transitioning}><WrenchIcon className="size-3.5" />Console</Button>
     </div>
   );
@@ -983,6 +1019,12 @@ function DeviceDetail() {
         title="Delete Device?"
         description="This will permanently delete this device and all associated plans, transitions, and leases. This action cannot be undone."
         onConfirm={handleDeleteDevice}
+      />
+
+      <CancelTransitionDialog
+        open={cancelTransitionDialogOpen}
+        onOpenChange={setCancelTransitionDialogOpen}
+        onConfirm={handleCancelTransition}
       />
     </div>
   );
