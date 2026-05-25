@@ -342,12 +342,24 @@ async fn update_attributes(
 #[derive(Deserialize, Serialize)]
 struct ActionStatusQuery {
     uuid: Uuid,
+    /// Optional plan ID echoed back by the agent from the poll response.
+    ///
+    /// When present, rack-director verifies the ID matches the currently
+    /// active plan before applying the success report. This prevents stale
+    /// reports from a previous (cancelled) plan from corrupting a new plan.
+    plan_id: Option<i64>,
 }
 
 #[derive(Deserialize, Serialize)]
 struct ActionFailedQuery {
     uuid: Uuid,
     error_message: String,
+    /// Optional plan ID echoed back by the agent from the poll response.
+    ///
+    /// When present, rack-director verifies the ID matches the currently
+    /// active plan before applying the failure report. This prevents stale
+    /// reports from a previous (cancelled) plan from corrupting a new plan.
+    plan_id: Option<i64>,
 }
 
 #[axum::debug_handler]
@@ -356,6 +368,7 @@ async fn action_success(
     extract::Json(payload): extract::Json<ActionStatusQuery>,
 ) -> Result<NoContent, StatusCode> {
     let uuid = payload.uuid;
+    let plan_id = payload.plan_id;
 
     let conn = match state.connection_factory.open().await {
         Ok(conn) => conn,
@@ -363,7 +376,7 @@ async fn action_success(
     };
     let director = Director::new(&conn);
 
-    match director.mark_action_success(&uuid).await {
+    match director.mark_action_success(&uuid, plan_id).await {
         Ok(_) => Ok(NoContent),
         Err(e) => {
             warn!("Couldn't mark action success for {uuid}: {e}");
@@ -379,6 +392,7 @@ async fn action_failed(
 ) -> Result<NoContent, StatusCode> {
     let uuid = payload.uuid;
     let error_message = payload.error_message;
+    let plan_id = payload.plan_id;
 
     let conn = match state.connection_factory.open().await {
         Ok(conn) => conn,
@@ -386,7 +400,10 @@ async fn action_failed(
     };
     let director = Director::new(&conn);
 
-    match director.mark_action_failed(&uuid, &error_message).await {
+    match director
+        .mark_action_failed(&uuid, &error_message, plan_id)
+        .await
+    {
         Ok(_) => Ok(NoContent),
         Err(e) => {
             warn!("Couldn't mark action failed for {uuid}: {e}");
@@ -875,7 +892,10 @@ mod tests {
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
         ));
 
-        let payload = ActionStatusQuery { uuid: test_uuid };
+        let payload = ActionStatusQuery {
+            uuid: test_uuid,
+            plan_id: None,
+        };
 
         let request = Request::builder()
             .method("POST")
@@ -918,6 +938,7 @@ mod tests {
         let payload = ActionFailedQuery {
             uuid: test_uuid,
             error_message: "Installation failed".to_string(),
+            plan_id: None,
         };
 
         let request = Request::builder()
@@ -949,7 +970,10 @@ mod tests {
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
         ));
 
-        let payload = ActionStatusQuery { uuid: test_uuid };
+        let payload = ActionStatusQuery {
+            uuid: test_uuid,
+            plan_id: None,
+        };
 
         let request = Request::builder()
             .method("POST")
@@ -959,9 +983,7 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        // No active plan is now a silent no-op (plan may have been cancelled while agent
-        // was in-flight), so the handler returns 204 NoContent rather than 500.
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
@@ -1122,7 +1144,10 @@ mod tests {
         );
 
         // Simulate agent reporting success for first action (discover_hardware)
-        let success_payload = ActionStatusQuery { uuid: test_uuid };
+        let success_payload = ActionStatusQuery {
+            uuid: test_uuid,
+            plan_id: None,
+        };
 
         let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
             "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),

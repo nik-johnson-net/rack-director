@@ -13,7 +13,10 @@ use common::cnc::CncClient;
 /// 2. Fetches the resolved disk layout from rack-director
 /// 3. Applies the layout using parted, lvm, zfs, and mkfs
 /// 4. Reports success or failure to rack-director
-pub async fn partition_disks(client: &CncClient) -> Result<()> {
+///
+/// `plan_id` is forwarded to success/failure reports so rack-director can
+/// discard stale reports from a previously-cancelled plan.
+pub async fn partition_disks(client: &CncClient, plan_id: Option<i64>) -> Result<()> {
     info!("Starting disk partitioning...");
 
     // Get device UUID
@@ -30,7 +33,7 @@ pub async fn partition_disks(client: &CncClient) -> Result<()> {
         Err(e) => {
             let error_msg = format!("Failed to fetch disk layout: {}", e);
             log::error!("{}", error_msg);
-            client.action_failed(&uuid, &error_msg).await?;
+            client.action_failed(&uuid, &error_msg, plan_id).await?;
             return Err(e);
         }
     };
@@ -41,7 +44,7 @@ pub async fn partition_disks(client: &CncClient) -> Result<()> {
     if let Err(e) = apply_disk_layout(&layout).await {
         let error_msg = format!("Disk partitioning failed: {}", e);
         log::error!("{}", error_msg);
-        client.action_failed(&uuid, &error_msg).await?;
+        client.action_failed(&uuid, &error_msg, plan_id).await?;
         return Err(e);
     }
 
@@ -51,13 +54,13 @@ pub async fn partition_disks(client: &CncClient) -> Result<()> {
     match verify_disk_layout(&layout).await {
         Ok(()) => {
             info!("Disk layout verification passed");
-            client.action_success(&uuid).await?;
+            client.action_success(&uuid, plan_id).await?;
             Ok(())
         }
         Err(e) => {
             let error_msg = format!("Disk layout verification failed: {}", e);
             log::error!("{}", error_msg);
-            client.action_failed(&uuid, &error_msg).await?;
+            client.action_failed(&uuid, &error_msg, plan_id).await?;
             Err(e)
         }
     }

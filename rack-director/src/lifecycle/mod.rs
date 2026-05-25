@@ -150,8 +150,9 @@ impl LifecycleManager {
             (Unprovisioned, Broken) |
             (Provisioned, Broken) |
 
-            // Repair transition
-            (Broken, Unprovisioned)
+            // Repair/reprovision transitions from Broken
+            (Broken, Unprovisioned) |
+            (Broken, Provisioned)
         )
     }
 
@@ -167,6 +168,7 @@ impl LifecycleManager {
             (Provisioned, Unprovisioned) => Some(TransitionType::Deprovision),
             (Unprovisioned, Removed) => Some(TransitionType::Remove),
             (Broken, Unprovisioned) => Some(TransitionType::Repair),
+            (Broken, Provisioned) => Some(TransitionType::Provision),
             (_, Broken) => None, // Automatic transition on failure
             _ => None,
         }
@@ -233,10 +235,14 @@ mod tests {
             &Broken
         ));
 
-        // Repair transition
+        // Repair/reprovision transitions from Broken
         assert!(LifecycleManager::is_transition_allowed(
             &Broken,
             &Unprovisioned
+        ));
+        assert!(LifecycleManager::is_transition_allowed(
+            &Broken,
+            &Provisioned
         ));
     }
 
@@ -252,10 +258,6 @@ mod tests {
             &Removed
         ));
         assert!(!LifecycleManager::is_transition_allowed(&Removed, &New));
-        assert!(!LifecycleManager::is_transition_allowed(
-            &Broken,
-            &Provisioned
-        ));
     }
 
     #[test]
@@ -281,6 +283,10 @@ mod tests {
         assert_eq!(
             LifecycleManager::get_transition_type(&Broken, &Unprovisioned),
             Some(TransitionType::Repair)
+        );
+        assert_eq!(
+            LifecycleManager::get_transition_type(&Broken, &Provisioned),
+            Some(TransitionType::Provision)
         );
     }
 

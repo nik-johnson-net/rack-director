@@ -93,6 +93,13 @@ pub async fn cancel_active_plan_for_device(conn: &Connection, device_uuid: &Uuid
             (now, *device_uuid),
         )
         .await?;
+    if rows > 1 {
+        log::warn!(
+            "cancel_active_plan_for_device: cancelled {} plans for device {} — expected at most 1 (data integrity violation?)",
+            rows,
+            device_uuid
+        );
+    }
     Ok(rows > 0)
 }
 

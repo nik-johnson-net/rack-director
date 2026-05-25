@@ -56,13 +56,17 @@ async fn main() {
 
     let client = common::cnc::CncClient::new(&director_url);
 
-    // Determine which action to run: from CLI, from args.action, or from /proc/cmdline
+    // Determine which action to run: from CLI, from args.action, or from /proc/cmdline.
+    // When invoked directly (not from the daemon poll loop) there is no plan_id available,
+    // so we pass None and rely on the server to match by device UUID only.
     let result = if let Some(command) = args.command {
         // CLI subcommand takes precedence
         match command {
-            Command::DeviceScan(device_args) => scan::device_scan(&client, &device_args).await,
-            Command::ConfigureBmc => bmc::bmc_configure(&client).await,
-            Command::PartitionDisks => partition::partition_disks(&client).await,
+            Command::DeviceScan(device_args) => {
+                scan::device_scan(&client, &device_args, None).await
+            }
+            Command::ConfigureBmc => bmc::bmc_configure(&client, None).await,
+            Command::PartitionDisks => partition::partition_disks(&client, None).await,
             Command::Daemon => daemon::run_daemon(&client).await,
             Command::Console => start_console_command(&client).await,
         }
@@ -77,10 +81,10 @@ async fn main() {
         match action.as_str() {
             "device-scan" => {
                 let device_args = scan::DeviceScanArgs::new(false);
-                scan::device_scan(&client, &device_args).await
+                scan::device_scan(&client, &device_args, None).await
             }
-            "configure-bmc" => bmc::bmc_configure(&client).await,
-            "partition-disks" => partition::partition_disks(&client).await,
+            "configure-bmc" => bmc::bmc_configure(&client, None).await,
+            "partition-disks" => partition::partition_disks(&client, None).await,
             "daemon" => daemon::run_daemon(&client).await,
             "console" => start_console_command(&client).await,
             _ => {

@@ -494,7 +494,10 @@ async fn configure_ipmi_user(channel: u8, username: &str, password: &str) -> Res
 /// 2. Fetches BMC configuration from rack-director
 /// 3. Applies the configuration using ipmitool (tries detected LAN channels)
 /// 4. Reports success or failure to rack-director
-pub async fn bmc_configure(client: &CncClient) -> Result<()> {
+///
+/// `plan_id` is forwarded to success/failure reports so rack-director can
+/// discard stale reports from a previously-cancelled plan.
+pub async fn bmc_configure(client: &CncClient, plan_id: Option<i64>) -> Result<()> {
     info!("Starting BMC configuration...");
 
     // Get device UUID
@@ -511,13 +514,13 @@ pub async fn bmc_configure(client: &CncClient) -> Result<()> {
         Ok(None) => {
             // No BMC configuration is set for this device - not an error condition
             info!("No BMC configuration found for device, skipping BMC configuration");
-            client.action_success(&uuid).await?;
+            client.action_success(&uuid, plan_id).await?;
             return Ok(());
         }
         Err(e) => {
             let error_msg = format!("Failed to fetch BMC configuration: {}", e);
             log::error!("{}", error_msg);
-            client.action_failed(&uuid, &error_msg).await?;
+            client.action_failed(&uuid, &error_msg, plan_id).await?;
             return Err(e);
         }
     };
@@ -536,7 +539,7 @@ pub async fn bmc_configure(client: &CncClient) -> Result<()> {
     let bmc_present = scan_bmc().await.ok().flatten().is_some();
     if !bmc_present {
         info!("No BMC hardware detected, skipping BMC configuration");
-        client.action_success(&uuid).await?;
+        client.action_success(&uuid, plan_id).await?;
         return Ok(());
     }
 
@@ -549,7 +552,7 @@ pub async fn bmc_configure(client: &CncClient) -> Result<()> {
         match configure_bmc(&bmc_config, channel).await {
             Ok(()) => {
                 info!("BMC configured successfully on channel {}", channel);
-                client.action_success(&uuid).await?;
+                client.action_success(&uuid, plan_id).await?;
                 return Ok(());
             }
             Err(e) => {
@@ -565,7 +568,7 @@ pub async fn bmc_configure(client: &CncClient) -> Result<()> {
         last_error.unwrap()
     );
     log::error!("{}", error_msg);
-    client.action_failed(&uuid, &error_msg).await?;
+    client.action_failed(&uuid, &error_msg, plan_id).await?;
     Err(anyhow!(error_msg))
 }
 
