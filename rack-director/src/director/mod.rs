@@ -299,16 +299,16 @@ impl<'a> Director<'a> {
         };
 
         // If the agent included a plan_id, verify it matches the active plan
-        if let Some(rid) = reported_plan_id {
-            if plan.id != Some(rid) {
-                log::warn!(
-                    "action_success for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
-                    device_uuid,
-                    rid,
-                    plan.id
-                );
-                return Ok(());
-            }
+        if let Some(rid) = reported_plan_id
+            && plan.id != Some(rid)
+        {
+            log::warn!(
+                "action_success for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
+                device_uuid,
+                rid,
+                plan.id
+            );
+            return Ok(());
         }
 
         // Start the plan if it's pending
@@ -367,16 +367,16 @@ impl<'a> Director<'a> {
         };
 
         // If the agent included a plan_id, verify it matches the active plan
-        if let Some(rid) = reported_plan_id {
-            if plan.id != Some(rid) {
-                log::warn!(
-                    "action_failed for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
-                    device_uuid,
-                    rid,
-                    plan.id
-                );
-                return Ok(());
-            }
+        if let Some(rid) = reported_plan_id
+            && plan.id != Some(rid)
+        {
+            log::warn!(
+                "action_failed for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
+                device_uuid,
+                rid,
+                plan.id
+            );
+            return Ok(());
         }
 
         // Mark current action as failed

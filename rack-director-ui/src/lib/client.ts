@@ -261,7 +261,7 @@ export type DiskConfig = {
 export type LogicalVolume = {
   name: string;
   size: string;              // "50G", "100%FREE"
-  filesystem: string;
+  filesystem?: string;       // undefined for raw LVs (e.g. Ceph OSDs)
   mount_point?: string;
 };
 
@@ -493,18 +493,6 @@ export async function cancelDeviceTransition(uuid: string): Promise<void> {
   if (!response.ok) {
     return handleApiError(response, 'Failed to cancel transition');
   }
-}
-
-export async function cancelDeviceTransition(uuid: string): Promise<void> {
-  return fetch(`/ui/devices/${uuid}/lifecycle/cancel`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-  }).then((response) => {
-    if (!response.ok) {
-      console.error('Error cancelling device transition:', response.statusText);
-      throw new Error('Failed to cancel transition');
-    }
-  });
 }
 
 export async function getDeviceTransitions(uuid: string, includeCompleted: boolean = false): Promise<LifecycleTransition[]> {

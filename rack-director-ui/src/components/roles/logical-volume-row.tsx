@@ -6,6 +6,14 @@ import { Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import type { LogicalVolume } from "@/lib/client";
 import { selectClassName, BASE_FILESYSTEM_OPTIONS } from "./styles";
 
+// Sentinel select value representing a raw LV with no filesystem (e.g. Ceph OSD).
+const NO_FILESYSTEM = "__none__";
+
+const FILESYSTEM_OPTIONS = [
+  ...BASE_FILESYSTEM_OPTIONS,
+  { value: NO_FILESYSTEM, label: "— None (raw / Ceph)" },
+];
+
 interface LogicalVolumeRowProps {
   lv: LogicalVolume;
   lvIndex: number;
@@ -34,8 +42,20 @@ export default function LogicalVolumeRow({
   const filesystemError = errors?.[`${errorPrefix}.filesystem`];
   const mountPointError = errors?.[`${errorPrefix}.mount_point`];
 
-  const showMountPoint = lv.filesystem !== "swap";
+  const showMountPoint = lv.filesystem !== "swap" && lv.filesystem !== undefined;
   const sizeDisplay = lv.size || "—";
+
+  function handleFilesystemChange(val: string) {
+    onClearError?.(`${errorPrefix}.filesystem`);
+    if (val === NO_FILESYSTEM) {
+      onUpdate({ filesystem: undefined, mount_point: undefined });
+    } else {
+      onUpdate({
+        filesystem: val,
+        mount_point: val === "swap" ? undefined : lv.mount_point,
+      });
+    }
+  }
 
   return (
     <>
@@ -51,7 +71,7 @@ export default function LogicalVolumeRow({
           {sizeDisplay}
         </td>
         <td className="px-3 py-1.5 text-xs text-text-secondary">
-          {lv.filesystem}
+          {lv.filesystem ?? <span className="text-text-muted">raw</span>}
         </td>
         <td className="px-3 py-1.5 text-xs text-text-secondary font-mono">
           {lv.name || <span className="text-text-muted italic">unnamed</span>}
@@ -146,23 +166,16 @@ export default function LogicalVolumeRow({
                 {/* Filesystem */}
                 <div className="space-y-1">
                   <Label htmlFor={`lv-fs-${errorPrefix}`} className="text-xs text-text-secondary uppercase tracking-[0.5px]">
-                    Filesystem *
+                    Filesystem
                   </Label>
                   <select
                     id={`lv-fs-${errorPrefix}`}
-                    value={lv.filesystem}
-                    onChange={(e) => {
-                      onClearError?.(`${errorPrefix}.filesystem`);
-                      const newFs = e.target.value;
-                      onUpdate({
-                        filesystem: newFs,
-                        mount_point: newFs === "swap" ? undefined : lv.mount_point,
-                      });
-                    }}
+                    value={lv.filesystem ?? NO_FILESYSTEM}
+                    onChange={(e) => handleFilesystemChange(e.target.value)}
                     className={selectClassName}
                     aria-invalid={!!filesystemError}
                   >
-                    {BASE_FILESYSTEM_OPTIONS.map((opt) => (
+                    {FILESYSTEM_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>
                         {opt.label}
                       </option>
