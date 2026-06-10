@@ -69,7 +69,7 @@ pub struct PartitionContext {
 /// - `{{ this.vg_name }}` - Volume group name
 /// - `{{ this.lv_name }}` - Logical volume name
 /// - `{{ this.size }}` - LV size string
-/// - `{{ this.filesystem }}` - Filesystem type
+/// - `{{ this.filesystem }}` - Filesystem type, or null for raw LVs (e.g. Ceph)
 /// - `{{ this.mount_point }}` - Mount point, or null
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LogicalVolumeContext {
