@@ -78,7 +78,7 @@ pub struct LogicalVolumeContext {
     pub vg_name: String,
     pub lv_name: String,
     pub size: String,
-    pub filesystem: String,
+    pub filesystem: Option<String>,
     pub mount_point: Option<String>,
 }
 
@@ -430,13 +430,13 @@ mod tests {
                     LogicalVolume {
                         name: "root".to_string(),
                         size: "50G".to_string(),
-                        filesystem: "ext4".to_string(),
+                        filesystem: Some("ext4".to_string()),
                         mount_point: Some("/".to_string()),
                     },
                     LogicalVolume {
                         name: "swap".to_string(),
                         size: "8G".to_string(),
-                        filesystem: "swap".to_string(),
+                        filesystem: Some("swap".to_string()),
                         mount_point: None,
                     },
                 ],
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(logical_volumes[0].vg_name, "vg0");
         assert_eq!(logical_volumes[0].lv_name, "root");
         assert_eq!(logical_volumes[0].size, "50G");
-        assert_eq!(logical_volumes[0].filesystem, "ext4");
+        assert_eq!(logical_volumes[0].filesystem, Some("ext4".to_string()));
         assert_eq!(logical_volumes[0].mount_point, Some("/".to_string()));
 
         assert_eq!(logical_volumes[1].device, "/dev/vg0/swap");
@@ -541,7 +541,7 @@ mod tests {
                 logical_volumes: vec![LogicalVolume {
                     name: "home".to_string(),
                     size: "100%FREE".to_string(),
-                    filesystem: "xfs".to_string(),
+                    filesystem: Some("xfs".to_string()),
                     mount_point: Some("/home".to_string()),
                 }],
             }]),
@@ -651,13 +651,13 @@ mod tests {
                     LogicalVolume {
                         name: "root".to_string(),
                         size: "14G".to_string(),
-                        filesystem: "xfs".to_string(),
+                        filesystem: Some("xfs".to_string()),
                         mount_point: Some("/".to_string()),
                     },
                     LogicalVolume {
                         name: "swap".to_string(),
                         size: "2G".to_string(),
-                        filesystem: "swap".to_string(),
+                        filesystem: Some("swap".to_string()),
                         mount_point: None,
                     },
                 ],

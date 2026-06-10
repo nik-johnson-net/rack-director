@@ -235,9 +235,12 @@ async fn setup_volume_group(vg: &VolumeGroup, disks: &[DiskConfig]) -> Result<()
             .await?;
         }
 
-        // Format the logical volume
-        let lv_path = format!("/dev/{}/{}", vg.name, lv.name);
-        format_filesystem(&lv_path, &lv.filesystem).await?;
+        // Format the logical volume, unless it has no filesystem (e.g. a raw
+        // LV consumed by Ceph or another subsystem).
+        if let Some(ref fs) = lv.filesystem {
+            let lv_path = format!("/dev/{}/{}", vg.name, lv.name);
+            format_filesystem(&lv_path, fs).await?;
+        }
     }
 
     Ok(())

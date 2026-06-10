@@ -251,7 +251,11 @@ fn validate_logical_volume_filesystems(
     errors: &mut HashMap<String, String>,
 ) {
     for (j, lv) in vg.logical_volumes.iter().enumerate() {
-        if !VALID_FILESYSTEMS.contains(&lv.filesystem.as_str()) {
+        // A logical volume may omit its filesystem (e.g. a raw LV consumed by
+        // Ceph). Only validate the value when one is specified.
+        if let Some(fs) = lv.filesystem.as_deref()
+            && !VALID_FILESYSTEMS.contains(&fs)
+        {
             errors.insert(
                 format!(
                     "volume_groups.{}.logical_volumes.{}.filesystem",
@@ -259,7 +263,7 @@ fn validate_logical_volume_filesystems(
                 ),
                 format!(
                     "Invalid filesystem '{}'. Valid options: ext4, xfs, btrfs, vfat, swap",
-                    lv.filesystem
+                    fs
                 ),
             );
         }
@@ -674,7 +678,7 @@ mod tests {
                 logical_volumes: vec![LogicalVolume {
                     name: "root".to_string(),
                     size: "rest".to_string(),
-                    filesystem: "ext4".to_string(),
+                    filesystem: Some("ext4".to_string()),
                     mount_point: Some("/".to_string()),
                 }],
             }]),
@@ -757,7 +761,7 @@ mod tests {
                 logical_volumes: vec![LogicalVolume {
                     name: "root".to_string(),
                     size: "rest".to_string(),
-                    filesystem: "ext4".to_string(),
+                    filesystem: Some("ext4".to_string()),
                     mount_point: Some("/".to_string()),
                 }],
             }]),
@@ -796,7 +800,7 @@ mod tests {
                 logical_volumes: vec![LogicalVolume {
                     name: "root".to_string(),
                     size: "rest".to_string(),
-                    filesystem: "fat32".to_string(), // invalid
+                    filesystem: Some("fat32".to_string()), // invalid
                     mount_point: Some("/".to_string()),
                 }],
             }]),
@@ -807,6 +811,36 @@ mod tests {
         let errors = result.unwrap_err();
         assert!(errors.contains_key("volume_groups.0.logical_volumes.0.filesystem"));
         assert!(errors["volume_groups.0.logical_volumes.0.filesystem"].contains("fat32"));
+    }
+
+    #[test]
+    fn test_lv_without_filesystem_is_ok() {
+        // A raw LV (e.g. consumed by Ceph) omits its filesystem.
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "lvm".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                    flags: Some(vec!["lvm".to_string()]),
+                    volume_group: Some("vg0".to_string()),
+                }],
+            }],
+            volume_groups: Some(vec![VolumeGroup {
+                name: "vg0".to_string(),
+                logical_volumes: vec![LogicalVolume {
+                    name: "osd0".to_string(),
+                    size: "100%FREE".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                }],
+            }]),
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, None).is_ok());
     }
 
     #[test]
@@ -840,13 +874,13 @@ mod tests {
                     LogicalVolume {
                         name: "root".to_string(),
                         size: "50G".to_string(),
-                        filesystem: "ext4".to_string(),
+                        filesystem: Some("ext4".to_string()),
                         mount_point: Some("/".to_string()),
                     },
                     LogicalVolume {
                         name: "swap".to_string(),
                         size: "8G".to_string(),
-                        filesystem: "swap".to_string(),
+                        filesystem: Some("swap".to_string()),
                         mount_point: None,
                     },
                 ],
