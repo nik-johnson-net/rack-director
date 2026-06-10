@@ -219,6 +219,13 @@ mod tests {
                     },
                     LogicalVolume {
                         name: "home".to_string(),
+                        size: "50G".to_string(),
+                        filesystem: Some("ext4".to_string()),
+                        mount_point: Some("/home".to_string()),
+                    },
+                    // Raw LV with no filesystem (e.g. consumed by Ceph).
+                    LogicalVolume {
+                        name: "ceph".to_string(),
                         size: "100%FREE".to_string(),
                         filesystem: None,
                         mount_point: None,
