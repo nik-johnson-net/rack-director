@@ -11,11 +11,15 @@ pub async fn start_console_command(client: &CncClient) -> Result<()> {
     let uuid = scan::read_dmi_for_uuid()
         .await?
         .ok_or(anyhow!("uuid not found"))?;
-    start_console(client, &uuid).await
+    // No plan_id when invoked standalone (not from daemon poll loop)
+    start_console(client, &uuid, None).await
 }
 
 // Start the console when the UUID can be provided. Saves a DMI table scan.
-pub async fn start_console(client: &CncClient, uuid: &str) -> Result<()> {
+//
+// `plan_id` is forwarded to the success report so rack-director can discard
+// stale reports from a previously-cancelled plan.
+pub async fn start_console(client: &CncClient, uuid: &str, plan_id: Option<i64>) -> Result<()> {
     info!("Starting console");
     let mut process = tokio::process::Command::new("bash")
         .env("PS0", "#> ")
@@ -26,7 +30,7 @@ pub async fn start_console(client: &CncClient, uuid: &str) -> Result<()> {
         .expect("failed to start bash");
 
     // Set success
-    client.action_success(uuid).await?;
+    client.action_success(uuid, plan_id).await?;
 
     // Wait for process to exit
     let exit_code = loop {

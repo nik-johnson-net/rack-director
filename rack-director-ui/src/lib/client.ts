@@ -28,6 +28,9 @@ export async function handleApiError(response: Response, defaultMessage: string)
     if (errorData && errorData.errors) {
       throw new ValidationError(errorData.errors);
     }
+    if (errorData && errorData.error) {
+      throw new Error(errorData.error);
+    }
   }
 
   // Fallback to generic error
@@ -471,18 +474,25 @@ export async function getDeviceLifecycle(uuid: string): Promise<DeviceLifecycle 
 }
 
 export async function transitionDeviceLifecycle(uuid: string, toState: DeviceLifecycle): Promise<{ transition_id: number; message: string }> {
-  return fetch(`/ui/devices/${uuid}/lifecycle/transition`, {
+  const response = await fetch(`/ui/devices/${uuid}/lifecycle/transition`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ to_state: toState })
-  }).then((response) => {
-    if (response.ok) {
-      return response.json();
-    } else {
-      console.error('Error transitioning device lifecycle:', response.statusText);
-      throw new Error('Failed to transition device lifecycle');
-    }
   });
+  if (response.ok) {
+    return response.json();
+  }
+  return handleApiError(response, 'Failed to transition device lifecycle');
+}
+
+export async function cancelDeviceTransition(uuid: string): Promise<void> {
+  const response = await fetch(`/ui/devices/${uuid}/lifecycle/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!response.ok) {
+    return handleApiError(response, 'Failed to cancel transition');
+  }
 }
 
 export async function cancelDeviceTransition(uuid: string): Promise<void> {

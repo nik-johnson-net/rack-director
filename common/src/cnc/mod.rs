@@ -16,12 +16,14 @@ struct UpdateAttributesPayload<'a> {
 #[derive(Serialize)]
 struct ActionStatusPayload<'a> {
     uuid: &'a str,
+    plan_id: Option<i64>,
 }
 
 #[derive(Serialize)]
 struct ActionFailedPayload<'a> {
     uuid: &'a str,
     error_message: &'a str,
+    plan_id: Option<i64>,
 }
 
 /// HTTP client for rack-director's CNC (command-and-control) endpoints.
@@ -71,10 +73,14 @@ impl CncClient {
 
     /// Report that the current action completed successfully.
     ///
-    /// Sends a `POST /cnc/action_success` with the device UUID. rack-director
-    /// will advance the device's provisioning plan to the next action.
-    pub async fn action_success(&self, uuid: &str) -> Result<()> {
-        let payload = ActionStatusPayload { uuid };
+    /// Sends a `POST /cnc/action_success` with the device UUID and the optional
+    /// `plan_id` received from the poll response. rack-director will advance the
+    /// device's provisioning plan to the next action.
+    ///
+    /// Providing `plan_id` allows rack-director to detect and discard stale
+    /// reports from agents that were executing a since-cancelled plan.
+    pub async fn action_success(&self, uuid: &str, plan_id: Option<i64>) -> Result<()> {
+        let payload = ActionStatusPayload { uuid, plan_id };
 
         let response = self
             .client
@@ -92,12 +98,22 @@ impl CncClient {
 
     /// Report that the current action failed.
     ///
-    /// Sends a `POST /cnc/action_failed` with the device UUID and a
-    /// human-readable error message. rack-director will mark the plan as failed.
-    pub async fn action_failed(&self, uuid: &str, error_message: &str) -> Result<()> {
+    /// Sends a `POST /cnc/action_failed` with the device UUID, a human-readable
+    /// error message, and the optional `plan_id` received from the poll response.
+    /// rack-director will mark the plan as failed.
+    ///
+    /// Providing `plan_id` allows rack-director to detect and discard stale
+    /// reports from agents that were executing a since-cancelled plan.
+    pub async fn action_failed(
+        &self,
+        uuid: &str,
+        error_message: &str,
+        plan_id: Option<i64>,
+    ) -> Result<()> {
         let payload = ActionFailedPayload {
             uuid,
             error_message,
+            plan_id,
         };
 
         let response = self
@@ -308,7 +324,24 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let result = client.action_success("test-uuid").await;
+        let result = client.action_success("test-uuid", Some(42)).await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+    }
+
+    /// Posting action_success without plan_id also succeeds.
+    #[tokio::test]
+    async fn test_action_success_ok_no_plan_id() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/cnc/action_success")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = CncClient::new(&server.url());
+        let result = client.action_success("test-uuid", None).await;
 
         mock.assert_async().await;
         assert!(result.is_ok());
@@ -325,7 +358,7 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let result = client.action_success("test-uuid").await;
+        let result = client.action_success("test-uuid", None).await;
 
         mock.assert_async().await;
         assert!(result.is_err());
@@ -346,7 +379,26 @@ mod tests {
 
         let client = CncClient::new(&server.url());
         let result = client
-            .action_failed("test-uuid", "something went wrong")
+            .action_failed("test-uuid", "something went wrong", Some(7))
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
+    }
+
+    /// Posting action_failed without plan_id also succeeds.
+    #[tokio::test]
+    async fn test_action_failed_ok_no_plan_id() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/cnc/action_failed")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = CncClient::new(&server.url());
+        let result = client
+            .action_failed("test-uuid", "something went wrong", None)
             .await;
 
         mock.assert_async().await;
@@ -364,7 +416,7 @@ mod tests {
             .await;
 
         let client = CncClient::new(&server.url());
-        let result = client.action_failed("test-uuid", "oops").await;
+        let result = client.action_failed("test-uuid", "oops", None).await;
 
         mock.assert_async().await;
         assert!(result.is_err());
@@ -592,7 +644,7 @@ mod tests {
 
         mock.assert_async().await;
         assert!(result.is_ok());
-        let PollResponse::Action { payload } = result.unwrap().unwrap();
+        let PollResponse::Action { payload, .. } = result.unwrap().unwrap();
         assert_eq!(payload, PollAction::DiscoverHardware);
     }
 
@@ -682,7 +734,7 @@ mod tests {
             let result = client.poll("any-uuid").await;
             mock.assert_async().await;
             assert!(result.is_ok(), "Expected Ok for body: {}", body);
-            let PollResponse::Action { payload } = result.unwrap().unwrap();
+            let PollResponse::Action { payload, .. } = result.unwrap().unwrap();
             assert_eq!(payload, expected_action, "Mismatch for body: {}", body);
         }
     }

@@ -24,5 +24,13 @@ pub enum PollAction {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PollResponse {
-    Action { payload: PollAction },
+    Action {
+        payload: PollAction,
+        /// The database ID of the active plan this action belongs to.
+        ///
+        /// Agents should echo this back in `action_success` / `action_failed`
+        /// requests so that rack-director can reject stale reports that arrive
+        /// after the plan has been cancelled and a new plan created.
+        plan_id: Option<i64>,
+    },
 }

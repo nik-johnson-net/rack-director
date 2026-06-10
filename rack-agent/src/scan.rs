@@ -590,7 +590,11 @@ fn extract_udevadm_id_wwn(output: &str, device_name: &str) -> Option<String> {
     None
 }
 
-pub async fn device_scan(client: &CncClient, scan_args: &DeviceScanArgs) -> Result<()> {
+pub async fn device_scan(
+    client: &CncClient,
+    scan_args: &DeviceScanArgs,
+    plan_id: Option<i64>,
+) -> Result<()> {
     info!("Starting device hardware scan...");
 
     let hardware_info = read_dmi().await?;
@@ -603,13 +607,13 @@ pub async fn device_scan(client: &CncClient, scan_args: &DeviceScanArgs) -> Resu
     info!("Discovered device UUID: {}", uuid);
 
     // From this point on, if we encounter errors, we should report them to the server
-    let result = perform_scan_and_upload(client, uuid, &hardware_info, scan_args).await;
+    let result = perform_scan_and_upload(client, uuid, &hardware_info, scan_args, plan_id).await;
 
     if let Err(e) = &result {
         log::error!("Hardware scan failed: {}", e);
         if !scan_args.no_upload {
             // Try to report the failure to the server
-            if let Err(report_err) = client.action_failed(uuid, &e.to_string()).await {
+            if let Err(report_err) = client.action_failed(uuid, &e.to_string(), plan_id).await {
                 log::error!("Failed to report action failure to server: {}", report_err);
             }
         }
@@ -640,6 +644,7 @@ async fn perform_scan_and_upload(
     uuid: &str,
     hardware_info: &HardwareInfo,
     scan_args: &DeviceScanArgs,
+    plan_id: Option<i64>,
 ) -> Result<()> {
     // Build DeviceAttributes struct for type-safe attribute updates
     let mut attributes = DeviceAttributes {
@@ -752,7 +757,7 @@ async fn perform_scan_and_upload(
         client.update_attributes(uuid, &attributes).await?;
 
         info!("Reporting discovery action success...");
-        client.action_success(uuid).await?;
+        client.action_success(uuid, plan_id).await?;
 
         info!("Hardware discovery completed successfully");
     } else {

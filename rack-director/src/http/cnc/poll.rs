@@ -70,7 +70,10 @@ pub async fn poll_handler(
     };
 
     let payload = PollAction::from(action);
-    let response = PollResponse::Action { payload };
+    let response = PollResponse::Action {
+        payload,
+        plan_id: plan.id,
+    };
 
     Ok((StatusCode::OK, Json(response)).into_response())
 }
@@ -218,11 +221,25 @@ mod tests {
     fn test_poll_action_serialization() {
         let response = PollResponse::Action {
             payload: PollAction::DiscoverHardware,
+            plan_id: Some(42),
         };
         let json = serde_json::to_string(&response).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"action","payload":{"type":"discover_hardware"}}"#
+            r#"{"type":"action","payload":{"type":"discover_hardware"},"plan_id":42}"#
+        );
+    }
+
+    #[test]
+    fn test_poll_action_serialization_no_plan_id() {
+        let response = PollResponse::Action {
+            payload: PollAction::DiscoverHardware,
+            plan_id: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"action","payload":{"type":"discover_hardware"},"plan_id":null}"#
         );
     }
 

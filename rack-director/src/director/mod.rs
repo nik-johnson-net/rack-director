@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::database::Connection;
 use crate::director::store::generate_hostname_from_uuid;
-use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleTransition};
+use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleTransition, TransitionType};
 use crate::plans::actions::BootTarget;
 use crate::plans::{Plan, PlanStatus};
 use crate::{platforms, roles};
@@ -270,7 +270,18 @@ impl<'a> Director<'a> {
         Ok(())
     }
 
-    pub async fn mark_action_success(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
+    /// Mark the current action for a device as successful, advancing the plan.
+    ///
+    /// If `reported_plan_id` is `Some`, it is verified against the active plan's
+    /// ID. A mismatch means the report is stale (sent by an agent that was
+    /// running a since-cancelled plan), and the call is silently ignored so that
+    /// the new plan is not corrupted. When `reported_plan_id` is `None` (old
+    /// agent versions), the report is applied unconditionally.
+    pub async fn mark_action_success(
+        &self,
+        device_uuid: &Uuid,
+        reported_plan_id: Option<i64>,
+    ) -> anyhow::Result<()> {
         // Get the current active plan
         let mut plan = match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
             .await?
@@ -286,6 +297,19 @@ impl<'a> Director<'a> {
                 return Ok(());
             }
         };
+
+        // If the agent included a plan_id, verify it matches the active plan
+        if let Some(rid) = reported_plan_id {
+            if plan.id != Some(rid) {
+                log::warn!(
+                    "action_success for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
+                    device_uuid,
+                    rid,
+                    plan.id
+                );
+                return Ok(());
+            }
+        }
 
         // Start the plan if it's pending
         if plan.status == PlanStatus::Pending {
@@ -314,10 +338,18 @@ impl<'a> Director<'a> {
         Ok(())
     }
 
+    /// Mark the current action for a device as failed, failing the plan.
+    ///
+    /// If `reported_plan_id` is `Some`, it is verified against the active plan's
+    /// ID. A mismatch means the report is stale (sent by an agent that was
+    /// running a since-cancelled plan), and the call is silently ignored so that
+    /// the new plan is not corrupted. When `reported_plan_id` is `None` (old
+    /// agent versions), the report is applied unconditionally.
     pub async fn mark_action_failed(
         &self,
         device_uuid: &Uuid,
         error_message: &str,
+        reported_plan_id: Option<i64>,
     ) -> anyhow::Result<()> {
         // Get the current active plan
         let mut plan = match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
@@ -333,6 +365,19 @@ impl<'a> Director<'a> {
                 return Ok(());
             }
         };
+
+        // If the agent included a plan_id, verify it matches the active plan
+        if let Some(rid) = reported_plan_id {
+            if plan.id != Some(rid) {
+                log::warn!(
+                    "action_failed for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
+                    device_uuid,
+                    rid,
+                    plan.id
+                );
+                return Ok(());
+            }
+        }
 
         // Mark current action as failed
         let _result = plan.mark_action_failed(error_message.to_string());
@@ -450,6 +495,18 @@ impl<'a> Director<'a> {
         let transition_type = LifecycleManager::get_transition_type(&current_lifecycle, &to_state)
             .ok_or_else(|| anyhow::anyhow!("Cannot determine transition type"))?;
 
+        // Validate that a Provision transition has a Role assigned.
+        // Both PartitionDisks and InstallOs require a Role for disk layout and OS configuration.
+        if transition_type == TransitionType::Provision {
+            let device = store::get_device(self.conn, device_uuid).await?;
+            if device.role_id.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Cannot provision device {}: no Role is assigned. Assign a Role before reprovisioning.",
+                    device_uuid
+                ));
+            }
+        }
+
         // Create plan for this transition
         let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
         let plan = Plan::new(*device_uuid, actions);
@@ -522,20 +579,30 @@ impl<'a> Director<'a> {
         if let Some(transition) =
             crate::lifecycle::store::get_transition_by_plan_id(self.conn, plan_id).await?
         {
+            // Complete the transition first so the row-count acts as a CAS gate.
+            // If a cancel raced us and already closed the transition, rows == 0
+            // and we must NOT overwrite the Broken lifecycle with the success state.
+            let rows = crate::lifecycle::store::complete_transition(
+                self.conn,
+                transition.id.unwrap(),
+                true,
+                None,
+            )
+            .await?;
+
+            if rows == 0 {
+                log::warn!(
+                    "complete_transition returned 0 rows for device {} — transition already closed (cancel race); skipping lifecycle update",
+                    transition.device_uuid
+                );
+                return Ok(());
+            }
+
             // Update device lifecycle to the target state
             crate::lifecycle::store::update_device_lifecycle(
                 self.conn,
                 &transition.device_uuid,
                 transition.to_state.clone(),
-            )
-            .await?;
-
-            // Complete the transition successfully
-            crate::lifecycle::store::complete_transition(
-                self.conn,
-                transition.id.unwrap(),
-                true,
-                None,
             )
             .await?;
         }
@@ -552,20 +619,30 @@ impl<'a> Director<'a> {
         if let Some(transition) =
             crate::lifecycle::store::get_transition_by_plan_id(self.conn, plan_id).await?
         {
+            // Complete the transition first so the row-count acts as a CAS gate.
+            // If a cancel raced us and already closed the transition, rows == 0
+            // and we must NOT overwrite the Broken lifecycle written by the cancel.
+            let rows = crate::lifecycle::store::complete_transition(
+                self.conn,
+                transition.id.unwrap(),
+                false,
+                Some(error_message),
+            )
+            .await?;
+
+            if rows == 0 {
+                log::warn!(
+                    "complete_transition returned 0 rows for device {} — transition already closed (cancel race); skipping lifecycle update",
+                    transition.device_uuid
+                );
+                return Ok(());
+            }
+
             // Move device to broken state on failure
             crate::lifecycle::store::update_device_lifecycle(
                 self.conn,
                 &transition.device_uuid,
                 DeviceLifecycle::Broken,
-            )
-            .await?;
-
-            // Complete the transition with failure
-            crate::lifecycle::store::complete_transition(
-                self.conn,
-                transition.id.unwrap(),
-                false,
-                Some(error_message),
             )
             .await?;
         }
@@ -831,9 +908,9 @@ impl<'a> Director<'a> {
     /// Uses a CAS-style conditional UPDATE on the plan so that a concurrent
     /// `action_success` report that completes the plan first will be detected,
     /// and the cancel will return an error rather than overwriting a successful
-    /// completion with Broken. The transition close is idempotent (`WHERE success
-    /// IS NULL`) so a partial failure (lifecycle updated but transition close
-    /// fails) is safe to retry.
+    /// completion with Broken. The transition row is closed BEFORE updating the
+    /// device lifecycle so that a crash between the two steps leaves no open
+    /// "ghost" transition that would block future transitions.
     pub async fn cancel_active_transition(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
         let transition =
             crate::lifecycle::store::get_active_transition_for_device(self.conn, device_uuid)
@@ -852,18 +929,22 @@ impl<'a> Director<'a> {
             ));
         }
 
+        let transition_id = transition
+            .id
+            .ok_or_else(|| anyhow::anyhow!("Transition record has no ID"))?;
+
+        crate::lifecycle::store::complete_transition(
+            self.conn,
+            transition_id,
+            false,
+            Some("Cancelled by user"),
+        )
+        .await?;
+
         crate::lifecycle::store::update_device_lifecycle(
             self.conn,
             device_uuid,
             DeviceLifecycle::Broken,
-        )
-        .await?;
-
-        crate::lifecycle::store::complete_transition(
-            self.conn,
-            transition.id.unwrap(),
-            false,
-            Some("Cancelled by user"),
         )
         .await?;
 
@@ -1070,7 +1151,10 @@ mod tests {
         }
 
         // Simulate discovery action completion
-        director.mark_action_success(&test_uuid).await.unwrap();
+        director
+            .mark_action_success(&test_uuid, None)
+            .await
+            .unwrap();
 
         // Verify second action (configure_bmc) is now current
         let active_plan = director
@@ -1088,7 +1172,10 @@ mod tests {
         );
 
         // Simulate BMC configuration completion
-        director.mark_action_success(&test_uuid).await.unwrap();
+        director
+            .mark_action_success(&test_uuid, None)
+            .await
+            .unwrap();
 
         // Verify plan is now complete
         let active_plan = director
@@ -2595,6 +2682,41 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("No active transition to cancel")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_provision_transition_without_role_fails() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440100").unwrap();
+
+        // Register device and force it into the Broken state (simulating a failed provisioning
+        // on a device that was never assigned a role).
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        crate::lifecycle::store::update_device_lifecycle(
+            &conn,
+            &test_uuid,
+            DeviceLifecycle::Broken,
+        )
+        .await
+        .unwrap();
+
+        // Attempting Broken -> Provisioned without a role must fail with an informative error.
+        let result = director
+            .start_lifecycle_transition(&test_uuid, DeviceLifecycle::Provisioned)
+            .await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("no Role is assigned"),
+            "Expected 'no Role is assigned' in error, got: {}",
+            err_msg
         );
     }
 }

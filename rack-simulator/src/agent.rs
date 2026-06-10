@@ -33,7 +33,8 @@ pub async fn run(cnc: &CncClient, state: &ServerState, output: &Output) -> Resul
     cnc.update_attributes(&state.uuid, &attributes).await?;
 
     output.info("Reporting action success...");
-    cnc.action_success(&state.uuid).await?;
+    // plan_id is not available in simulator agent mode (no poll step), so pass None
+    cnc.action_success(&state.uuid, None).await?;
 
     output.success("Agent simulation complete");
 
