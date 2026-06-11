@@ -132,6 +132,14 @@ pub struct Args {
     /// Number of seconds unprovisioned devices sleep before rebooting to retry PXE boot.
     #[arg(long, default_value_t = 600)]
     unprovisioned_sleep_secs: u64,
+
+    /// Verify the BMC's TLS certificate for Redfish connections.
+    ///
+    /// Disabled by default because most BMC firmware ships with self-signed
+    /// certificates.  Enable in environments with properly-signed BMC
+    /// certificates.
+    #[arg(long, default_value_t = false)]
+    redfish_verify_tls: bool,
 }
 
 pub struct RackDirectorHandle {
@@ -243,6 +251,20 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         .as_ref()
         .map(|_| std::path::PathBuf::from(&args.bundled_osm_path));
 
+    // Build power configuration from CLI args.
+    let power_config = director::power::PowerConfig {
+        verify_tls: args.redfish_verify_tls,
+        ..director::power::PowerConfig::default()
+    };
+    if !power_config.verify_tls {
+        log::warn!(
+            "Redfish TLS certificate verification is DISABLED (default). BMC credentials \
+             are sent over an unverified HTTPS channel and could be captured by a \
+             man-in-the-middle on the management network. Pass --redfish-verify-tls once \
+             BMCs have trusted certificates."
+        );
+    }
+
     // Start HTTP Service — each HTTP handler opens its own connection via the
     // shared factory, keeping it independent of DHCP and Director connections.
     let http_start_result = http::start(
@@ -254,6 +276,7 @@ pub async fn rack_director_start(args: crate::Args) -> Result<RackDirectorHandle
         dhcp_start_result.control.clone(),
         args.unprovisioned_sleep_secs,
         bundled_osm_path,
+        power_config,
     )
     .await?;
 

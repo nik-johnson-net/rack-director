@@ -59,6 +59,17 @@ pub async fn poll_handler(
         return Err(Error::NotFound(format!("Device {} not found", params.uuid)));
     }
 
+    // Stamp the daemon heartbeat so the power-kick logic can detect that this
+    // device's agent is already running.  Non-fatal: a failure here must never
+    // break polling.
+    if let Err(e) = crate::director::store::update_device_last_polled(&conn, &params.uuid).await {
+        log::warn!(
+            "Failed to update last_polled_at for device {}: {}",
+            params.uuid,
+            e
+        );
+    }
+
     let plan = plans::store::get_active_plan_for_device(&conn, &params.uuid).await?;
 
     let Some(plan) = plan else {
@@ -215,6 +226,60 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Polling a registered device must stamp `last_polled_at` on the device row.
+    #[tokio::test]
+    async fn test_poll_stamps_last_polled_at() {
+        let (state, _tmp, migration_conn) = setup_test_state(test_connection_factory!()).await;
+
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
+        register_device(&migration_conn, uuid).await;
+
+        // Verify last_polled_at is null / zero before polling
+        let device_before = crate::director::store::get_device(&migration_conn, &uuid)
+            .await
+            .unwrap();
+        // Default value is "0" (from the migration DEFAULT) or None — either way not a real timestamp
+        let polled_before = device_before.last_polled_at.clone();
+        let is_real_ts = polled_before
+            .as_deref()
+            .map(|s| s != "0" && !s.is_empty())
+            .unwrap_or(false);
+        assert!(
+            !is_real_ts,
+            "last_polled_at should not be set before first poll"
+        );
+
+        // Hit the poll endpoint
+        let app = test_router(state);
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/cnc/poll?uuid={}", uuid))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        // 204 (no active plan) is fine — we just care about the side-effect
+        assert!(response.status() == StatusCode::NO_CONTENT || response.status() == StatusCode::OK);
+
+        // last_polled_at must now be set to a real timestamp
+        let device_after = crate::director::store::get_device(&migration_conn, &uuid)
+            .await
+            .unwrap();
+        let polled_after = device_after.last_polled_at.as_deref().unwrap_or("0");
+        assert!(
+            polled_after != "0" && !polled_after.is_empty(),
+            "last_polled_at should be set after poll, got: {:?}",
+            device_after.last_polled_at
+        );
+        // Must be parseable as a real timestamp
+        assert!(
+            crate::director::power::is_in_daemon_mode(
+                Some(polled_after),
+                std::time::Duration::from_secs(15)
+            ),
+            "Freshly polled device should be within the daemon heartbeat window"
+        );
     }
 
     #[test]

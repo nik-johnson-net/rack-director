@@ -495,16 +495,38 @@ export async function cancelDeviceTransition(uuid: string): Promise<void> {
   }
 }
 
-export async function cancelDeviceTransition(uuid: string): Promise<void> {
-  return fetch(`/ui/devices/${uuid}/lifecycle/cancel`, {
+// Power Types
+
+export type PowerState = "on" | "off" | "unknown";
+export type PowerAction = "on" | "off" | "cycle";
+
+export type DevicePowerStatus = {
+  state: PowerState;
+  driver: string | null;
+};
+
+// Power API
+
+export async function getDevicePower(uuid: string): Promise<DevicePowerStatus> {
+  const response = await fetch(`/ui/devices/${uuid}/power`);
+  if (response.ok) {
+    return response.json();
+  }
+  // The backend never returns 500 for this endpoint; degrade gracefully on any error
+  console.error('Error getting device power status:', response.statusText);
+  return { state: "unknown", driver: null };
+}
+
+export async function setDevicePower(uuid: string, action: PowerAction): Promise<{ message: string }> {
+  const response = await fetch(`/ui/devices/${uuid}/power`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-  }).then((response) => {
-    if (!response.ok) {
-      console.error('Error cancelling device transition:', response.statusText);
-      throw new Error('Failed to cancel transition');
-    }
+    body: JSON.stringify({ action }),
   });
+  if (response.ok) {
+    return response.json();
+  }
+  return handleApiError(response, 'Failed to execute power action');
 }
 
 export async function getDeviceTransitions(uuid: string, includeCompleted: boolean = false): Promise<LifecycleTransition[]> {

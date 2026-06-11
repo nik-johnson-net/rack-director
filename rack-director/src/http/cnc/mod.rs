@@ -663,6 +663,7 @@ mod tests {
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
             bundled_osm_path: None,
+            power_config: crate::director::power::PowerConfig::default(),
         });
         (state, temp_dir)
     }
@@ -1752,6 +1753,7 @@ pub(super) mod test_helpers {
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
             bundled_osm_path: None,
+            power_config: crate::director::power::PowerConfig::default(),
         });
 
         (state, temp_dir, migration_conn)

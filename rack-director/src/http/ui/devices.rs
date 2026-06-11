@@ -16,7 +16,8 @@ use super::validation::{
 
 use crate::{
     device_warnings,
-    director::{Architecture, Director},
+    director::power::PowerState,
+    director::{Architecture, Director, PowerAction},
     http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
     plans::{Action, Plan},
@@ -236,6 +237,22 @@ struct DevicesPlanRequest {
     plan: Vec<Action>,
 }
 
+/// Response body for `GET /ui/devices/{uuid}/power`.
+#[derive(Serialize)]
+struct PowerStatusResponse {
+    /// Current power state: `"on"`, `"off"`, or `"unknown"`.
+    state: PowerState,
+    /// Short string identifying the driver in use (`"redfish"`, `"ipmi"`), or
+    /// `null` when no BMC is configured.
+    driver: Option<String>,
+}
+
+/// Request body for `POST /ui/devices/{uuid}/power`.
+#[derive(Deserialize)]
+struct PowerActionRequest {
+    action: PowerAction,
+}
+
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ui/devices", get(get_all_devices))
@@ -282,6 +299,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
             delete(delete_warning),
         )
         .route("/ui/devices/{uuid}/plan", post(post_device_plan))
+        .route(
+            "/ui/devices/{uuid}/power",
+            get(get_device_power).post(post_device_power),
+        )
         .with_state(state)
 }
 
@@ -496,7 +517,7 @@ async fn start_lifecycle_transition(
             }),
         )
     })?;
-    let director = Director::new(&conn);
+    let director = Director::with_power_config(&conn, state.power_config);
 
     match director.start_lifecycle_transition(&uuid, to_state).await {
         Ok(transition_id) => Ok(Json(StartTransitionResponse {
@@ -818,6 +839,7 @@ mod tests {
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
             bundled_osm_path: None,
+            power_config: crate::director::power::PowerConfig::default(),
         });
         (state, temp_dir, migration_conn)
     }
@@ -2195,6 +2217,80 @@ mod tests {
         // Empty string
         assert!(validate_mac_address("").is_some());
     }
+
+    // ========== Power endpoint tests ==========
+
+    /// `GET /ui/devices/{uuid}/power` on a device with no BMC must return 200
+    /// with `{ "state": "unknown", "driver": null }`.  Proves the endpoint
+    /// never 500s even when the BMC is missing.
+    #[tokio::test]
+    async fn test_get_device_power_no_bmc_returns_200_unknown() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let test_uuid = test_uuid(0x50);
+
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
+
+        let app = routes(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/ui/devices/{}/power", test_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET /power must always return 200"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["state"], "unknown");
+        assert!(json["driver"].is_null());
+    }
+
+    /// `POST /ui/devices/{uuid}/power` on a device with no BMC must return 404.
+    #[tokio::test]
+    async fn test_post_device_power_no_bmc_returns_404() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let test_uuid = test_uuid(0x51);
+
+        {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
+                .await
+                .unwrap();
+        }
+
+        let app = routes(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/ui/devices/{}/power", test_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"action":"cycle"}"#))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "POST /power with no BMC must return 404"
+        );
+    }
 }
 
 // Platform assignment handlers
@@ -2294,6 +2390,84 @@ async fn get_warnings(
 
     let warnings = device_warnings::list_warnings(&conn, device_id).await?;
     Ok(Json(warnings))
+}
+
+// Power control handlers
+
+/// `GET /ui/devices/{uuid}/power`
+///
+/// Query the current power state of a device's BMC.
+///
+/// Always returns `200 OK`.  When no BMC is configured or the BMC is
+/// unreachable the response degrades to `{ "state": "unknown", "driver": null }`
+/// so that the UI badge can render without ever triggering a 500.
+async fn get_device_power(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Json<PowerStatusResponse> {
+    let conn = match state.connection_factory.open().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("get_device_power: failed to open DB connection: {}", e);
+            return Json(PowerStatusResponse {
+                state: PowerState::Unknown,
+                driver: None,
+            });
+        }
+    };
+    let director = Director::with_power_config(&conn, state.power_config);
+    let (power_state, driver) = director.power_status(&uuid).await;
+    Json(PowerStatusResponse {
+        state: power_state,
+        driver,
+    })
+}
+
+/// `POST /ui/devices/{uuid}/power`
+///
+/// Issue an OOB power command to a device.
+///
+/// Request body: `{ "action": "on" | "off" | "cycle" }`.
+///
+/// Responses:
+/// - `200 OK`  – command issued successfully.
+/// - `404 Not Found` – device has no BMC configured.
+/// - `502 Bad Gateway` – BMC driver returned an error.
+async fn post_device_power(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+    extract::Json(payload): extract::Json<PowerActionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let conn = state.connection_factory.open().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })?;
+    let director = Director::with_power_config(&conn, state.power_config);
+
+    match director.power_action(&uuid, payload.action).await {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "message": format!("Power action issued for device {}", uuid)
+        }))),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No BMC configured for device {}", uuid),
+            }),
+        )),
+        Err(e) => {
+            log::warn!("Power action failed for device {}: {}", uuid, e);
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Power command failed: {}", e),
+                }),
+            ))
+        }
+    }
 }
 
 /// `DELETE /ui/devices/{uuid}/warnings/{warning_id}`

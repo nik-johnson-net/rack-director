@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use crate::boot_files::BootFileProvider;
 use crate::database::ConnectionFactory;
 use crate::dhcp::DhcpControl;
+use crate::director::power::PowerConfig;
 use crate::storage::ImageStore;
 
 /// Shared application state for all HTTP handlers.
@@ -40,6 +41,11 @@ pub struct AppState {
     /// When set, requests for bundled OSM files are served directly from this
     /// directory rather than from the image store (which does not contain them).
     pub bundled_osm_path: Option<PathBuf>,
+    /// Power management configuration (TLS verification, request timeout).
+    ///
+    /// Passed to `Director::with_power_config` in handlers that perform OOB
+    /// power operations.
+    pub power_config: PowerConfig,
 }
 
 pub struct StartResult {
@@ -56,6 +62,7 @@ pub async fn start<T: Into<SocketAddr>>(
     dhcp: DhcpControl,
     unprovisioned_sleep_secs: u64,
     bundled_osm_path: Option<PathBuf>,
+    power_config: PowerConfig,
 ) -> Result<StartResult> {
     let state = Arc::new(AppState {
         connection_factory,
@@ -65,6 +72,7 @@ pub async fn start<T: Into<SocketAddr>>(
         dhcp,
         unprovisioned_sleep_secs,
         bundled_osm_path,
+        power_config,
     });
 
     let app = Router::new()

@@ -320,6 +320,7 @@ mod tests {
             created_at: None,
             first_seen_at: None,
             last_seen_at: None,
+            last_polled_at: None,
         };
 
         let ctx = ActionContext {
@@ -364,6 +365,7 @@ mod tests {
             created_at: None,
             first_seen_at: None,
             last_seen_at: None,
+            last_polled_at: None,
         };
 
         let ctx = ActionContext {
@@ -462,6 +464,7 @@ mod tests {
             created_at: None,
             first_seen_at: None,
             last_seen_at: None,
+            last_polled_at: None,
         };
 
         let ctx = ActionContext {
@@ -536,6 +539,7 @@ mod tests {
             created_at: None,
             first_seen_at: None,
             last_seen_at: None,
+            last_polled_at: None,
         };
 
         let ctx = ActionContext {
@@ -565,6 +569,7 @@ mod tests {
             created_at: None,
             first_seen_at: None,
             last_seen_at: None,
+            last_polled_at: None,
         };
 
         let ctx = ActionContext {
@@ -600,6 +605,7 @@ mod tests {
             created_at: None,
             first_seen_at: None,
             last_seen_at: None,
+            last_polled_at: None,
         };
 
         let ctx = ActionContext {

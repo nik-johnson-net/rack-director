@@ -136,9 +136,9 @@ A table called plans is used to store a list of actions, their parameters, and t
 
 ## Overview
 
-Rack Director uses SQLite with 10 migrations. Schema is versioned and migrations are applied sequentially on startup.
+Rack Director uses SQLite with 23 migrations. Schema is versioned and migrations are applied sequentially on startup.
 
-**Current Version:** 10 (as of 2026-01)
+**Current Version:** 23 (as of 2026-06)
 
 **Migration Location:** `src/database/migrations/*.sql`
 
@@ -154,7 +154,8 @@ Tracks all devices (servers) in the rack.
 | `uuid` | TEXT | Device UUID (from SMBIOS), unique |
 | `created_at` | DATETIME | When device was first created |
 | `first_seen_at` | DATETIME | First network appearance |
-| `last_seen_at` | DATETIME | Last network appearance |
+| `last_seen_at` | DATETIME | Last network appearance (PXE/DHCP) |
+| `last_polled_at` | DATETIME | Last `/cnc/poll` heartbeat (daemon-mode detection) |
 | `lifecycle` | TEXT | Current lifecycle state (new, unprovisioned, provisioned, removed, broken) |
 | `architecture` | TEXT | CPU architecture (x86-64) |
 | `role_id` | INTEGER | FK to roles table |
@@ -356,6 +357,12 @@ pending_devices
 ```
 
 ## Recent Schema Changes
+
+### Migration v23 (2026-06)
+- Added `last_polled_at` column to `devices` table
+- Stamped on every `/cnc/poll` request; used to detect whether a device is currently
+  running the agent in daemon mode, so the out-of-band power kick can skip rebooting it
+- See `.claude/docs/oob-power.md`
 
 ### Migration v19 (2026-04)
 - Replaced `roles.os_id` FK with composite OSM reference: `osm_module`, `os_name`, `os_release`, `os_arch`

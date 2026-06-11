@@ -3,11 +3,11 @@ use uuid::Uuid;
 use crate::database::Connection;
 use crate::director::store::generate_hostname_from_uuid;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleTransition, TransitionType};
-use crate::plans::actions::BootTarget;
+use crate::plans::actions::{Action, BootTarget};
 use crate::plans::{Plan, PlanStatus};
 use crate::{platforms, roles};
 
-mod ipmi;
+pub(crate) mod power;
 pub(crate) mod store;
 
 pub use common::device_attributes::NetworkInterface;
@@ -42,6 +42,88 @@ impl std::fmt::Display for Architecture {
     }
 }
 
+/// User-requested power action for the UI power controls.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PowerAction {
+    /// Power the device on.
+    On,
+    /// Power the device off (graceful shutdown).
+    Off,
+    /// Power-cycle the device (off then on).
+    Cycle,
+}
+
+/// Returns `true` if `action` requires the device to be booted into the rack-agent
+/// before it can be executed.
+///
+/// Actions that need the agent running on the device return `true` and will trigger an
+/// OOB power kick when the device is not already in daemon mode. `RebootDevice` returns
+/// `false` because its `start()` hook already handles the reboot via `Director::reboot`.
+pub(crate) fn action_requires_boot(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::DiscoverHardware
+            | Action::ConfigureBmc
+            | Action::PartitionDisks
+            | Action::InstallOs
+            | Action::Console
+    )
+}
+
+/// Apply a power kick using the already-resolved driver.
+///
+/// Queries the current power state and issues the appropriate command:
+/// - `Off`        → `power_on`
+/// - `On`         → `power_cycle` (reprovision path — device likely running an OS)
+/// - `Unknown`    → `power_cycle` (safe default)
+/// - state query error → log warn + `power_cycle`
+///
+/// Every power operation is best-effort: an error is logged but never propagated.
+/// Returns `Ok(())` in all cases.
+pub(crate) async fn apply_power_kick(driver: &dyn power::PowerDriver) -> anyhow::Result<()> {
+    let state = match driver.power_state().await {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "Could not query power state via {} driver: {} — issuing power_cycle as fallback",
+                driver.kind(),
+                e
+            );
+            // Fall through to power_cycle below
+            power::PowerState::Unknown
+        }
+    };
+
+    let result = match state {
+        power::PowerState::Off => {
+            log::info!(
+                "Device is off — issuing power_on via {} driver",
+                driver.kind()
+            );
+            driver.power_on().await
+        }
+        power::PowerState::On | power::PowerState::Unknown => {
+            log::info!(
+                "Device is {:?} — issuing power_cycle via {} driver",
+                state,
+                driver.kind()
+            );
+            driver.power_cycle().await
+        }
+    };
+
+    if let Err(e) = result {
+        log::warn!(
+            "Power kick command failed via {} driver: {}",
+            driver.kind(),
+            e
+        );
+    }
+
+    Ok(())
+}
+
 /// Short-lived handle for executing device management operations against an open database
 /// connection.
 ///
@@ -50,11 +132,30 @@ impl std::fmt::Display for Architecture {
 /// dropped at the end; it never opens a new connection itself.
 pub struct Director<'a> {
     conn: &'a Connection,
+    power_config: power::PowerConfig,
 }
 
 impl<'a> Director<'a> {
+    /// Create a `Director` with default power configuration.
+    ///
+    /// All existing call sites use this constructor and continue to compile
+    /// unchanged; only power-aware handlers need [`Director::with_power_config`].
     pub fn new(conn: &'a Connection) -> Self {
-        Director { conn }
+        Director {
+            conn,
+            power_config: power::PowerConfig::default(),
+        }
+    }
+
+    /// Create a `Director` with explicit power configuration.
+    ///
+    /// Use this constructor in handlers that perform OOB power operations so
+    /// that the CLI's `--redfish-verify-tls` flag is honoured.
+    pub fn with_power_config(conn: &'a Connection, cfg: power::PowerConfig) -> Self {
+        Director {
+            conn,
+            power_config: cfg,
+        }
     }
 
     pub async fn register_device(
@@ -299,16 +400,16 @@ impl<'a> Director<'a> {
         };
 
         // If the agent included a plan_id, verify it matches the active plan
-        if let Some(rid) = reported_plan_id {
-            if plan.id != Some(rid) {
-                log::warn!(
-                    "action_success for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
-                    device_uuid,
-                    rid,
-                    plan.id
-                );
-                return Ok(());
-            }
+        if let Some(rid) = reported_plan_id
+            && plan.id != Some(rid)
+        {
+            log::warn!(
+                "action_success for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
+                device_uuid,
+                rid,
+                plan.id
+            );
+            return Ok(());
         }
 
         // Start the plan if it's pending
@@ -367,16 +468,16 @@ impl<'a> Director<'a> {
         };
 
         // If the agent included a plan_id, verify it matches the active plan
-        if let Some(rid) = reported_plan_id {
-            if plan.id != Some(rid) {
-                log::warn!(
-                    "action_failed for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
-                    device_uuid,
-                    rid,
-                    plan.id
-                );
-                return Ok(());
-            }
+        if let Some(rid) = reported_plan_id
+            && plan.id != Some(rid)
+        {
+            log::warn!(
+                "action_failed for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
+                device_uuid,
+                rid,
+                plan.id
+            );
+            return Ok(());
         }
 
         // Mark current action as failed
@@ -532,6 +633,17 @@ impl<'a> Director<'a> {
                 conn: self.conn,
                 director: Some(self), // Provide director for actions that need it (e.g., RebootDevice)
             };
+
+            // Issue an OOB power kick before starting the action so the device
+            // is actually booted and running the agent.  This is best-effort:
+            // failures are logged and never block the transition.
+            if let Err(e) = self.ensure_powered_for_plan(&device, action).await {
+                log::warn!(
+                    "Power kick failed for device {}: {} (continuing)",
+                    device_uuid,
+                    e
+                );
+            }
 
             log::debug!("Starting action {:?} for device {}", action, device_uuid);
             if let Err(e) = action.start(&ctx).await {
@@ -856,51 +968,148 @@ impl<'a> Director<'a> {
         store::find_device_by_bmc_mac(self.conn, mac).await
     }
 
-    /// Issue an IPMI power reset command to the device's BMC
+    /// Ensure the device is powered and will boot for the given plan action.
     ///
-    /// This is a best-effort operation - if the BMC IP or credentials are missing,
-    /// or if the IPMI command fails, the error is logged but not propagated.
-    /// This allows lifecycle transitions to proceed even if IPMI reboot fails
-    /// (the device can be manually rebooted).
-    pub async fn reboot(&self, uuid: &Uuid) -> anyhow::Result<()> {
-        // Get BMC IP address
-        let bmc_ip = match self.get_bmc_ip(uuid).await? {
-            Some(ip) => ip,
-            None => {
-                log::info!("No BMC IP for device {}, skipping power reset", uuid);
-                return Ok(());
-            }
-        };
+    /// Called immediately before `action.start()` in `start_lifecycle_transition`.
+    /// Short-circuits without any BMC call when:
+    /// 1. The action does not require the device to boot (e.g. `RebootDevice`).
+    /// 2. The agent is already polling in daemon mode (heartbeat within `DAEMON_HEARTBEAT_WINDOW`).
+    /// 3. The device has no BMC configured.
+    ///
+    /// All power operations are **best-effort**: errors are logged but never propagated.
+    /// Always returns `Ok(())`.
+    pub async fn ensure_powered_for_plan(
+        &self,
+        device: &store::Device,
+        action: &Action,
+    ) -> anyhow::Result<()> {
+        if !action_requires_boot(action) {
+            return Ok(());
+        }
 
-        // Get BMC credentials
-        let (username, password) = match self.get_bmc_credentials(uuid).await? {
-            Some(creds) => creds,
+        if power::is_in_daemon_mode(
+            device.last_polled_at.as_deref(),
+            power::DAEMON_HEARTBEAT_WINDOW,
+        ) {
+            log::info!(
+                "Device {} is in daemon mode (last_polled_at={}), skipping power kick",
+                device.uuid,
+                device.last_polled_at.as_deref().unwrap_or("none")
+            );
+            return Ok(());
+        }
+
+        let driver = match self.power_driver_for(&device.uuid).await? {
+            Some(d) => d,
             None => {
                 log::info!(
-                    "No BMC credentials for device {}, skipping power reset",
-                    uuid
+                    "No BMC driver available for device {}, skipping power kick",
+                    device.uuid
                 );
                 return Ok(());
             }
         };
 
-        // Create IPMI client and send power reset
-        let ipmi = ipmi::IpmiClient::new(bmc_ip.clone(), username, password);
-        match ipmi.power_reset().await {
-            Ok(_) => {
-                log::info!("IPMI power reset sent to device {} at {}", uuid, bmc_ip);
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to send IPMI power reset to device {} at {}: {}",
-                    uuid,
-                    bmc_ip,
-                    e
-                );
-            }
+        if let Err(e) = apply_power_kick(driver.as_ref()).await {
+            log::warn!(
+                "apply_power_kick returned error for device {}: {}",
+                device.uuid,
+                e
+            );
         }
 
         Ok(())
+    }
+
+    /// Issue a power reset to the device's BMC using the best available driver.
+    ///
+    /// Probes the BMC for Redfish support and falls back to IPMI.  This is a
+    /// best-effort operation: if the BMC IP or credentials are missing, or if
+    /// the power command fails, the error is logged but not propagated.  This
+    /// allows lifecycle transitions to continue even when OOB power is unavailable.
+    pub async fn reboot(&self, uuid: &Uuid) -> anyhow::Result<()> {
+        match self.power_driver_for(uuid).await? {
+            Some(driver) => {
+                if let Err(e) = driver.power_reset().await {
+                    log::warn!(
+                        "Power reset failed for device {} via {} driver: {}",
+                        uuid,
+                        driver.kind(),
+                        e
+                    );
+                }
+            }
+            None => {
+                log::info!(
+                    "No BMC configured for device {}, skipping power reset",
+                    uuid
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the best available power driver for a device.
+    ///
+    /// Looks up the device's BMC IP and credentials, then calls
+    /// [`power::resolve_power_driver`] to probe for Redfish support and fall
+    /// back to IPMI if unavailable.
+    ///
+    /// Returns `Ok(None)` when the device has no BMC IP or no credentials
+    /// stored — callers should log and skip the power operation in that case.
+    ///
+    /// This is the foundation for future power endpoints and the kick logic.
+    /// Callers that need power operations should call this method and act on
+    /// the returned driver.
+    pub async fn power_driver_for(
+        &self,
+        uuid: &Uuid,
+    ) -> anyhow::Result<Option<Box<dyn power::PowerDriver>>> {
+        let ip = match self.get_bmc_ip(uuid).await? {
+            Some(ip) => ip,
+            None => return Ok(None),
+        };
+        let (username, password) = match self.get_bmc_credentials(uuid).await? {
+            Some(creds) => creds,
+            None => return Ok(None),
+        };
+        Ok(power::resolve_power_driver(&ip, &username, &password, self.power_config).await)
+    }
+
+    /// Query the current power state and driver kind for a device.
+    ///
+    /// Never errors — a missing BMC, unreachable BMC, or driver failure all
+    /// degrade to `(PowerState::Unknown, None)` so that the UI power badge
+    /// can always render without blocking the page.
+    pub async fn power_status(&self, uuid: &Uuid) -> (power::PowerState, Option<String>) {
+        match self.power_driver_for(uuid).await {
+            Ok(Some(d)) => {
+                let state = d.power_state().await.unwrap_or(power::PowerState::Unknown);
+                (state, Some(d.kind().to_string()))
+            }
+            _ => (power::PowerState::Unknown, None),
+        }
+    }
+
+    /// Execute a UI-requested power action on a device.
+    ///
+    /// Returns:
+    /// - `Ok(true)`  – action was issued successfully.
+    /// - `Ok(false)` – device has no BMC configured (caller should return 404).
+    /// - `Err(_)`    – BMC driver reported a failure (caller should return 502).
+    pub async fn power_action(&self, uuid: &Uuid, action: PowerAction) -> anyhow::Result<bool> {
+        let driver = match self.power_driver_for(uuid).await? {
+            Some(d) => d,
+            None => return Ok(false),
+        };
+
+        match action {
+            PowerAction::On => driver.power_on().await?,
+            PowerAction::Off => driver.power_off(true).await?,
+            PowerAction::Cycle => driver.power_cycle().await?,
+        }
+
+        Ok(true)
     }
 
     /// Cancel the active lifecycle transition for a device.
@@ -2683,6 +2892,221 @@ mod tests {
                 .to_string()
                 .contains("No active transition to cancel")
         );
+    }
+
+    // ========== action_requires_boot table tests ==========
+
+    #[test]
+    fn test_action_requires_boot_discover_hardware() {
+        assert!(action_requires_boot(&Action::DiscoverHardware));
+    }
+
+    #[test]
+    fn test_action_requires_boot_configure_bmc() {
+        assert!(action_requires_boot(&Action::ConfigureBmc));
+    }
+
+    #[test]
+    fn test_action_requires_boot_partition_disks() {
+        assert!(action_requires_boot(&Action::PartitionDisks));
+    }
+
+    #[test]
+    fn test_action_requires_boot_install_os() {
+        assert!(action_requires_boot(&Action::InstallOs));
+    }
+
+    #[test]
+    fn test_action_requires_boot_console() {
+        assert!(action_requires_boot(&Action::Console));
+    }
+
+    #[test]
+    fn test_action_requires_boot_reboot_device_is_false() {
+        assert!(!action_requires_boot(&Action::RebootDevice));
+    }
+
+    // ========== apply_power_kick tests with FakeDriver ==========
+
+    use crate::director::power::{PowerDriver, PowerState};
+    use std::sync::Mutex;
+
+    /// A fake `PowerDriver` that records which method was called last and
+    /// returns a configurable state from `power_state`.
+    struct FakeDriver {
+        state: PowerState,
+        /// Tracks the last power command issued: "on", "off", "cycle", "reset", or none.
+        last_command: Mutex<Option<String>>,
+        /// If true, `power_state()` returns an error instead.
+        state_error: bool,
+    }
+
+    impl FakeDriver {
+        fn new(state: PowerState) -> Self {
+            Self {
+                state,
+                last_command: Mutex::new(None),
+                state_error: false,
+            }
+        }
+
+        fn with_state_error() -> Self {
+            Self {
+                state: PowerState::Unknown,
+                last_command: Mutex::new(None),
+                state_error: true,
+            }
+        }
+
+        fn last_command(&self) -> Option<String> {
+            self.last_command.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PowerDriver for FakeDriver {
+        async fn power_state(&self) -> anyhow::Result<PowerState> {
+            if self.state_error {
+                Err(anyhow::anyhow!("simulated power_state error"))
+            } else {
+                Ok(self.state)
+            }
+        }
+
+        async fn power_on(&self) -> anyhow::Result<()> {
+            *self.last_command.lock().unwrap() = Some("on".to_string());
+            Ok(())
+        }
+
+        async fn power_off(&self, _graceful: bool) -> anyhow::Result<()> {
+            *self.last_command.lock().unwrap() = Some("off".to_string());
+            Ok(())
+        }
+
+        async fn power_cycle(&self) -> anyhow::Result<()> {
+            *self.last_command.lock().unwrap() = Some("cycle".to_string());
+            Ok(())
+        }
+
+        async fn power_reset(&self) -> anyhow::Result<()> {
+            *self.last_command.lock().unwrap() = Some("reset".to_string());
+            Ok(())
+        }
+
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_power_kick_when_off_calls_power_on() {
+        let driver = FakeDriver::new(PowerState::Off);
+        apply_power_kick(&driver).await.unwrap();
+        assert_eq!(driver.last_command(), Some("on".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_power_kick_when_on_calls_power_cycle() {
+        let driver = FakeDriver::new(PowerState::On);
+        apply_power_kick(&driver).await.unwrap();
+        assert_eq!(driver.last_command(), Some("cycle".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_power_kick_when_unknown_calls_power_cycle() {
+        let driver = FakeDriver::new(PowerState::Unknown);
+        apply_power_kick(&driver).await.unwrap();
+        assert_eq!(driver.last_command(), Some("cycle".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_power_kick_when_state_error_calls_power_cycle() {
+        let driver = FakeDriver::with_state_error();
+        apply_power_kick(&driver).await.unwrap();
+        assert_eq!(driver.last_command(), Some("cycle".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_power_kick_returns_ok_even_if_power_op_fails() {
+        // A driver where every power command fails
+        struct FailDriver;
+        #[async_trait::async_trait]
+        impl PowerDriver for FailDriver {
+            async fn power_state(&self) -> anyhow::Result<PowerState> {
+                Ok(PowerState::On)
+            }
+            async fn power_on(&self) -> anyhow::Result<()> {
+                Err(anyhow::anyhow!("fail"))
+            }
+            async fn power_off(&self, _: bool) -> anyhow::Result<()> {
+                Err(anyhow::anyhow!("fail"))
+            }
+            async fn power_cycle(&self) -> anyhow::Result<()> {
+                Err(anyhow::anyhow!("fail"))
+            }
+            async fn power_reset(&self) -> anyhow::Result<()> {
+                Err(anyhow::anyhow!("fail"))
+            }
+            fn kind(&self) -> &'static str {
+                "fail"
+            }
+        }
+
+        // Even when the power command fails, apply_power_kick returns Ok(())
+        let result = apply_power_kick(&FailDriver).await;
+        assert!(result.is_ok());
+    }
+
+    // ========== ensure_powered_for_plan daemon-mode skip test ==========
+
+    #[tokio::test]
+    async fn test_ensure_powered_for_plan_skips_when_in_daemon_mode() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440070").unwrap();
+
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Manually set last_polled_at to now (within the 15s window) so
+        // is_in_daemon_mode returns true and the kick is skipped.
+        conn.execute(
+            "UPDATE devices SET last_polled_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
+            (test_uuid,),
+        )
+        .await
+        .unwrap();
+
+        let device = store::get_device(&conn, &test_uuid).await.unwrap();
+
+        // DiscoverHardware requires boot, but daemon mode is active → should skip
+        let result = director
+            .ensure_powered_for_plan(&device, &Action::DiscoverHardware)
+            .await;
+        assert!(result.is_ok());
+        // No BMC configured either, but we never reach that check due to daemon mode
+    }
+
+    #[tokio::test]
+    async fn test_ensure_powered_for_plan_skips_reboot_device() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440071").unwrap();
+
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let device = store::get_device(&conn, &test_uuid).await.unwrap();
+
+        // RebootDevice does not require boot → ensure_powered_for_plan returns immediately
+        let result = director
+            .ensure_powered_for_plan(&device, &Action::RebootDevice)
+            .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

@@ -31,6 +31,8 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | GET | `/ui/devices/{uuid}/transitions` | List all transitions |
 | GET | `/ui/devices/{uuid}/transitions/active` | Get active transition |
 | GET | `/ui/devices/{uuid}/status` | Get current plan step/status |
+| GET | `/ui/devices/{uuid}/power` | Get live BMC power state (always 200; degrades to `unknown`) |
+| POST | `/ui/devices/{uuid}/power` | Issue an OOB power command (`on`/`off`/`cycle`) |
 | POST | `/ui/devices/{uuid}/platform` | Assign platform to device |
 | GET | `/ui/devices/{uuid}/platform` | Get device's platform |
 | POST | `/ui/devices/{uuid}/role` | Assign role to device |

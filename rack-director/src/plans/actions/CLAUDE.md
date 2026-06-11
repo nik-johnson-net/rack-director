@@ -316,6 +316,31 @@ until `PollAction` is updated — the `From<&Action>` match is exhaustive by des
 
 ---
 
+### Out-of-Band Power Kick (plan start)
+
+When a lifecycle transition starts a plan whose first action needs the host to boot
+into something rack-director serves (the agent image or an OS installer),
+`Director::ensure_powered_for_plan()` runs **before** `action.start()` in
+`start_lifecycle_transition()`. It uses the BMC out-of-band to get the host moving:
+
+- **Skip if in daemon mode** — if the device has a recent `last_polled_at` heartbeat
+  (within `DAEMON_HEARTBEAT_WINDOW`, 15s), a daemon agent is already polling and will
+  pick up the new action in-band, so no power command is sent.
+- **Off → power on; On / Unknown → power cycle.** Power state is read first
+  (`power_cycle`, not a hard reset, for already-on hosts).
+- **Best-effort.** Missing BMC, unreachable BMC, or a failed command logs a warning and
+  the transition proceeds — exactly as before this feature existed.
+
+`action_requires_boot()` gates which actions trigger the kick: `DiscoverHardware`,
+`ConfigureBmc`, `PartitionDisks`, `InstallOs`, `Console`. `RebootDevice` is excluded
+(it cannot be a first action, and drives its own reboot via `start()`), so the kick
+never double-fires with `RebootDevice`.
+
+Because rack-director controls next-boot via dynamic iPXE, the kick is **power-only** —
+there is no IPMI/Redfish "set boot device" step. See `@.claude/docs/oob-power.md`.
+
+---
+
 ## Creating Custom Actions
 
 To add a new action:
