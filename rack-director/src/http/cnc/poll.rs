@@ -236,11 +236,13 @@ mod tests {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
         register_device(&migration_conn, uuid).await;
 
-        // Verify last_polled_at is null / zero before polling
+        // Verify last_polled_at is unset before polling.
+        // The column is a plain nullable DATETIME (no DEFAULT), so it should be
+        // None before the first poll. We also tolerate the legacy "0"/empty
+        // sentinel for robustness — none of these are a real timestamp.
         let device_before = crate::director::store::get_device(&migration_conn, &uuid)
             .await
             .unwrap();
-        // Default value is "0" (from the migration DEFAULT) or None — either way not a real timestamp
         let polled_before = device_before.last_polled_at.clone();
         let is_real_ts = polled_before
             .as_deref()
@@ -248,7 +250,8 @@ mod tests {
             .unwrap_or(false);
         assert!(
             !is_real_ts,
-            "last_polled_at should not be set before first poll"
+            "last_polled_at should not be set before first poll, got: {:?}",
+            polled_before
         );
 
         // Hit the poll endpoint

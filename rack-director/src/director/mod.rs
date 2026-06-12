@@ -48,7 +48,12 @@ impl std::fmt::Display for Architecture {
 pub enum PowerAction {
     /// Power the device on.
     On,
-    /// Power the device off (graceful shutdown).
+    /// Power the device off (hard/immediate power-off, not a graceful OS shutdown).
+    ///
+    /// A hard off is used because hosts are frequently running the rack-agent in
+    /// an initramfs that does not handle ACPI soft-off, so a graceful shutdown can
+    /// silently hang. This also matches the UI confirm dialog's promise that the
+    /// device will lose power immediately.
     Off,
     /// Power-cycle the device (off then on).
     Cycle,
@@ -76,8 +81,15 @@ pub(crate) fn action_requires_boot(action: &Action) -> bool {
 /// Queries the current power state and issues the appropriate command:
 /// - `Off`        → `power_on`
 /// - `On`         → `power_cycle` (reprovision path — device likely running an OS)
-/// - `Unknown`    → `power_cycle` (safe default)
-/// - state query error → log warn + `power_cycle`
+/// - `Unknown`    → `power_cycle`, with a `power_on` fallback if the cycle fails
+/// - state query error → treated as `Unknown` (log warn + `power_cycle` with fallback)
+///
+/// The `Unknown` fallback exists because Redfish `ForceRestart` (and IPMI
+/// `chassis power cycle`) typically error when the host is actually OFF. In that
+/// case a plain `power_on` is the correct recovery, so we attempt it rather than
+/// giving up after a single failed cycle. The confirmed-`On` case does NOT fall
+/// back to `power_on`: a device that is genuinely on should not be powered on
+/// again if its cycle command fails.
 ///
 /// Every power operation is best-effort: an error is logged but never propagated.
 /// Returns `Ok(())` in all cases.
@@ -86,42 +98,61 @@ pub(crate) async fn apply_power_kick(driver: &dyn power::PowerDriver) -> anyhow:
         Ok(s) => s,
         Err(e) => {
             log::warn!(
-                "Could not query power state via {} driver: {} — issuing power_cycle as fallback",
+                "Could not query power state via {} driver: {} — treating as Unknown",
                 driver.kind(),
                 e
             );
-            // Fall through to power_cycle below
             power::PowerState::Unknown
         }
     };
 
-    let result = match state {
+    match state {
         power::PowerState::Off => {
             log::info!(
                 "Device is off — issuing power_on via {} driver",
                 driver.kind()
             );
-            driver.power_on().await
+            log_if_err(driver.power_on().await, driver.kind());
         }
-        power::PowerState::On | power::PowerState::Unknown => {
+        power::PowerState::On => {
             log::info!(
-                "Device is {:?} — issuing power_cycle via {} driver",
-                state,
+                "Device is On — issuing power_cycle via {} driver",
                 driver.kind()
             );
-            driver.power_cycle().await
+            log_if_err(driver.power_cycle().await, driver.kind());
         }
-    };
-
-    if let Err(e) = result {
-        log::warn!(
-            "Power kick command failed via {} driver: {}",
-            driver.kind(),
-            e
-        );
+        power::PowerState::Unknown => cycle_with_power_on_fallback(driver).await,
     }
 
     Ok(())
+}
+
+/// Issue a `power_cycle` for a device in an `Unknown` state, falling back to
+/// `power_on` if the cycle fails.
+///
+/// A failed cycle on an Unknown host most often means the host is actually OFF
+/// (Redfish `ForceRestart` errors in that state), so `power_on` is the correct
+/// best-effort recovery. Both operations log on failure but never propagate.
+async fn cycle_with_power_on_fallback(driver: &dyn power::PowerDriver) {
+    log::info!(
+        "Device is Unknown — issuing power_cycle via {} driver",
+        driver.kind()
+    );
+    if let Err(e) = driver.power_cycle().await {
+        log::warn!(
+            "power_cycle failed via {} driver: {} — falling back to power_on",
+            driver.kind(),
+            e
+        );
+        log_if_err(driver.power_on().await, driver.kind());
+    }
+}
+
+/// Log a best-effort power command failure without propagating it.
+fn log_if_err(result: anyhow::Result<()>, kind: &str) {
+    if let Err(e) = result {
+        log::warn!("Power kick command failed via {} driver: {}", kind, e);
+    }
 }
 
 /// Short-lived handle for executing device management operations against an open database
@@ -136,10 +167,19 @@ pub struct Director<'a> {
 }
 
 impl<'a> Director<'a> {
-    /// Create a `Director` with default power configuration.
+    /// Create a `Director` with the default [`power::PowerConfig`]
+    /// (`verify_tls: false`).
     ///
-    /// All existing call sites use this constructor and continue to compile
-    /// unchanged; only power-aware handlers need [`Director::with_power_config`].
+    /// **Must not be used on paths that perform OOB power operations** —
+    /// [`Director::reboot`], [`Director::ensure_powered_for_plan`],
+    /// [`Director::power_driver_for`], [`Director::power_status`],
+    /// [`Director::power_action`], or anything that reaches them, such as
+    /// [`Director::start_lifecycle_transition`]. Using `new` there silently
+    /// drops operator-supplied settings like `--redfish-verify-tls`. Handlers
+    /// on those paths must use [`Director::with_power_config`] with
+    /// `AppState.power_config` instead.
+    ///
+    /// Suitable for reads, attribute updates, and tests.
     pub fn new(conn: &'a Connection) -> Self {
         Director {
             conn,
@@ -1073,7 +1113,9 @@ impl<'a> Director<'a> {
             Some(creds) => creds,
             None => return Ok(None),
         };
-        Ok(power::resolve_power_driver(&ip, &username, &password, self.power_config).await)
+        Ok(Some(
+            power::resolve_power_driver(&ip, &username, &password, self.power_config).await,
+        ))
     }
 
     /// Query the current power state and driver kind for a device.
@@ -1093,6 +1135,11 @@ impl<'a> Director<'a> {
 
     /// Execute a UI-requested power action on a device.
     ///
+    /// `PowerAction::Off` issues a **hard** (immediate) power-off — not a
+    /// graceful OS shutdown — because hosts often run the rack-agent in an
+    /// initramfs that cannot honor ACPI soft-off, and this matches the UI
+    /// confirm dialog's promise of immediate power loss.
+    ///
     /// Returns:
     /// - `Ok(true)`  – action was issued successfully.
     /// - `Ok(false)` – device has no BMC configured (caller should return 404).
@@ -1105,7 +1152,7 @@ impl<'a> Director<'a> {
 
         match action {
             PowerAction::On => driver.power_on().await?,
-            PowerAction::Off => driver.power_off(true).await?,
+            PowerAction::Off => driver.power_off(false).await?,
             PowerAction::Cycle => driver.power_cycle().await?,
         }
 
@@ -2931,35 +2978,59 @@ mod tests {
     use crate::director::power::{PowerDriver, PowerState};
     use std::sync::Mutex;
 
-    /// A fake `PowerDriver` that records which method was called last and
+    /// A fake `PowerDriver` that records every command issued (in order) and
     /// returns a configurable state from `power_state`.
     struct FakeDriver {
         state: PowerState,
-        /// Tracks the last power command issued: "on", "off", "cycle", "reset", or none.
-        last_command: Mutex<Option<String>>,
+        /// Tracks every power command issued, in order: "on", "off", "cycle", "reset".
+        commands: Mutex<Vec<String>>,
         /// If true, `power_state()` returns an error instead.
         state_error: bool,
+        /// If true, `power_cycle()` returns an error instead of succeeding.
+        cycle_fails: bool,
     }
 
     impl FakeDriver {
         fn new(state: PowerState) -> Self {
             Self {
                 state,
-                last_command: Mutex::new(None),
+                commands: Mutex::new(Vec::new()),
                 state_error: false,
+                cycle_fails: false,
             }
         }
 
         fn with_state_error() -> Self {
             Self {
                 state: PowerState::Unknown,
-                last_command: Mutex::new(None),
+                commands: Mutex::new(Vec::new()),
                 state_error: true,
+                cycle_fails: false,
             }
         }
 
+        /// Build a driver in `state` whose `power_cycle()` always fails.
+        fn with_cycle_failure(state: PowerState) -> Self {
+            Self {
+                state,
+                commands: Mutex::new(Vec::new()),
+                state_error: false,
+                cycle_fails: true,
+            }
+        }
+
+        fn record(&self, command: &str) {
+            self.commands.lock().unwrap().push(command.to_string());
+        }
+
+        /// All commands issued so far, in order.
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+
+        /// The most recent command issued, if any.
         fn last_command(&self) -> Option<String> {
-            self.last_command.lock().unwrap().clone()
+            self.commands.lock().unwrap().last().cloned()
         }
     }
 
@@ -2974,22 +3045,26 @@ mod tests {
         }
 
         async fn power_on(&self) -> anyhow::Result<()> {
-            *self.last_command.lock().unwrap() = Some("on".to_string());
+            self.record("on");
             Ok(())
         }
 
         async fn power_off(&self, _graceful: bool) -> anyhow::Result<()> {
-            *self.last_command.lock().unwrap() = Some("off".to_string());
+            self.record("off");
             Ok(())
         }
 
         async fn power_cycle(&self) -> anyhow::Result<()> {
-            *self.last_command.lock().unwrap() = Some("cycle".to_string());
-            Ok(())
+            self.record("cycle");
+            if self.cycle_fails {
+                Err(anyhow::anyhow!("simulated power_cycle failure"))
+            } else {
+                Ok(())
+            }
         }
 
         async fn power_reset(&self) -> anyhow::Result<()> {
-            *self.last_command.lock().unwrap() = Some("reset".to_string());
+            self.record("reset");
             Ok(())
         }
 
@@ -3024,6 +3099,31 @@ mod tests {
         let driver = FakeDriver::with_state_error();
         apply_power_kick(&driver).await.unwrap();
         assert_eq!(driver.last_command(), Some("cycle".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_power_kick_unknown_cycle_fails_falls_back_to_power_on() {
+        // An Unknown host whose power_cycle fails is most likely actually OFF
+        // (Redfish ForceRestart errors when off) — we should fall back to power_on.
+        let driver = FakeDriver::with_cycle_failure(PowerState::Unknown);
+        apply_power_kick(&driver).await.unwrap();
+        assert_eq!(
+            driver.commands(),
+            vec!["cycle".to_string(), "on".to_string()],
+            "Unknown + cycle failure should attempt power_cycle then fall back to power_on"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_power_kick_on_cycle_fails_does_not_fall_back() {
+        // A confirmed-On host whose power_cycle fails must NOT be powered on again.
+        let driver = FakeDriver::with_cycle_failure(PowerState::On);
+        apply_power_kick(&driver).await.unwrap();
+        assert_eq!(
+            driver.commands(),
+            vec!["cycle".to_string()],
+            "On + cycle failure should NOT fall back to power_on"
+        );
     }
 
     #[tokio::test]

@@ -31,8 +31,8 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | GET | `/ui/devices/{uuid}/transitions` | List all transitions |
 | GET | `/ui/devices/{uuid}/transitions/active` | Get active transition |
 | GET | `/ui/devices/{uuid}/status` | Get current plan step/status |
-| GET | `/ui/devices/{uuid}/power` | Get live BMC power state (always 200; degrades to `unknown`) |
-| POST | `/ui/devices/{uuid}/power` | Issue an OOB power command (`on`/`off`/`cycle`) |
+| GET | `/ui/devices/{uuid}/power` | Get live BMC power state — 200 for existing device (degrades to `unknown`/null on BMC failure), 404 for unknown UUID, 500 on DB error |
+| POST | `/ui/devices/{uuid}/power` | Issue an OOB power command (`on`/`off`/`cycle`; `off` is a hard/immediate power-off) — 200 on success, 404 unknown UUID, 409 no BMC, 502 BMC error |
 | POST | `/ui/devices/{uuid}/platform` | Assign platform to device |
 | GET | `/ui/devices/{uuid}/platform` | Get device's platform |
 | POST | `/ui/devices/{uuid}/role` | Assign role to device |
@@ -42,6 +42,23 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | DELETE | `/ui/devices/pending/{id}` | Delete pending device |
 | GET | `/ui/devices/{uuid}/warnings` | List all warnings for a device |
 | DELETE | `/ui/devices/{uuid}/warnings/{warning_id}` | Dismiss a warning |
+
+#### Power endpoint notes
+
+- **`POST .../power` with `action: "off"`** issues a **hard/immediate** power-off
+  (BMC `ForceOff` / `ipmitool chassis power off`), not a graceful OS shutdown.
+  Hosts frequently run the rack-agent in an initramfs that cannot honor ACPI
+  soft-off, so a graceful shutdown can silently hang; a hard off matches the UI
+  confirm dialog text and operator expectations.
+- **`GET .../power` returns 404 for unknown UUIDs** (consistent with sibling device
+  endpoints). For a device that _does_ exist, it always returns `200` — BMC
+  failures, missing BMC config, and driver errors all degrade to
+  `{ "state": "unknown", "driver": null }` so the UI badge can always render. The
+  UI client (`getDevicePower`) degrades any non-ok response to `unknown/null`, so
+  it handles the 404 gracefully.
+- **`POST .../power` distinguishes 404 vs 409**: a nonexistent UUID → `404 Not Found`;
+  a device that exists but has no BMC configured → `409 Conflict`. This allows the
+  UI and API callers to surface a meaningful error message in each case.
 
 ### DHCP Networks, Pools, Reservations (`networks.rs`)
 

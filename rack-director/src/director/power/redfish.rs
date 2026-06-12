@@ -153,6 +153,16 @@ impl RedfishDriver {
 ///
 /// This is a pure function so the mapping can be unit-tested independently of
 /// any HTTP infrastructure.
+///
+/// Note that both [`ResetOp::Cycle`] and [`ResetOp::Reset`] map to
+/// `"ForceRestart"`, even though the IPMI driver distinguishes
+/// `chassis power cycle` (off-then-on) from `chassis power reset` (warm reset).
+/// This is intentional: the more precise Redfish `"PowerCycle"` ResetType is
+/// not universally supported across BMC firmware, whereas `"ForceRestart"` is
+/// the broadly-implemented value that reliably reboots the host. The minor
+/// loss of cycle-vs-reset fidelity is accepted in exchange for portability;
+/// for rack-director's purposes (kicking a host back to PXE) both operations
+/// achieve the same outcome.
 fn reset_type_for_op(op: ResetOp) -> &'static str {
     match op {
         ResetOp::On => "On",
@@ -177,7 +187,7 @@ pub(crate) enum ResetOp {
 fn build_client(config: PowerConfig) -> Result<Client> {
     Client::builder()
         .danger_accept_invalid_certs(!config.verify_tls)
-        .timeout(config.http_timeout)
+        .timeout(config.command_timeout)
         .build()
         .context("Failed to build reqwest client for Redfish")
 }
@@ -274,23 +284,14 @@ mod tests {
     /// Stand up a minimal Redfish mock server and return the base URL.
     ///
     /// Mounts:
-    /// - `GET /redfish/v1/` → 200 (health probe)
     /// - `GET /redfish/v1/Systems` → 200 `{Members:[{"@odata.id":"/redfish/v1/Systems/1"}]}`
     /// - `GET /redfish/v1/Systems/1` → 200 with configurable `PowerState`
     /// - `POST /redfish/v1/Systems/1/Actions/ComputerSystem.Reset` → 204
     async fn start_mock_server(power_state: &str) -> (MockServer, String) {
         let server = MockServer::start().await;
 
-        // Health probe (used by resolve_power_driver)
-        Mock::given(method("GET"))
-            .and(path("/redfish/v1/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "@odata.type": "#ServiceRoot.v1_0_0.ServiceRoot"
-            })))
-            .mount(&server)
-            .await;
-
-        // Systems collection
+        // Systems collection — this is what discovery (and therefore
+        // resolve_power_driver) actually probes.
         Mock::given(method("GET"))
             .and(path("/redfish/v1/Systems"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -323,7 +324,7 @@ mod tests {
     fn test_config() -> PowerConfig {
         PowerConfig {
             verify_tls: false,
-            http_timeout: std::time::Duration::from_secs(5),
+            command_timeout: std::time::Duration::from_secs(5),
         }
     }
 

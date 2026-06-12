@@ -1,4 +1,8 @@
-use crate::{database::Connection, dhcp, director::Director};
+use crate::{
+    database::Connection,
+    dhcp,
+    director::{Director, power::PowerConfig},
+};
 use log::warn;
 use std::net::SocketAddr;
 use uuid::Uuid;
@@ -53,12 +57,16 @@ pub async fn resolve_mac_address(
 /// * `conn` - Database connection
 /// * `device_uuid` - UUID of the device to register
 /// * `mac_address` - Optional MAC address to link with pending devices
+/// * `power_config` - Power configuration (e.g. Redfish TLS verification) used by the
+///   OOB power kick when the discovery transition starts. Pass `AppState.power_config`
+///   from HTTP handlers so the `--redfish-verify-tls` CLI flag is honoured.
 pub async fn register_and_start_discovery(
     conn: &Connection,
     device_uuid: &Uuid,
     mac_address: Option<&String>,
+    power_config: PowerConfig,
 ) {
-    let director = Director::new(conn);
+    let director = Director::with_power_config(conn, power_config);
 
     // Check for pending device
     if let Some(mac) = mac_address
@@ -221,7 +229,7 @@ mod tests {
         // Verify device doesn't exist
         assert!(!Director::new(&conn).device_exists(&uuid).await.unwrap());
 
-        register_and_start_discovery(&conn, &uuid, None).await;
+        register_and_start_discovery(&conn, &uuid, None, PowerConfig::default()).await;
 
         // Verify device was registered
         assert!(Director::new(&conn).device_exists(&uuid).await.unwrap());
@@ -261,7 +269,7 @@ mod tests {
             .unwrap();
         assert!(pending.is_some());
 
-        register_and_start_discovery(&conn, &uuid, Some(&mac)).await;
+        register_and_start_discovery(&conn, &uuid, Some(&mac), PowerConfig::default()).await;
 
         // Verify device was registered
         assert!(Director::new(&conn).device_exists(&uuid).await.unwrap());
@@ -296,7 +304,7 @@ mod tests {
         .unwrap();
 
         // Register device - this should create a static reservation
-        register_and_start_discovery(&conn, &uuid, Some(&mac)).await;
+        register_and_start_discovery(&conn, &uuid, Some(&mac), PowerConfig::default()).await;
 
         // Verify static reservation was created
         let reservation = dhcp::store::get_static_reservation(&conn, network_id, &mac)

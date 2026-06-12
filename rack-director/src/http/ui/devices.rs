@@ -2220,9 +2220,9 @@ mod tests {
 
     // ========== Power endpoint tests ==========
 
-    /// `GET /ui/devices/{uuid}/power` on a device with no BMC must return 200
-    /// with `{ "state": "unknown", "driver": null }`.  Proves the endpoint
-    /// never 500s even when the BMC is missing.
+    /// `GET /ui/devices/{uuid}/power` on an **existing** device with no BMC must return 200
+    /// with `{ "state": "unknown", "driver": null }`.  Proves the endpoint degrades
+    /// gracefully for a real device when the BMC is missing.
     #[tokio::test]
     async fn test_get_device_power_no_bmc_returns_200_unknown() {
         let (state, _temp_dir, _migration_conn) =
@@ -2260,9 +2260,10 @@ mod tests {
         assert!(json["driver"].is_null());
     }
 
-    /// `POST /ui/devices/{uuid}/power` on a device with no BMC must return 404.
+    /// `POST /ui/devices/{uuid}/power` on an existing device with no BMC must return 409
+    /// Conflict (device exists but is not BMC-capable), not 404.
     #[tokio::test]
-    async fn test_post_device_power_no_bmc_returns_404() {
+    async fn test_post_device_power_no_bmc_returns_409() {
         let (state, _temp_dir, _migration_conn) =
             setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x51);
@@ -2287,8 +2288,59 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(
             response.status(),
+            StatusCode::CONFLICT,
+            "POST /power with no BMC must return 409 Conflict"
+        );
+    }
+
+    /// `GET /ui/devices/{uuid}/power` with a UUID that doesn't exist in the database
+    /// must return `404 Not Found`.
+    #[tokio::test]
+    async fn test_get_device_power_nonexistent_device_returns_404() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        // UUID that was never registered
+        let unknown_uuid = test_uuid(0xF1);
+
+        let app = routes(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/ui/devices/{}/power", unknown_uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
             StatusCode::NOT_FOUND,
-            "POST /power with no BMC must return 404"
+            "GET /power for an unknown UUID must return 404"
+        );
+    }
+
+    /// `POST /ui/devices/{uuid}/power` with a UUID that doesn't exist in the database
+    /// must return `404 Not Found`.
+    #[tokio::test]
+    async fn test_post_device_power_nonexistent_device_returns_404() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        // UUID that was never registered
+        let unknown_uuid = test_uuid(0xF2);
+
+        let app = routes(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/ui/devices/{}/power", unknown_uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"action":"on"}"#))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "POST /power for an unknown UUID must return 404"
         );
     }
 }
@@ -2398,29 +2450,53 @@ async fn get_warnings(
 ///
 /// Query the current power state of a device's BMC.
 ///
-/// Always returns `200 OK`.  When no BMC is configured or the BMC is
-/// unreachable the response degrades to `{ "state": "unknown", "driver": null }`
-/// so that the UI badge can render without ever triggering a 500.
+/// Responses:
+/// - `200 OK` – Device exists. The body is always `{ "state": "...", "driver": ... }`.
+///   When the BMC is not configured, is unreachable, or the driver returns an error, the
+///   response **degrades gracefully** to `{ "state": "unknown", "driver": null }` rather
+///   than returning an error. This "never errors for a real device" property is relied on
+///   by the UI power badge — the badge can always render without hanging or erroring.
+/// - `404 Not Found` – No device with that UUID exists in the database.
+/// - `500 Internal Server Error` – Database connection could not be opened.
 async fn get_device_power(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
-) -> Json<PowerStatusResponse> {
-    let conn = match state.connection_factory.open().await {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("get_device_power: failed to open DB connection: {}", e);
-            return Json(PowerStatusResponse {
-                state: PowerState::Unknown,
-                driver: None,
-            });
-        }
-    };
+) -> Result<Json<PowerStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let conn = state.connection_factory.open().await.map_err(|e| {
+        log::warn!("get_device_power: failed to open DB connection: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })?;
+
     let director = Director::with_power_config(&conn, state.power_config);
+
+    if !director.device_exists(&uuid).await.map_err(|e| {
+        log::warn!("get_device_power: device_exists check failed: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })? {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Device {} not found", uuid),
+            }),
+        ));
+    }
+
+    // Device exists — query power state, degrading gracefully on any BMC failure.
     let (power_state, driver) = director.power_status(&uuid).await;
-    Json(PowerStatusResponse {
+    Ok(Json(PowerStatusResponse {
         state: power_state,
         driver,
-    })
+    }))
 }
 
 /// `POST /ui/devices/{uuid}/power`
@@ -2429,9 +2505,14 @@ async fn get_device_power(
 ///
 /// Request body: `{ "action": "on" | "off" | "cycle" }`.
 ///
+/// `"off"` issues a **hard** (immediate) power-off, not a graceful OS shutdown
+/// (see [`Director::power_action`]).
+///
 /// Responses:
 /// - `200 OK`  – command issued successfully.
-/// - `404 Not Found` – device has no BMC configured.
+/// - `404 Not Found` – no device with that UUID exists.
+/// - `409 Conflict` – device exists but has no BMC configured.
+/// - `500 Internal Server Error` – database connection could not be opened.
 /// - `502 Bad Gateway` – BMC driver returned an error.
 async fn post_device_power(
     State(state): State<Arc<AppState>>,
@@ -2448,12 +2529,30 @@ async fn post_device_power(
     })?;
     let director = Director::with_power_config(&conn, state.power_config);
 
+    // Distinguish "device not found" from "no BMC configured" so callers can
+    // surface a meaningful error rather than a generic 404 for both cases.
+    if !director.device_exists(&uuid).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+            }),
+        )
+    })? {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Device {} not found", uuid),
+            }),
+        ));
+    }
+
     match director.power_action(&uuid, payload.action).await {
         Ok(true) => Ok(Json(serde_json::json!({
             "message": format!("Power action issued for device {}", uuid)
         }))),
         Ok(false) => Err((
-            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
             Json(ErrorResponse {
                 error: format!("No BMC configured for device {}", uuid),
             }),

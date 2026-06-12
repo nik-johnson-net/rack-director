@@ -33,15 +33,19 @@ pub struct PowerConfig {
     /// certificates.  Set to `true` in production environments with
     /// properly-signed BMC certificates (via `--redfish-verify-tls`).
     pub verify_tls: bool,
-    /// Timeout for individual HTTP requests to the BMC.
-    pub http_timeout: Duration,
+    /// Timeout for an individual BMC command.
+    ///
+    /// Bounds both Redfish HTTP requests (via the reqwest client) and the
+    /// `ipmitool` subprocess invocation, so that an unreachable BMC cannot
+    /// block an HTTP request handler for tens of seconds.
+    pub command_timeout: Duration,
 }
 
 impl Default for PowerConfig {
     fn default() -> Self {
         Self {
             verify_tls: false,
-            http_timeout: Duration::from_secs(4),
+            command_timeout: Duration::from_secs(4),
         }
     }
 }
@@ -93,9 +97,11 @@ pub trait PowerDriver: Send + Sync {
 /// - RFC 3339 / ISO 8601 (e.g. `"2026-06-10T12:34:56Z"`)
 /// - SQLite `CURRENT_TIMESTAMP` space-separated UTC (e.g. `"2026-06-10 12:34:56"`)
 ///
-/// Any value that cannot be parsed, is `None`, is the default sentinel `"0"`,
-/// or refers to a timestamp in the future, is treated as **not** in daemon mode
-/// (the safe default: proceed with the kick).
+/// Any value that cannot be parsed, is `None`, is the empty string, is the
+/// legacy `"0"` sentinel (handled defensively even though the column is now a
+/// plain nullable `DATETIME` with no `DEFAULT`), or refers to a timestamp in
+/// the future, is treated as **not** in daemon mode (the safe default: proceed
+/// with the kick).
 pub fn is_in_daemon_mode(last_polled_at: Option<&str>, window: Duration) -> bool {
     let ts = match last_polled_at {
         None => return false,
@@ -141,14 +147,15 @@ fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
 
 /// Probe the BMC and return the best available `PowerDriver`.
 ///
-/// Attempts a Redfish probe (`GET https://{ip}/redfish/v1/`) with the
-/// configured timeout.  On success, discovers the ComputerSystem path and
-/// returns a `RedfishDriver`.  On any failure (connection refused, timeout,
-/// non-2xx response) falls back to `IpmiDriver`.
+/// Attempts Redfish discovery via [`redfish::RedfishDriver::discover`], which
+/// issues `GET https://{ip}/redfish/v1/Systems` with the configured timeout.
+/// On success, the discovered ComputerSystem path is used to build a
+/// `RedfishDriver`.  On any failure (connection refused, timeout, non-2xx
+/// response, empty `Members`) this falls back to an `IpmiDriver`.
 ///
-/// Returns `Some(driver)` in both the Redfish and IPMI cases — the only
-/// failure is an internal error building the reqwest client, which is
-/// logged and results in `None`.
+/// A driver is always returned: the IPMI fallback construction is infallible,
+/// so there is no "no driver" outcome here.  Callers that must represent the
+/// absence of a BMC (no IP/credentials) should do so before calling this.
 ///
 /// # Arguments
 ///
@@ -161,12 +168,12 @@ pub async fn resolve_power_driver(
     username: &str,
     password: &str,
     config: PowerConfig,
-) -> Option<Box<dyn PowerDriver>> {
+) -> Box<dyn PowerDriver> {
     // Try Redfish first
     match redfish::RedfishDriver::discover(ip, username, password, config).await {
         Ok(driver) => {
             log::debug!("BMC at {} supports Redfish; using Redfish driver", ip);
-            Some(Box::new(driver))
+            Box::new(driver)
         }
         Err(e) => {
             log::debug!(
@@ -174,11 +181,12 @@ pub async fn resolve_power_driver(
                 ip,
                 e
             );
-            Some(Box::new(IpmiDriver::new(
+            Box::new(IpmiDriver::new(
                 ip.to_string(),
                 username.to_string(),
                 password.to_string(),
-            )))
+                config.command_timeout,
+            ))
         }
     }
 }
@@ -315,5 +323,28 @@ mod tests {
         // We just confirm no panic and that an old timestamp fails.
         let ts = seconds_ago_rfc3339(1);
         assert!(!is_in_daemon_mode(Some(&ts), Duration::ZERO));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_power_driver tests
+    // -----------------------------------------------------------------------
+
+    /// When the Redfish probe fails (here: a connection refused against a
+    /// closed port on loopback), `resolve_power_driver` must fall back to the
+    /// IPMI driver rather than returning nothing.
+    #[tokio::test]
+    async fn test_resolve_power_driver_falls_back_to_ipmi() {
+        // 127.0.0.1:9 (discard) is closed on the runners; the connection is
+        // refused promptly. A short timeout bounds the worst case regardless.
+        let config = PowerConfig {
+            verify_tls: false,
+            command_timeout: Duration::from_millis(500),
+        };
+        let driver = resolve_power_driver("127.0.0.1:9", "admin", "secret", config).await;
+        assert_eq!(
+            driver.kind(),
+            "ipmi",
+            "failed Redfish probe should fall back to the IPMI driver"
+        );
     }
 }
