@@ -2196,7 +2196,6 @@ mod tests {
         // Empty string
         assert!(validate_mac_address("").is_some());
     }
-
 }
 
 // Platform assignment handlers

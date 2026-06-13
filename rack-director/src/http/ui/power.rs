@@ -213,9 +213,8 @@ mod tests {
         let boot_files_path = temp_dir.path().join("boot");
         std::fs::create_dir_all(&boot_files_path).unwrap();
 
-        let boot_file_provider = Arc::new(
-            crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap(),
-        );
+        let boot_file_provider =
+            Arc::new(crate::boot_files::FilesystemBootFileProvider::new(boot_files_path).unwrap());
 
         let conn: Arc<dyn crate::database::ConnectionFactory> = Arc::new(factory);
         let migration_conn = database::run_migrations(conn.as_ref()).await.unwrap();
