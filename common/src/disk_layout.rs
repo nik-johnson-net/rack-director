@@ -51,7 +51,8 @@ pub struct VolumeGroup {
 pub struct LogicalVolume {
     pub name: String,
     pub size: String, // "50G", "100%FREE"
-    pub filesystem: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem: Option<String>, // None for raw LVs (e.g., Ceph OSDs)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_point: Option<String>,
 }
@@ -207,20 +208,27 @@ mod tests {
                     LogicalVolume {
                         name: "root".to_string(),
                         size: "50G".to_string(),
-                        filesystem: "ext4".to_string(),
+                        filesystem: Some("ext4".to_string()),
                         mount_point: Some("/".to_string()),
                     },
                     LogicalVolume {
                         name: "swap".to_string(),
                         size: "8G".to_string(),
-                        filesystem: "swap".to_string(),
+                        filesystem: Some("swap".to_string()),
                         mount_point: None,
                     },
                     LogicalVolume {
                         name: "home".to_string(),
-                        size: "100%FREE".to_string(),
-                        filesystem: "ext4".to_string(),
+                        size: "50G".to_string(),
+                        filesystem: Some("ext4".to_string()),
                         mount_point: Some("/home".to_string()),
+                    },
+                    // Raw LV with no filesystem (e.g. consumed by Ceph).
+                    LogicalVolume {
+                        name: "ceph".to_string(),
+                        size: "100%FREE".to_string(),
+                        filesystem: None,
+                        mount_point: None,
                     },
                 ],
             }]),

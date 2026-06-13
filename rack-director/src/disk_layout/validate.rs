@@ -108,7 +108,31 @@ fn validate_disk_partitions(
 
     for (j, partition) in partitions.iter().enumerate() {
         validate_partition_filesystem(disk_index, j, partition.filesystem.as_deref(), errors);
+        validate_mount_point_requires_filesystem(
+            format!("disks.{}.partitions.{}.mount_point", disk_index, j),
+            partition.filesystem.as_deref(),
+            partition.mount_point.as_deref(),
+            errors,
+        );
         validate_lvm_partition(disk_index, j, partition, defined_vg_names, errors);
+    }
+}
+
+/// A mount point is only meaningful when there is a filesystem to mount. Reject a
+/// `mount_point` that is set while `filesystem` is absent — install-script templates
+/// would otherwise emit a broken entry with an empty filesystem type.
+fn validate_mount_point_requires_filesystem(
+    field: String,
+    filesystem: Option<&str>,
+    mount_point: Option<&str>,
+    errors: &mut HashMap<String, String>,
+) {
+    if filesystem.is_none() && mount_point.is_some() {
+        errors.insert(
+            field,
+            "A mount point requires a filesystem; clear the mount point or choose a filesystem"
+                .to_string(),
+        );
     }
 }
 
@@ -251,7 +275,11 @@ fn validate_logical_volume_filesystems(
     errors: &mut HashMap<String, String>,
 ) {
     for (j, lv) in vg.logical_volumes.iter().enumerate() {
-        if !VALID_FILESYSTEMS.contains(&lv.filesystem.as_str()) {
+        // A logical volume may omit its filesystem (e.g. a raw LV consumed by
+        // Ceph). Only validate the value when one is specified.
+        if let Some(fs) = lv.filesystem.as_deref()
+            && !VALID_FILESYSTEMS.contains(&fs)
+        {
             errors.insert(
                 format!(
                     "volume_groups.{}.logical_volumes.{}.filesystem",
@@ -259,10 +287,20 @@ fn validate_logical_volume_filesystems(
                 ),
                 format!(
                     "Invalid filesystem '{}'. Valid options: ext4, xfs, btrfs, vfat, swap",
-                    lv.filesystem
+                    fs
                 ),
             );
         }
+
+        validate_mount_point_requires_filesystem(
+            format!(
+                "volume_groups.{}.logical_volumes.{}.mount_point",
+                vg_index, j
+            ),
+            lv.filesystem.as_deref(),
+            lv.mount_point.as_deref(),
+            errors,
+        );
     }
 }
 
@@ -674,7 +712,7 @@ mod tests {
                 logical_volumes: vec![LogicalVolume {
                     name: "root".to_string(),
                     size: "rest".to_string(),
-                    filesystem: "ext4".to_string(),
+                    filesystem: Some("ext4".to_string()),
                     mount_point: Some("/".to_string()),
                 }],
             }]),
@@ -757,7 +795,7 @@ mod tests {
                 logical_volumes: vec![LogicalVolume {
                     name: "root".to_string(),
                     size: "rest".to_string(),
-                    filesystem: "ext4".to_string(),
+                    filesystem: Some("ext4".to_string()),
                     mount_point: Some("/".to_string()),
                 }],
             }]),
@@ -796,7 +834,7 @@ mod tests {
                 logical_volumes: vec![LogicalVolume {
                     name: "root".to_string(),
                     size: "rest".to_string(),
-                    filesystem: "fat32".to_string(), // invalid
+                    filesystem: Some("fat32".to_string()), // invalid
                     mount_point: Some("/".to_string()),
                 }],
             }]),
@@ -807,6 +845,92 @@ mod tests {
         let errors = result.unwrap_err();
         assert!(errors.contains_key("volume_groups.0.logical_volumes.0.filesystem"));
         assert!(errors["volume_groups.0.logical_volumes.0.filesystem"].contains("fat32"));
+    }
+
+    #[test]
+    fn test_lv_without_filesystem_is_ok() {
+        // A raw LV (e.g. consumed by Ceph) omits its filesystem.
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "lvm".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                    flags: Some(vec!["lvm".to_string()]),
+                    volume_group: Some("vg0".to_string()),
+                }],
+            }],
+            volume_groups: Some(vec![VolumeGroup {
+                name: "vg0".to_string(),
+                logical_volumes: vec![LogicalVolume {
+                    name: "osd0".to_string(),
+                    size: "100%FREE".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                }],
+            }]),
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, None).is_ok());
+    }
+
+    #[test]
+    fn test_lv_mount_point_without_filesystem_returns_error() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "lvm".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                    flags: Some(vec!["lvm".to_string()]),
+                    volume_group: Some("vg0".to_string()),
+                }],
+            }],
+            volume_groups: Some(vec![VolumeGroup {
+                name: "vg0".to_string(),
+                logical_volumes: vec![LogicalVolume {
+                    name: "data".to_string(),
+                    size: "100%FREE".to_string(),
+                    filesystem: None,
+                    mount_point: Some("/data".to_string()), // nonsensical: no fs to mount
+                }],
+            }]),
+            zfs_pools: None,
+        };
+        let result = validate_disk_layout(&layout, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("volume_groups.0.logical_volumes.0.mount_point"));
+    }
+
+    #[test]
+    fn test_partition_mount_point_without_filesystem_returns_error() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "data".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: Some("/data".to_string()), // nonsensical: no fs to mount
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        let result = validate_disk_layout(&layout, None);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.contains_key("disks.0.partitions.0.mount_point"));
     }
 
     #[test]
@@ -840,13 +964,13 @@ mod tests {
                     LogicalVolume {
                         name: "root".to_string(),
                         size: "50G".to_string(),
-                        filesystem: "ext4".to_string(),
+                        filesystem: Some("ext4".to_string()),
                         mount_point: Some("/".to_string()),
                     },
                     LogicalVolume {
                         name: "swap".to_string(),
                         size: "8G".to_string(),
-                        filesystem: "swap".to_string(),
+                        filesystem: Some("swap".to_string()),
                         mount_point: None,
                     },
                 ],

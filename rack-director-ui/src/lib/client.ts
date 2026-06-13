@@ -261,7 +261,7 @@ export type DiskConfig = {
 export type LogicalVolume = {
   name: string;
   size: string;              // "50G", "100%FREE"
-  filesystem: string;
+  filesystem?: string;       // undefined for raw LVs (e.g. Ceph OSDs)
   mount_point?: string;
 };
 
