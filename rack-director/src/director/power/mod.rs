@@ -6,11 +6,15 @@
 //! The primary entry point for callers is [`resolve_power_driver`], which probes
 //! the BMC and returns the best available driver.  `Director::power_driver_for`
 //! wraps it with the BMC credential lookup.
+//!
+//! Power-kick logic and the user-facing [`PowerAction`] enum live in [`ops`].
 
 mod ipmi;
+pub(crate) mod ops;
 mod redfish;
 
 pub use ipmi::IpmiDriver;
+pub use ops::PowerAction;
 
 use std::time::Duration;
 

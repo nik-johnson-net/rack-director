@@ -12,6 +12,7 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | `dhcp.rs` | Global DHCP lease queries (all leases, by MAC) |
 | `platforms.rs` | Platform CRUD, platform-device listing |
 | `osm.rs` | OSM module CRUD, upload, export, OS enable/disable |
+| `power.rs` | Power status/control endpoints (`/ui/devices/{uuid}/power`) |
 | `roles.rs` | Role CRUD, role-device listing |
 | `validation.rs` | Shared validation helpers — no routes |
 

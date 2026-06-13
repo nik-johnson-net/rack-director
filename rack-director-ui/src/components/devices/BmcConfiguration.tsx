@@ -5,29 +5,16 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Clock, AlertCircle, Power, RotateCcw, Zap } from "lucide-react";
+import { Clock, AlertCircle } from "lucide-react";
 import {
   type Device,
   type DhcpNetwork,
   type BmcConfig,
-  type PowerState,
-  type PowerAction,
   updateDeviceAttributes,
   getDevice,
-  getDevicePower,
-  setDevicePower,
   ValidationError,
 } from "@/lib/client";
+import { PowerControls } from "./power-controls";
 
 type BmcConfigurationProps = {
   device: Device;
@@ -35,95 +22,6 @@ type BmcConfigurationProps = {
   onDeviceUpdate: (device: Device) => void;
   onError: (error: string) => void;
 };
-
-// ── Power confirm dialog ─────────────────────────────────────────────────────
-
-type PowerConfirmDialogProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  action: "off" | "cycle";
-  onConfirm: () => Promise<void>;
-};
-
-function PowerConfirmDialog({ open, onOpenChange, action, onConfirm }: PowerConfirmDialogProps) {
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const handleConfirm = async () => {
-    setIsSubmitting(true);
-    try {
-      await onConfirm();
-      onOpenChange(false);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>
-            {action === "off" ? "Power Off Device?" : "Power Cycle Device?"}
-          </AlertDialogTitle>
-          <AlertDialogDescription>
-            {action === "off"
-              ? "This will send a hard power-off command to the BMC. The device will lose power immediately."
-              : "This will send a power-cycle command to the BMC. The device will reboot immediately."}
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={isSubmitting}>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={handleConfirm}
-            disabled={isSubmitting}
-            className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
-          >
-            {isSubmitting
-              ? "Sending..."
-              : action === "off"
-              ? "Power Off"
-              : "Power Cycle"}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
-}
-
-// ── Power state badge ────────────────────────────────────────────────────────
-
-function PowerStateBadge({ state, loading }: { state: PowerState | null; loading: boolean }) {
-  if (loading) {
-    return (
-      <Badge variant="outline" className="text-text-muted">
-        Checking...
-      </Badge>
-    );
-  }
-  if (state === "on") {
-    return (
-      <Badge variant="status-provisioned">
-        <Power className="size-3" />
-        On
-      </Badge>
-    );
-  }
-  if (state === "off") {
-    return (
-      <Badge variant="secondary">
-        <Power className="size-3" />
-        Off
-      </Badge>
-    );
-  }
-  // unknown or null
-  return (
-    <Badge variant="outline" className="text-text-muted">
-      <Power className="size-3" />
-      Unknown
-    </Badge>
-  );
-}
 
 // ── Main component ────────────────────────────────────────────────────────────
 
@@ -138,16 +36,6 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
   const [savingBmc, setSavingBmc] = useState(false);
   const [bmcConfigChanged, setBmcConfigChanged] = useState(false);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
-
-  // Power state — lazy, non-blocking, never gates card render
-  const [powerState, setPowerState] = useState<PowerState | null>(null);
-  const [powerDriver, setPowerDriver] = useState<string | null>(null);
-  const [powerLoading, setPowerLoading] = useState(false);
-  const [powerActionInFlight, setPowerActionInFlight] = useState(false);
-
-  // Confirmation dialog state
-  const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
-  const [pendingAction, setPendingAction] = useState<"off" | "cycle" | null>(null);
 
   useEffect(() => {
     // Initialize BMC configuration from device attributes
@@ -169,80 +57,6 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
       });
     }
   }, [device, networks]);
-
-  // Fetch power state lazily when a BMC is present — never blocks the card render
-  useEffect(() => {
-    if (!device.attributes?.bmc) return;
-    let cancelled = false;
-
-    setPowerLoading(true);
-    getDevicePower(device.uuid).then((status) => {
-      if (cancelled) return;
-      setPowerState(status.state);
-      setPowerDriver(status.driver);
-    }).catch(() => {
-      if (cancelled) return;
-      setPowerState("unknown");
-      setPowerDriver(null);
-    }).finally(() => {
-      if (!cancelled) setPowerLoading(false);
-    });
-
-    return () => { cancelled = true; };
-  }, [device.uuid, device.attributes?.bmc]);
-
-  const fetchPowerState = () => {
-    setPowerLoading(true);
-    getDevicePower(device.uuid).then((status) => {
-      setPowerState(status.state);
-      setPowerDriver(status.driver);
-    }).catch(() => {
-      setPowerState("unknown");
-      setPowerDriver(null);
-    }).finally(() => {
-      setPowerLoading(false);
-    });
-  };
-
-  const executePowerAction = async (action: PowerAction) => {
-    setPowerActionInFlight(true);
-    onError("");
-    try {
-      await setDevicePower(device.uuid, action);
-      // Re-fetch state after action; state may take a moment to change but a single fetch is fine
-      fetchPowerState();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : "Failed to execute power action");
-    } finally {
-      setPowerActionInFlight(false);
-    }
-  };
-
-  const handlePowerOn = () => {
-    executePowerAction("on");
-  };
-
-  const handlePowerOff = async () => {
-    await executePowerAction("off");
-  };
-
-  const handlePowerCycle = async () => {
-    await executePowerAction("cycle");
-  };
-
-  const requestDestructiveAction = (action: "off" | "cycle") => {
-    setPendingAction(action);
-    setConfirmDialogOpen(true);
-  };
-
-  const handleConfirmDestructive = async () => {
-    if (!pendingAction) return;
-    if (pendingAction === "off") {
-      await handlePowerOff();
-    } else {
-      await handlePowerCycle();
-    }
-  };
 
   const handleSaveBmcConfig = async () => {
     setSavingBmc(true);
@@ -298,8 +112,6 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
     return null;
   }
 
-  const buttonsDisabled = powerActionInFlight || powerLoading;
-
   return (
     <>
       <Card>
@@ -326,50 +138,11 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
                   {device.attributes.bmc.ip_address_source}
                 </Badge>
 
-                <span className="text-muted-foreground">Power State:</span>
-                <div className="flex items-center gap-2">
-                  <PowerStateBadge state={powerState} loading={powerLoading} />
-                  {!powerLoading && powerDriver && (
-                    <span className="text-xs text-text-muted">{powerDriver}</span>
-                  )}
-                </div>
-              </div>
-
-              {/* Power Controls */}
-              <div className="mt-3 pt-3 border-t border-border-muted">
-                <div className="text-xs text-text-secondary uppercase tracking-wide mb-2">Power Controls</div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={handlePowerOn}
-                    disabled={buttonsDisabled}
-                    aria-label="Power on device"
-                  >
-                    <Zap className="size-3.5" />
-                    Power On
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => requestDestructiveAction("off")}
-                    disabled={buttonsDisabled}
-                    aria-label="Power off device"
-                  >
-                    <Power className="size-3.5" />
-                    Power Off
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => requestDestructiveAction("cycle")}
-                    disabled={buttonsDisabled}
-                    aria-label="Power cycle device"
-                  >
-                    <RotateCcw className="size-3.5" />
-                    Power Cycle
-                  </Button>
-                </div>
+                <PowerControls
+                  uuid={device.uuid}
+                  hasBmc={!!device.attributes?.bmc}
+                  onError={onError}
+                />
               </div>
             </div>
           )}
@@ -520,19 +293,6 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
           </Tabs>
         </CardContent>
       </Card>
-
-      {/* Power action confirmation dialog (off / cycle are destructive) */}
-      {pendingAction && (
-        <PowerConfirmDialog
-          open={confirmDialogOpen}
-          onOpenChange={(open) => {
-            setConfirmDialogOpen(open);
-            if (!open) setPendingAction(null);
-          }}
-          action={pendingAction}
-          onConfirm={handleConfirmDestructive}
-        />
-      )}
     </>
   );
 }
