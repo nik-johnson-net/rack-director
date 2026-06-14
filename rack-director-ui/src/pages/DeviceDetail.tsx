@@ -39,7 +39,7 @@ import {
   type Platform,
   type DeviceWarning,
 } from "@/lib/client";
-import { AlertCircle, Pin, Trash2, Zap, XCircle, WrenchIcon, CheckCircle2 } from "lucide-react";
+import { AlertCircle, Pin, Trash2, Zap, XCircle, WrenchIcon } from "lucide-react";
 import { EditableHostname } from "@/components/devices/editable-hostname";
 import { MakeStaticDialog } from "@/components/networks/make-static-dialog";
 import { TransitionDialog } from "@/components/devices/transition-dialog";
@@ -868,7 +868,7 @@ function DeviceDetail() {
         </Button>
       )}
 
-      {/* Broken: Deprovision + Provision (asks role) + Mark As Fixed + Decommission */}
+      {/* Broken: Deprovision + Provision (asks role) + Decommission */}
       {isBroken && (
         <>
           <Button
@@ -888,15 +888,6 @@ function DeviceDetail() {
           >
             <Zap className="size-3.5" />
             Provision
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => openTransitionDialog("unprovisioned")}
-            disabled={transitioning}
-          >
-            <CheckCircle2 className="size-3.5" />
-            Mark As Fixed
           </Button>
           <Button
             variant="danger"
