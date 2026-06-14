@@ -274,7 +274,7 @@ The VM module automatically selects acceleration:
 | Linux with `/dev/kvm` | `-enable-kvm -cpu host` |
 | Windows / other | `-accel tcg -cpu Icelake-Server-noTSX` (software emulation) |
 
-WHPX is not used on Windows even though it is faster. WHPX's XCR0/XSAVE emulation is incomplete (the upstream patch was never merged), which prevents AVX2 from being enabled. AlmaLinux 10's glibc requires x86-64-v3 (needs AVX2 via XCR0.YMM) and panics on WHPX. TCG fully emulates XCR0 and works correctly.
+WHPX is not used on Windows even though it is faster. WHPX's XCR0/XSAVE emulation is incomplete (the upstream patch was never merged), which prevents AVX2 from being enabled. CentOS 10's glibc requires x86-64-v3 (needs AVX2 via XCR0.YMM) and panics on WHPX. TCG fully emulates XCR0 and works correctly.
 
 Tests will run on TCG but will be significantly slower. The director VM alone takes ~2–3 minutes to boot under TCG.
 
