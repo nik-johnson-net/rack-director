@@ -6,7 +6,15 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Clock, AlertCircle } from "lucide-react";
-import { type Device, type DhcpNetwork, type BmcConfig, updateDeviceAttributes, getDevice, ValidationError } from "@/lib/client";
+import {
+  type Device,
+  type DhcpNetwork,
+  type BmcConfig,
+  updateDeviceAttributes,
+  getDevice,
+  ValidationError,
+} from "@/lib/client";
+import { PowerControls } from "./power-controls";
 
 type BmcConfigurationProps = {
   device: Device;
@@ -14,6 +22,8 @@ type BmcConfigurationProps = {
   onDeviceUpdate: (device: Device) => void;
   onError: (error: string) => void;
 };
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: BmcConfigurationProps) {
   const [bmcMode, setBmcMode] = useState<"dhcp" | "static">("dhcp");
@@ -103,159 +113,74 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>BMC Configuration</CardTitle>
-        <CardDescription>
-          Baseboard Management Controller settings
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Discovered BMC Info */}
-        {device.attributes?.bmc && (
-          <div className="p-3 bg-muted rounded-md border">
-            <div className="text-sm font-medium mb-2">Discovered BMC</div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
-              <span className="text-muted-foreground">MAC Address:</span>
-              <span className="font-mono">{device.attributes.bmc.mac_address}</span>
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle>BMC Configuration</CardTitle>
+          <CardDescription>
+            Baseboard Management Controller settings
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Discovered BMC Info */}
+          {device.attributes?.bmc && (
+            <div className="p-3 bg-muted rounded-md border">
+              <div className="text-sm font-medium mb-2">Discovered BMC</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <span className="text-muted-foreground">MAC Address:</span>
+                <span className="font-mono">{device.attributes.bmc.mac_address}</span>
 
-              <span className="text-muted-foreground">Current IP:</span>
-              <span className="font-mono">{device.attributes.bmc.ip_address || "Not assigned"}</span>
+                <span className="text-muted-foreground">Current IP:</span>
+                <span className="font-mono">{device.attributes.bmc.ip_address || "Not assigned"}</span>
 
-              <span className="text-muted-foreground">IP Source:</span>
-              <Badge variant={device.attributes.bmc.ip_address_source.includes("DHCP") ? "outline" : "secondary"}>
-                {device.attributes.bmc.ip_address_source}
-              </Badge>
-            </div>
-          </div>
-        )}
+                <span className="text-muted-foreground">IP Source:</span>
+                <Badge variant={device.attributes.bmc.ip_address_source.includes("DHCP") ? "outline" : "secondary"}>
+                  {device.attributes.bmc.ip_address_source}
+                </Badge>
 
-        {/* Pending Configuration Indicator */}
-        {device.attributes.bmc_config &&
-         device.attributes.bmc?.ip_address_source &&
-         ((device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "static") ||
-          (!device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "dhcp")) && (
-          <div className="p-3 bg-warn-bg border border-warn-border rounded-md">
-            <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-status-unprovisioned" />
-              <div className="text-sm text-text-primary">
-                <strong>Configuration Pending:</strong> BMC is currently using{" "}
-                <strong>{device.attributes.bmc.ip_address_source.includes("DHCP") ? "DHCP" : "Static IP"}</strong>,
-                but configured for{" "}
-                <strong>{device.attributes.bmc_config.ip_address_source === "dhcp" ? "DHCP" : "Static IP"}</strong>.
-                Changes will be applied on next discovery cycle.
+                <PowerControls
+                  uuid={device.uuid}
+                  hasBmc={!!device.attributes?.bmc}
+                  onError={onError}
+                />
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* BMC Configuration Mode Selector */}
-        <Tabs value={bmcMode} onValueChange={(value) => {
-          setBmcMode(value as "dhcp" | "static");
-          setBmcConfigChanged(true);
-        }}>
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="dhcp">DHCP</TabsTrigger>
-            <TabsTrigger value="static">Static IP</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="dhcp" className="space-y-4">
-            <div className="p-4 bg-muted rounded-md text-center">
-              <p className="text-sm text-muted-foreground">
-                BMC will use DHCP to obtain its IP address automatically.
-              </p>
+          {/* Pending Configuration Indicator */}
+          {device.attributes.bmc_config &&
+           device.attributes.bmc?.ip_address_source &&
+           ((device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "static") ||
+            (!device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "dhcp")) && (
+            <div className="p-3 bg-warn-bg border border-warn-border rounded-md">
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4 text-status-unprovisioned" />
+                <div className="text-sm text-text-primary">
+                  <strong>Configuration Pending:</strong> BMC is currently using{" "}
+                  <strong>{device.attributes.bmc.ip_address_source.includes("DHCP") ? "DHCP" : "Static IP"}</strong>,
+                  but configured for{" "}
+                  <strong>{device.attributes.bmc_config.ip_address_source === "dhcp" ? "DHCP" : "Static IP"}</strong>.
+                  Changes will be applied on next discovery cycle.
+                </div>
+              </div>
             </div>
+          )}
 
-            <Button
-              onClick={handleSaveBmcConfig}
-              disabled={savingBmc || !bmcConfigChanged}
-              className="w-full"
-            >
-              {savingBmc ? "Saving..." : "Save BMC Configuration"}
-            </Button>
-          </TabsContent>
+          {/* BMC Configuration Mode Selector */}
+          <Tabs value={bmcMode} onValueChange={(value) => {
+            setBmcMode(value as "dhcp" | "static");
+            setBmcConfigChanged(true);
+          }}>
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="dhcp">DHCP</TabsTrigger>
+              <TabsTrigger value="static">Static IP</TabsTrigger>
+            </TabsList>
 
-          <TabsContent value="static" className="space-y-4">
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <Label htmlFor="bmc-ip">IP Address</Label>
-                <Input
-                  id="bmc-ip"
-                  type="text"
-                  value={bmcConfig.ip_address}
-                  onChange={(e) => {
-                    setBmcConfig({ ...bmcConfig, ip_address: e.target.value });
-                    setBmcConfigChanged(true);
-                    // Clear validation error when user starts typing
-                    if (validationErrors["bmc_config.ip_address"]) {
-                      const newErrors = { ...validationErrors };
-                      delete newErrors["bmc_config.ip_address"];
-                      setValidationErrors(newErrors);
-                    }
-                  }}
-                  placeholder="e.g., 192.168.1.100"
-                  className={`font-mono ${validationErrors["bmc_config.ip_address"] ? "border-destructive" : ""}`}
-                />
-                {validationErrors["bmc_config.ip_address"] && (
-                  <div className="flex items-center gap-2 text-sm text-destructive">
-                    <AlertCircle className="h-4 w-4" />
-                    <span>{validationErrors["bmc_config.ip_address"]}</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="bmc-netmask">Netmask</Label>
-                <Input
-                  id="bmc-netmask"
-                  type="text"
-                  value={bmcConfig.netmask}
-                  onChange={(e) => {
-                    setBmcConfig({ ...bmcConfig, netmask: e.target.value });
-                    setBmcConfigChanged(true);
-                    // Clear validation error when user starts typing
-                    if (validationErrors["bmc_config.netmask"]) {
-                      const newErrors = { ...validationErrors };
-                      delete newErrors["bmc_config.netmask"];
-                      setValidationErrors(newErrors);
-                    }
-                  }}
-                  placeholder="e.g., 255.255.255.0"
-                  className={`font-mono ${validationErrors["bmc_config.netmask"] ? "border-destructive" : ""}`}
-                />
-                {validationErrors["bmc_config.netmask"] && (
-                  <div className="flex items-center gap-2 text-sm text-destructive">
-                    <AlertCircle className="h-4 w-4" />
-                    <span>{validationErrors["bmc_config.netmask"]}</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="bmc-gateway">Gateway</Label>
-                <Input
-                  id="bmc-gateway"
-                  type="text"
-                  value={bmcConfig.gateway}
-                  onChange={(e) => {
-                    setBmcConfig({ ...bmcConfig, gateway: e.target.value });
-                    setBmcConfigChanged(true);
-                    // Clear validation error when user starts typing
-                    if (validationErrors["bmc_config.gateway"]) {
-                      const newErrors = { ...validationErrors };
-                      delete newErrors["bmc_config.gateway"];
-                      setValidationErrors(newErrors);
-                    }
-                  }}
-                  placeholder="e.g., 192.168.1.1"
-                  className={`font-mono ${validationErrors["bmc_config.gateway"] ? "border-destructive" : ""}`}
-                />
-                {validationErrors["bmc_config.gateway"] && (
-                  <div className="flex items-center gap-2 text-sm text-destructive">
-                    <AlertCircle className="h-4 w-4" />
-                    <span>{validationErrors["bmc_config.gateway"]}</span>
-                  </div>
-                )}
+            <TabsContent value="dhcp" className="space-y-4">
+              <div className="p-4 bg-muted rounded-md text-center">
+                <p className="text-sm text-muted-foreground">
+                  BMC will use DHCP to obtain its IP address automatically.
+                </p>
               </div>
 
               <Button
@@ -265,16 +190,109 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
               >
                 {savingBmc ? "Saving..." : "Save BMC Configuration"}
               </Button>
+            </TabsContent>
 
-              {device.attributes.bmc_config && (
-                <div className="text-xs text-muted-foreground text-center">
-                  BMC will be configured on next discovery cycle
+            <TabsContent value="static" className="space-y-4">
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="bmc-ip">IP Address</Label>
+                  <Input
+                    id="bmc-ip"
+                    type="text"
+                    value={bmcConfig.ip_address}
+                    onChange={(e) => {
+                      setBmcConfig({ ...bmcConfig, ip_address: e.target.value });
+                      setBmcConfigChanged(true);
+                      // Clear validation error when user starts typing
+                      if (validationErrors["bmc_config.ip_address"]) {
+                        const newErrors = { ...validationErrors };
+                        delete newErrors["bmc_config.ip_address"];
+                        setValidationErrors(newErrors);
+                      }
+                    }}
+                    placeholder="e.g., 192.168.1.100"
+                    className={`font-mono ${validationErrors["bmc_config.ip_address"] ? "border-destructive" : ""}`}
+                  />
+                  {validationErrors["bmc_config.ip_address"] && (
+                    <div className="flex items-center gap-2 text-sm text-destructive">
+                      <AlertCircle className="h-4 w-4" />
+                      <span>{validationErrors["bmc_config.ip_address"]}</span>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </TabsContent>
-        </Tabs>
-      </CardContent>
-    </Card>
+
+                <div className="space-y-2">
+                  <Label htmlFor="bmc-netmask">Netmask</Label>
+                  <Input
+                    id="bmc-netmask"
+                    type="text"
+                    value={bmcConfig.netmask}
+                    onChange={(e) => {
+                      setBmcConfig({ ...bmcConfig, netmask: e.target.value });
+                      setBmcConfigChanged(true);
+                      // Clear validation error when user starts typing
+                      if (validationErrors["bmc_config.netmask"]) {
+                        const newErrors = { ...validationErrors };
+                        delete newErrors["bmc_config.netmask"];
+                        setValidationErrors(newErrors);
+                      }
+                    }}
+                    placeholder="e.g., 255.255.255.0"
+                    className={`font-mono ${validationErrors["bmc_config.netmask"] ? "border-destructive" : ""}`}
+                  />
+                  {validationErrors["bmc_config.netmask"] && (
+                    <div className="flex items-center gap-2 text-sm text-destructive">
+                      <AlertCircle className="h-4 w-4" />
+                      <span>{validationErrors["bmc_config.netmask"]}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="bmc-gateway">Gateway</Label>
+                  <Input
+                    id="bmc-gateway"
+                    type="text"
+                    value={bmcConfig.gateway}
+                    onChange={(e) => {
+                      setBmcConfig({ ...bmcConfig, gateway: e.target.value });
+                      setBmcConfigChanged(true);
+                      // Clear validation error when user starts typing
+                      if (validationErrors["bmc_config.gateway"]) {
+                        const newErrors = { ...validationErrors };
+                        delete newErrors["bmc_config.gateway"];
+                        setValidationErrors(newErrors);
+                      }
+                    }}
+                    placeholder="e.g., 192.168.1.1"
+                    className={`font-mono ${validationErrors["bmc_config.gateway"] ? "border-destructive" : ""}`}
+                  />
+                  {validationErrors["bmc_config.gateway"] && (
+                    <div className="flex items-center gap-2 text-sm text-destructive">
+                      <AlertCircle className="h-4 w-4" />
+                      <span>{validationErrors["bmc_config.gateway"]}</span>
+                    </div>
+                  )}
+                </div>
+
+                <Button
+                  onClick={handleSaveBmcConfig}
+                  disabled={savingBmc || !bmcConfigChanged}
+                  className="w-full"
+                >
+                  {savingBmc ? "Saving..." : "Save BMC Configuration"}
+                </Button>
+
+                {device.attributes.bmc_config && (
+                  <div className="text-xs text-muted-foreground text-center">
+                    BMC will be configured on next discovery cycle
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+          </Tabs>
+        </CardContent>
+      </Card>
+    </>
   );
 }

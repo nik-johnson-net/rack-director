@@ -7,8 +7,11 @@ use crate::plans::actions::BootTarget;
 use crate::plans::{Plan, PlanStatus};
 use crate::{platforms, roles};
 
-mod ipmi;
+pub(crate) mod power;
+mod power_ops;
 pub(crate) mod store;
+
+pub use power::PowerAction;
 
 pub use common::device_attributes::NetworkInterface;
 pub use store::Device;
@@ -50,11 +53,39 @@ impl std::fmt::Display for Architecture {
 /// dropped at the end; it never opens a new connection itself.
 pub struct Director<'a> {
     conn: &'a Connection,
+    power_config: power::PowerConfig,
 }
 
 impl<'a> Director<'a> {
+    /// Create a `Director` with the default [`power::PowerConfig`]
+    /// (`verify_tls: false`).
+    ///
+    /// **Must not be used on paths that perform OOB power operations** —
+    /// [`Director::reboot`], [`Director::ensure_powered_for_plan`],
+    /// [`Director::power_driver_for`], [`Director::power_status`],
+    /// [`Director::power_action`], or anything that reaches them, such as
+    /// [`Director::start_lifecycle_transition`]. Using `new` there silently
+    /// drops operator-supplied settings like `--redfish-verify-tls`. Handlers
+    /// on those paths must use [`Director::with_power_config`] with
+    /// `AppState.power_config` instead.
+    ///
+    /// Suitable for reads, attribute updates, and tests.
     pub fn new(conn: &'a Connection) -> Self {
-        Director { conn }
+        Director {
+            conn,
+            power_config: power::PowerConfig::default(),
+        }
+    }
+
+    /// Create a `Director` with explicit power configuration.
+    ///
+    /// Use this constructor in handlers that perform OOB power operations so
+    /// that the CLI's `--redfish-verify-tls` flag is honoured.
+    pub fn with_power_config(conn: &'a Connection, cfg: power::PowerConfig) -> Self {
+        Director {
+            conn,
+            power_config: cfg,
+        }
     }
 
     pub async fn register_device(
@@ -533,6 +564,17 @@ impl<'a> Director<'a> {
                 director: Some(self), // Provide director for actions that need it (e.g., RebootDevice)
             };
 
+            // Issue an OOB power kick before starting the action so the device
+            // is actually booted and running the agent.  This is best-effort:
+            // failures are logged and never block the transition.
+            if let Err(e) = self.ensure_powered_for_plan(&device, action).await {
+                log::warn!(
+                    "Power kick failed for device {}: {} (continuing)",
+                    device_uuid,
+                    e
+                );
+            }
+
             log::debug!("Starting action {:?} for device {}", action, device_uuid);
             if let Err(e) = action.start(&ctx).await {
                 log::warn!(
@@ -856,53 +898,6 @@ impl<'a> Director<'a> {
         store::find_device_by_bmc_mac(self.conn, mac).await
     }
 
-    /// Issue an IPMI power reset command to the device's BMC
-    ///
-    /// This is a best-effort operation - if the BMC IP or credentials are missing,
-    /// or if the IPMI command fails, the error is logged but not propagated.
-    /// This allows lifecycle transitions to proceed even if IPMI reboot fails
-    /// (the device can be manually rebooted).
-    pub async fn reboot(&self, uuid: &Uuid) -> anyhow::Result<()> {
-        // Get BMC IP address
-        let bmc_ip = match self.get_bmc_ip(uuid).await? {
-            Some(ip) => ip,
-            None => {
-                log::info!("No BMC IP for device {}, skipping power reset", uuid);
-                return Ok(());
-            }
-        };
-
-        // Get BMC credentials
-        let (username, password) = match self.get_bmc_credentials(uuid).await? {
-            Some(creds) => creds,
-            None => {
-                log::info!(
-                    "No BMC credentials for device {}, skipping power reset",
-                    uuid
-                );
-                return Ok(());
-            }
-        };
-
-        // Create IPMI client and send power reset
-        let ipmi = ipmi::IpmiClient::new(bmc_ip.clone(), username, password);
-        match ipmi.power_reset().await {
-            Ok(_) => {
-                log::info!("IPMI power reset sent to device {} at {}", uuid, bmc_ip);
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to send IPMI power reset to device {} at {}: {}",
-                    uuid,
-                    bmc_ip,
-                    e
-                );
-            }
-        }
-
-        Ok(())
-    }
-
     /// Cancel the active lifecycle transition for a device.
     ///
     /// Uses a CAS-style conditional UPDATE on the plan so that a concurrent
@@ -949,26 +944,6 @@ impl<'a> Director<'a> {
         .await?;
 
         Ok(())
-    }
-
-    /// Get BMC IP address from device attributes
-    async fn get_bmc_ip(&self, uuid: &Uuid) -> anyhow::Result<Option<String>> {
-        let device = store::get_device(self.conn, uuid).await?;
-        Ok(device.attributes.bmc.and_then(|bmc| bmc.ip_address))
-    }
-
-    /// Get BMC credentials from device attributes
-    async fn get_bmc_credentials(&self, uuid: &Uuid) -> anyhow::Result<Option<(String, String)>> {
-        let device = store::get_device(self.conn, uuid).await?;
-        let bmc_config = device.attributes.bmc_config;
-
-        match bmc_config {
-            Some(config) => match (config.username, config.password) {
-                (Some(u), Some(p)) => Ok(Some((u, p))),
-                _ => Ok(None),
-            },
-            None => Ok(None),
-        }
     }
 }
 
@@ -1206,94 +1181,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reboot_with_bmc_info() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
-
-        // Register device
-        director
-            .register_device(&test_uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        // Set BMC info and credentials
-        let mut attributes = serde_json::Map::new();
-        attributes.insert(
-            "bmc".to_string(),
-            serde_json::json!({
-                "mac_address": "aa:bb:cc:dd:ee:ff",
-                "ip_address": "10.0.0.100"
-            }),
-        );
-        attributes.insert(
-            "bmc_config".to_string(),
-            serde_json::json!({
-                "ip_address_source": "static",
-                "username": "RACKDIRECTOR",
-                "password": "test_password"
-            }),
-        );
-        director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
-
-        // Call reboot - should not fail even if ipmitool is not installed
-        // (it's best-effort)
-        let result = director.reboot(&test_uuid).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_reboot_without_bmc_ip() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440021").unwrap();
-
-        // Register device without BMC info
-        director
-            .register_device(&test_uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        // Call reboot - should succeed (gracefully skip IPMI)
-        let result = director.reboot(&test_uuid).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_reboot_without_bmc_credentials() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440022").unwrap();
-
-        // Register device
-        director
-            .register_device(&test_uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        // Set BMC IP but no credentials
-        let mut attributes = serde_json::Map::new();
-        attributes.insert(
-            "bmc".to_string(),
-            serde_json::json!({
-                "mac_address": "aa:bb:cc:dd:ee:ff",
-                "ip_address": "10.0.0.100"
-            }),
-        );
-        director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
-
-        // Call reboot - should succeed (gracefully skip IPMI)
-        let result = director.reboot(&test_uuid).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn test_on_boot_advances_reboot_action() {
         let conn = setup_test_db(test_connection_factory!()).await;
         let director = Director::new(&conn);
@@ -1402,106 +1289,6 @@ mod tests {
         // Call on_boot - should succeed without error
         let result = director.on_boot(&test_uuid).await;
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_get_bmc_ip_with_valid_bmc() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440026").unwrap();
-
-        // Register device
-        director
-            .register_device(&test_uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        // Set BMC IP
-        let mut attributes = serde_json::Map::new();
-        attributes.insert(
-            "bmc".to_string(),
-            serde_json::json!({
-                "mac_address": "aa:bb:cc:dd:ee:ff",
-                "ip_address": "10.0.0.100"
-            }),
-        );
-        director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
-
-        // Get BMC IP
-        let bmc_ip = director.get_bmc_ip(&test_uuid).await.unwrap();
-        assert_eq!(bmc_ip, Some("10.0.0.100".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_get_bmc_ip_without_bmc() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440027").unwrap();
-
-        // Register device without BMC
-        director
-            .register_device(&test_uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        // Get BMC IP
-        let bmc_ip = director.get_bmc_ip(&test_uuid).await.unwrap();
-        assert_eq!(bmc_ip, None);
-    }
-
-    #[tokio::test]
-    async fn test_get_bmc_credentials_with_valid_config() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440028").unwrap();
-
-        // Register device
-        director
-            .register_device(&test_uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        // Set BMC credentials
-        let mut attributes = serde_json::Map::new();
-        attributes.insert(
-            "bmc_config".to_string(),
-            serde_json::json!({
-                "ip_address_source": "dhcp",
-                "username": "RACKDIRECTOR",
-                "password": "test_password"
-            }),
-        );
-        director
-            .update_attributes(&test_uuid, attributes)
-            .await
-            .unwrap();
-
-        // Get BMC credentials
-        let creds = director.get_bmc_credentials(&test_uuid).await.unwrap();
-        assert_eq!(
-            creds,
-            Some(("RACKDIRECTOR".to_string(), "test_password".to_string()))
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_bmc_credentials_without_credentials() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
-        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440029").unwrap();
-
-        // Register device - will have default BMC config with no credentials
-        director
-            .register_device(&test_uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        // Get BMC credentials - should be None even though config exists
-        let creds = director.get_bmc_credentials(&test_uuid).await.unwrap();
-        assert_eq!(creds, None);
     }
 
     #[tokio::test]

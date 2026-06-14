@@ -78,7 +78,9 @@ async fn ipxe_handler(
         .open()
         .await
         .map_err(Error::ServerInternalError)?;
-    let director = Director::new(&conn);
+    // This handler can register devices and auto-start discovery transitions,
+    // which issue the OOB power kick — it must carry the configured PowerConfig.
+    let director = Director::with_power_config(&conn, state.power_config);
 
     // Resolve MAC address from parameter or DHCP lookup
     let mac_address =
@@ -92,7 +94,13 @@ async fn ipxe_handler(
     {
         if director.find_pending_device_by_mac(mac).await?.is_some() {
             info!("Found pending device {}. Starting discovery.", uuid);
-            device_registration::register_and_start_discovery(&conn, &uuid, Some(mac)).await;
+            device_registration::register_and_start_discovery(
+                &conn,
+                &uuid,
+                Some(mac),
+                state.power_config,
+            )
+            .await;
         } else {
             // Device is not pending. Check to see if the network has autodiscovery enabled.
             let dhcp_lease = dhcp::store::get_lease_by_mac(&conn, mac).await?;
@@ -106,8 +114,13 @@ async fn ipxe_handler(
                             "Found new device {} on network with autodiscovery enabled. Adopting and starting discovery.",
                             uuid
                         );
-                        device_registration::register_and_start_discovery(&conn, &uuid, Some(mac))
-                            .await;
+                        device_registration::register_and_start_discovery(
+                            &conn,
+                            &uuid,
+                            Some(mac),
+                            state.power_config,
+                        )
+                        .await;
                     }
                 } else {
                     warn!("DHCP Lease does not have a network ID")
@@ -374,7 +387,9 @@ async fn action_success(
         Ok(conn) => conn,
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let director = Director::new(&conn);
+    // Plan advancement completes lifecycle transitions; carry the configured
+    // PowerConfig so any OOB power operation on this path honours the CLI flags.
+    let director = Director::with_power_config(&conn, state.power_config);
 
     match director.mark_action_success(&uuid, plan_id).await {
         Ok(_) => Ok(NoContent),
@@ -398,7 +413,9 @@ async fn action_failed(
         Ok(conn) => conn,
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let director = Director::new(&conn);
+    // Plan advancement completes lifecycle transitions; carry the configured
+    // PowerConfig so any OOB power operation on this path honours the CLI flags.
+    let director = Director::with_power_config(&conn, state.power_config);
 
     match director
         .mark_action_failed(&uuid, &error_message, plan_id)
@@ -663,6 +680,7 @@ mod tests {
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
             bundled_osm_path: None,
+            power_config: crate::director::power::PowerConfig::default(),
         });
         (state, temp_dir)
     }
@@ -1752,6 +1770,7 @@ pub(super) mod test_helpers {
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
             bundled_osm_path: None,
+            power_config: crate::director::power::PowerConfig::default(),
         });
 
         (state, temp_dir, migration_conn)

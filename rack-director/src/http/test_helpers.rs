@@ -35,5 +35,6 @@ pub fn build_test_state(conn_factory: Arc<dyn database::ConnectionFactory>) -> A
         dhcp: crate::dhcp::DhcpControl::noop(),
         unprovisioned_sleep_secs: 0,
         bundled_osm_path: None,
+        power_config: crate::director::power::PowerConfig::default(),
     })
 }

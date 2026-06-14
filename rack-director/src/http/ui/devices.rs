@@ -185,8 +185,8 @@ struct DeviceStatusResponse {
 }
 
 #[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
+pub(super) struct ErrorResponse {
+    pub(super) error: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -496,7 +496,7 @@ async fn start_lifecycle_transition(
             }),
         )
     })?;
-    let director = Director::new(&conn);
+    let director = Director::with_power_config(&conn, state.power_config);
 
     match director.start_lifecycle_transition(&uuid, to_state).await {
         Ok(transition_id) => Ok(Json(StartTransitionResponse {
@@ -818,6 +818,7 @@ mod tests {
             dhcp: crate::dhcp::DhcpControl::noop(),
             unprovisioned_sleep_secs: 600,
             bundled_osm_path: None,
+            power_config: crate::director::power::PowerConfig::default(),
         });
         (state, temp_dir, migration_conn)
     }

@@ -25,6 +25,12 @@ pub struct Device {
     pub created_at: Option<String>,
     pub first_seen_at: Option<String>,
     pub last_seen_at: Option<String>,
+    /// Timestamp of the last daemon-mode poll from the agent.
+    ///
+    /// Set to `CURRENT_TIMESTAMP` each time the agent calls `GET /cnc/poll`.
+    /// Used by the power management layer to detect whether the agent is
+    /// already running in daemon mode and skip issuing an OOB power kick.
+    pub last_polled_at: Option<String>,
 }
 
 impl FromRow for Device {
@@ -42,6 +48,7 @@ impl FromRow for Device {
         let created_at: Option<String> = row.get("created_at").ok();
         let first_seen_at: Option<String> = row.get("first_seen_at").ok();
         let last_seen_at: Option<String> = row.get("last_seen_at").ok();
+        let last_polled_at: Option<String> = row.get("last_polled_at").ok();
 
         let attributes = match attributes_json {
             Some(json_str) => {
@@ -65,6 +72,7 @@ impl FromRow for Device {
             created_at,
             first_seen_at,
             last_seen_at,
+            last_polled_at,
         })
     }
 }
@@ -128,6 +136,22 @@ pub async fn device_exists(conn: &Connection, uuid: &Uuid) -> Result<bool> {
 pub async fn update_device_last_seen(conn: &Connection, uuid: &Uuid) -> Result<()> {
     conn.execute(
         "UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
+        (*uuid,),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Update the `last_polled_at` timestamp for a device to the current time.
+///
+/// Called by the daemon-mode poll handler each time the agent polls for its
+/// next action.  The timestamp is used by the power management layer to
+/// determine whether the agent is already running (daemon heartbeat), which
+/// skips any OOB power kick.  Failures are non-fatal; callers should log
+/// and continue.
+pub async fn update_device_last_polled(conn: &Connection, uuid: &Uuid) -> Result<()> {
+    conn.execute(
+        "UPDATE devices SET last_polled_at = CURRENT_TIMESTAMP WHERE uuid = ?1",
         (*uuid,),
     )
     .await?;
@@ -214,7 +238,7 @@ async fn drop_stale_overrides(
 pub async fn get_device(conn: &Connection, uuid: &Uuid) -> Result<Device> {
     let device = conn
         .query_one(
-            "SELECT id, uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices WHERE uuid = ?1",
+            "SELECT id, uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at, last_polled_at FROM devices WHERE uuid = ?1",
             (*uuid,),
             Device::from_row,
         )
@@ -226,7 +250,7 @@ pub async fn get_device(conn: &Connection, uuid: &Uuid) -> Result<Device> {
 pub async fn get_all_devices(conn: &Connection) -> Result<Vec<Device>> {
     let devices = conn
         .query(
-            "SELECT id, uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at FROM devices",
+            "SELECT id, uuid, architecture, lifecycle, role_id, platform_id, attributes, created_at, first_seen_at, last_seen_at, last_polled_at FROM devices",
             (),
             Device::from_row,
         )
