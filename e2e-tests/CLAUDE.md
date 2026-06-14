@@ -55,7 +55,7 @@ docker build --target rack-director-e2e-export --output .local-storage/director-
 The `rack-director-e2e-export` scratch stage in `docker/Dockerfile` exports exactly those two files from the `director-image-builder` build stage.
 
 The `director-image-builder` stage:
-1. Installs a minimal CentOS 10 environment with kernel, systemd, and systemd-networkd
+1. Installs a minimal AlmaLinux 10.1 environment with kernel, systemd, and systemd-networkd
 2. Copies rack-director binary, agent images, iPXE firmware, and UI static files into the guest filesystem at the paths the binary expects (`/opt/rack-director/...`)
 3. Configures static IP `10.0.0.1/24` on NIC0 (matched by MAC `52:54:00:00:00:01`) and DHCP on NIC1 (control/hostfwd NIC)
 4. Enables the `rack-director.service` systemd unit
@@ -274,7 +274,7 @@ The VM module automatically selects acceleration:
 | Linux with `/dev/kvm` | `-enable-kvm -cpu host` |
 | Windows / other | `-accel tcg -cpu Icelake-Server-noTSX` (software emulation) |
 
-WHPX is not used on Windows even though it is faster. WHPX's XCR0/XSAVE emulation is incomplete (the upstream patch was never merged), which prevents AVX2 from being enabled. CentOS 10's glibc requires x86-64-v3 (needs AVX2 via XCR0.YMM) and panics on WHPX. TCG fully emulates XCR0 and works correctly.
+WHPX is not used on Windows even though it is faster. WHPX's XCR0/XSAVE emulation is incomplete (the upstream patch was never merged), which prevents AVX2 from being enabled. AlmaLinux 10's glibc requires x86-64-v3 (needs AVX2 via XCR0.YMM) and panics on WHPX. TCG fully emulates XCR0 and works correctly.
 
 Tests will run on TCG but will be significantly slower. The director VM alone takes ~2–3 minutes to boot under TCG.
 
@@ -282,19 +282,19 @@ Tests will run on TCG but will be significantly slower. The director VM alone ta
 
 ### Predictable Network Interface Naming
 
-CentOS 10 uses the `rhel-10.0` udev naming scheme. Virtio NICs on a q35 machine receive predictable names like `enp0s2`, `enp0s3` — never `eth0`/`eth1`. This means networkd `.network` file `[Match]` sections **must not rely on `Name=`** for the rack NIC.
+AlmaLinux 10.1 uses the `rhel-10.0` udev naming scheme. Virtio NICs on a q35 machine receive predictable names like `enp0s2`, `enp0s3` — never `eth0`/`eth1`. This means networkd `.network` file `[Match]` sections **must not rely on `Name=`** for the rack NIC.
 
 `docker/networkd-rack.network` matches by `MACAddress=52:54:00:00:00:01` only (the MAC is hard-coded in the QEMU args). `docker/networkd-control.network` uses `Type=ether` as a catch-all so it applies to any remaining Ethernet interface after the rack config takes precedence (by filename ordering: `10-rack.network` before `20-control.network`).
 
 ### NetworkManager Conflicts with systemd-networkd
 
-`NetworkManager` is pulled in as an indirect dependency of `redhat-release` on CentOS 10 and starts automatically. It is unaware of systemd-networkd's configuration and auto-creates DHCP profiles for both NICs. The DHCP attempt on enp0s2 (the static rack NIC) has no server to respond, so after 45 seconds NetworkManager marks the connection failed and **removes the static 10.0.0.1 address**. From that point, rack-director logs `Found local IPs for interface 2: []` and drops all incoming DHCP requests.
+`NetworkManager` is pulled in as an indirect dependency of `almalinux-release` on AlmaLinux 10.1 and starts automatically. It is unaware of systemd-networkd's configuration and auto-creates DHCP profiles for both NICs. The DHCP attempt on enp0s2 (the static rack NIC) has no server to respond, so after 45 seconds NetworkManager marks the connection failed and **removes the static 10.0.0.1 address**. From that point, rack-director logs `Found local IPs for interface 2: []` and drops all incoming DHCP requests.
 
 Fix: `build-director.sh` masks `NetworkManager.service`, `NetworkManager-dispatcher.service`, and `NetworkManager-wait-online.service` via `systemctl mask`.
 
 ### Serial Console
 
-CentOS 10 systemd detects `console=ttyS0` in the kernel cmdline and auto-enables `serial-getty@ttyS0.service`, which depends on `dev-ttyS0.device`. In the live-boot overlayfs environment, udev can take 90+ seconds to create this device unit, stalling the boot log for that window.
+AlmaLinux 10.1 systemd detects `console=ttyS0` in the kernel cmdline and auto-enables `serial-getty@ttyS0.service`, which depends on `dev-ttyS0.device`. In the live-boot overlayfs environment, udev can take 90+ seconds to create this device unit, stalling the boot log for that window.
 
 Fix: `build-director.sh` masks `serial-getty@ttyS0.service` (no interactive console is needed in the director VM) and writes `/etc/systemd/journald.conf.d/serial-console.conf` with `ForwardToConsole=yes`. This ensures all journald output reaches the serial port via `/dev/console` (which always works since the kernel binds ttyS0 at early boot via `console=ttyS0`).
 
@@ -384,5 +384,5 @@ Low-level QEMU primitives:
 |------|---------|
 | `docker/build-director.sh` | Builds director initramfs inside the Docker build stage |
 | `docker/rack-director.service` | systemd unit for rack-director in the VM |
-| `docker/networkd-rack.network` | Static 10.0.0.1/24; `[Match]` uses `MACAddress=52:54:00:00:00:01` only — no `Name=` because CentOS 10 uses predictable names like `enp0s2` |
+| `docker/networkd-rack.network` | Static 10.0.0.1/24; `[Match]` uses `MACAddress=52:54:00:00:00:01` only — no `Name=` because AlmaLinux 10.1 uses predictable names like `enp0s2` |
 | `docker/networkd-control.network` | DHCP on all other Ethernet NICs (`Type=ether`); applied to whichever NIC is not matched by the rack config |

@@ -194,7 +194,7 @@ Packet captures are written to `.build/<name>-net0.pcap` automatically.
 
 ### Windows (TCG)
 
-- WHPX is NOT used – it breaks CentOS 10 / Rocky Linux due to incomplete XCR0 emulation (required for AVX2/x86-64-v3 glibc)
+- WHPX is NOT used – it breaks AlmaLinux 10 / Rocky Linux due to incomplete XCR0 emulation (required for AVX2/x86-64-v3 glibc)
 - TCG with `-cpu Icelake-Server-noTSX` is used instead
 - Director VM boots in ~2–3 minutes under TCG; agent VM takes ~30s
 

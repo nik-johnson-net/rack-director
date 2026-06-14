@@ -252,14 +252,14 @@ pub fn find_available_tcp_port(range_start: u16, range_end: u16) -> Result<u16> 
 /// On Windows (and other platforms), uses TCG with an Icelake-Server CPU model.
 /// WHPX is not used because its XCR0/XSAVE emulation is incomplete (the patch
 /// adding XCR0 support was never merged into mainline QEMU), which prevents AVX2
-/// from being enabled in the guest. CentOS 10 glibc requires x86-64-v3 (which
+/// from being enabled in the guest. AlmaLinux 10 glibc requires x86-64-v3 (which
 /// needs AVX2 via XCR0.YMM), so WHPX guests always panic with
 /// "CPU does not support x86-64-v3". TCG fully emulates XCR0 and works correctly.
 pub fn acceleration_args() -> Vec<String> {
     if cfg!(target_os = "linux") && std::path::Path::new("/dev/kvm").exists() {
         vec!["-enable-kvm".into(), "-cpu".into(), "host".into()]
     } else {
-        // TCG with Icelake-Server for x86-64-v3 support (required by CentOS 10 glibc).
+        // TCG with Icelake-Server for x86-64-v3 support (required by AlmaLinux 10 glibc).
         // Slower than KVM/WHPX but correct on all platforms.
         vec![
             "-accel".into(),

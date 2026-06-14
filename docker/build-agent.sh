@@ -4,7 +4,9 @@ set -ex
 RELEASEVER=10
 
 mkdir -p /output
-dnf --noplugins -y --releasever "$RELEASEVER" --installroot /agent-image upgrade
+# Upgrade is pinned to the 10.1 vault repos to keep the image reproducible and
+# prevent inadvertent upgrades to a newer AlmaLinux minor release.
+dnf --noplugins -y --installroot /agent-image --repo almalinux10-x86_64-baseos-rpms --repo almalinux10-x86_64-appstream-rpms upgrade
 
 KERVERSION=$(chroot /agent-image ls /usr/lib/modules | tail -n 1)
 echo "kernel version: $KERVERSION"
