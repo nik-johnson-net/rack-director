@@ -33,8 +33,8 @@ description = "Halt instead of reboot after installation"
 
 [[build.file_download]]
 filename = "vmlinuz-x86_64"
-url = "http://qro.aws.repo.almalinux.org/almalinux/10.1/BaseOS/x86_64/os/images/pxeboot/vmlinuz"
+url = "https://vault.almalinux.org/10.1/BaseOS/x86_64/os/images/pxeboot/vmlinuz"
 
 [[build.file_download]]
 filename = "initrd-x86_64.img"
-url = "http://qro.aws.repo.almalinux.org/almalinux/10.1/BaseOS/x86_64/os/images/pxeboot/initrd.img"
+url = "https://vault.almalinux.org/10.1/BaseOS/x86_64/os/images/pxeboot/initrd.img"
