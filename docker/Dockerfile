@@ -45,7 +45,10 @@ RUN dnf --noplugins -y --repo ${REPO_NAME} install binutils dracut squashfs-tool
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo almalinux10-x86_64-appstream-rpms --repo epel --installroot /agent-image install \
   almalinux-release systemd passwd rootfiles sudo dracut dracut-network dracut-live lvm2 mdadm systemd-networkd btrfs-progs gdisk
-RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /agent-image install \
+# reposdir + explicit repos pin the kernel and tools to the 10.1 vault. Without
+# them, dnf reads the installroot's stock almalinux.repo (now present after the
+# install above) and would pull a rolling newer-minor kernel.
+RUN dnf --noplugins -y --setopt=reposdir=/etc/yum.repos.d --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo almalinux10-x86_64-appstream-rpms --installroot /agent-image install \
   kernel kernel-devel \
   ipmitool parted util-linux \
   e2fsprogs xfsprogs dosfstools \
@@ -75,7 +78,8 @@ RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} \
   --repo almalinux10-x86_64-appstream-rpms --repo epel --installroot /director-image install \
   almalinux-release systemd passwd rootfiles sudo dracut dracut-network dracut-live systemd-networkd nftables
 
-RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /director-image install \
+# reposdir + explicit repos pin the kernel to the 10.1 vault (see agent stage).
+RUN dnf --noplugins -y --setopt=reposdir=/etc/yum.repos.d --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo almalinux10-x86_64-appstream-rpms --installroot /director-image install \
   kernel
 
 # Copy build dependencies

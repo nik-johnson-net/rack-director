@@ -6,7 +6,11 @@ RELEASEVER=10
 mkdir -p /output
 # Upgrade is pinned to the 10.1 vault repos to keep the image reproducible and
 # prevent inadvertent upgrades to a newer AlmaLinux minor release.
-dnf --noplugins -y --installroot /director-image --repo almalinux10-x86_64-baseos-rpms --repo almalinux10-x86_64-appstream-rpms upgrade
+# reposdir is forced to the builder's /etc/yum.repos.d (where agent.repo lives):
+# with --installroot, dnf otherwise reads repo configs from the now-populated
+# /director-image/etc/yum.repos.d (the stock almalinux.repo), where our pinned
+# repo IDs are undefined.
+dnf --noplugins -y --setopt=reposdir=/etc/yum.repos.d --installroot /director-image --repo almalinux10-x86_64-baseos-rpms --repo almalinux10-x86_64-appstream-rpms upgrade
 
 KERVERSION=$(chroot /director-image ls /usr/lib/modules | tail -n 1)
 echo "kernel version: $KERVERSION"
