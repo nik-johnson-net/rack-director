@@ -1,13 +1,13 @@
-[centos10-$basearch-baseos-rpms]
-name = CentOS 10 (RPMs) - BaseOS
-baseurl = https://mirror.stream.centos.org/10-stream/BaseOS/$basearch/os
+[almalinux10-$basearch-baseos-rpms]
+name = AlmaLinux 10.1 (RPMs) - BaseOS
+baseurl = https://vault.almalinux.org/10.1/BaseOS/$basearch/os
 enabled = 0
 gpgcheck = 1
-gpgkey = https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256
+gpgkey = https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux-10
 
-[centos10-$basearch-appstream-rpms]
-name = CentOS 10 (RPMs) - AppStream
-baseurl = https://mirror.stream.centos.org/10-stream/AppStream/$basearch/os
+[almalinux10-$basearch-appstream-rpms]
+name = AlmaLinux 10.1 (RPMs) - AppStream
+baseurl = https://vault.almalinux.org/10.1/AppStream/$basearch/os
 enabled = 0
 gpgcheck = 1
-gpgkey = https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official-SHA256
+gpgkey = https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux-10

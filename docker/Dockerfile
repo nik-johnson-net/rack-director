@@ -35,7 +35,7 @@ RUN  --mount=type=cache,target=/build/target --mount=type=cache,target=/root/.ca
 EOT
 
 FROM redhat/ubi10 AS agent-image-builder
-ARG REPO_NAME="centos10-x86_64-baseos-rpms"
+ARG REPO_NAME="almalinux10-x86_64-baseos-rpms"
 ARG RELEASEVER="10"
 
 # Configure the build environment
@@ -43,9 +43,12 @@ COPY docker/agent.repo /etc/yum.repos.d/agent.repo
 
 RUN dnf --noplugins -y --repo ${REPO_NAME} install binutils dracut squashfs-tools
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
-RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo centos10-x86_64-appstream-rpms --repo epel --installroot /agent-image install \
-  redhat-release systemd passwd rootfiles sudo dracut dracut-network dracut-live lvm2 mdadm systemd-networkd btrfs-progs gdisk
-RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /agent-image install \
+RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo almalinux10-x86_64-appstream-rpms --repo epel --installroot /agent-image install \
+  almalinux-release systemd passwd rootfiles sudo dracut dracut-network dracut-live lvm2 mdadm systemd-networkd btrfs-progs gdisk
+# reposdir + explicit repos pin the kernel and tools to the 10.1 vault. Without
+# them, dnf reads the installroot's stock almalinux.repo (now present after the
+# install above) and would pull a rolling newer-minor kernel.
+RUN dnf --noplugins -y --setopt=reposdir=/etc/yum.repos.d --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo almalinux10-x86_64-appstream-rpms --installroot /agent-image install \
   kernel kernel-devel \
   ipmitool parted util-linux \
   e2fsprogs xfsprogs dosfstools \
@@ -62,7 +65,7 @@ COPY --from=bin-builder /output/rack-agent /rack-agent
 RUN chmod +x "/usr/local/bin/build-agent.sh" && "/usr/local/bin/build-agent.sh"
 
 FROM redhat/ubi10 AS director-image-builder
-ARG REPO_NAME="centos10-x86_64-baseos-rpms"
+ARG REPO_NAME="almalinux10-x86_64-baseos-rpms"
 ARG RELEASEVER="10"
 
 # Configure the build environment
@@ -72,10 +75,11 @@ RUN dnf --noplugins -y --repo ${REPO_NAME} install binutils dracut squashfs-tool
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} install \
   https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
 RUN dnf --noplugins -y --releasever ${RELEASEVER} --repo ${REPO_NAME} \
-  --repo centos10-x86_64-appstream-rpms --repo epel --installroot /director-image install \
-  redhat-release systemd passwd rootfiles sudo dracut dracut-network dracut-live systemd-networkd nftables
+  --repo almalinux10-x86_64-appstream-rpms --repo epel --installroot /director-image install \
+  almalinux-release systemd passwd rootfiles sudo dracut dracut-network dracut-live systemd-networkd nftables
 
-RUN dnf --noplugins -y --releasever ${RELEASEVER} --installroot /director-image install \
+# reposdir + explicit repos pin the kernel to the 10.1 vault (see agent stage).
+RUN dnf --noplugins -y --setopt=reposdir=/etc/yum.repos.d --releasever ${RELEASEVER} --repo ${REPO_NAME} --repo almalinux10-x86_64-appstream-rpms --installroot /director-image install \
   kernel
 
 # Copy build dependencies

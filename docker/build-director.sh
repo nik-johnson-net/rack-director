@@ -4,7 +4,13 @@ set -ex
 RELEASEVER=10
 
 mkdir -p /output
-dnf --noplugins -y --releasever "$RELEASEVER" --installroot /director-image upgrade
+# Upgrade is pinned to the 10.1 vault repos to keep the image reproducible and
+# prevent inadvertent upgrades to a newer AlmaLinux minor release.
+# reposdir is forced to the builder's /etc/yum.repos.d (where agent.repo lives):
+# with --installroot, dnf otherwise reads repo configs from the now-populated
+# /director-image/etc/yum.repos.d (the stock almalinux.repo), where our pinned
+# repo IDs are undefined.
+dnf --noplugins -y --setopt=reposdir=/etc/yum.repos.d --installroot /director-image --repo almalinux10-x86_64-baseos-rpms --repo almalinux10-x86_64-appstream-rpms upgrade
 
 KERVERSION=$(chroot /director-image ls /usr/lib/modules | tail -n 1)
 echo "kernel version: $KERVERSION"
@@ -75,7 +81,7 @@ install -m 644 /networkd-control.network \
 chroot /director-image systemctl enable systemd-networkd.service
 chroot /director-image systemctl enable systemd-networkd-wait-online.service
 
-# Mask NetworkManager - it is pulled in as a dependency of redhat-release but
+# Mask NetworkManager - it is pulled in as a dependency of almalinux-release but
 # conflicts with systemd-networkd. Without masking, NM auto-creates DHCP profiles
 # for both NICs and eventually removes the static 10.0.0.1 address by timing out
 # its DHCP requests on the rack interface.
