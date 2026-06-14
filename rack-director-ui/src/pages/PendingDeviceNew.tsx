@@ -1,22 +1,16 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { FormFieldError } from "@/components/ui/form-field-error";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
+import { SeenMacInput } from "@/components/devices/seen-mac-input";
 import {
   createPendingDevice,
   getNetworks,
-  getDhcpLeases,
-  getPendingDevices,
   ValidationError,
   type DhcpNetwork,
-  type DhcpLease,
-  type PendingDevice,
 } from "@/lib/client";
-
-const inputClassName =
-  "w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted";
 
 const selectClassName =
   "w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)]";
@@ -30,46 +24,20 @@ export default function PendingDeviceNew() {
 
   const [networkId, setNetworkId] = useState("");
   const [macAddress, setMacAddress] = useState("");
-  const [showSuggestions, setShowSuggestions] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
-  const [leases, setLeases] = useState<DhcpLease[]>([]);
-  const [existingPending, setExistingPending] = useState<PendingDevice[]>([]);
 
   useEffect(() => {
-    Promise.all([getNetworks(), getDhcpLeases(), getPendingDevices()])
-      .then(([nets, ls, pending]) => {
+    getNetworks()
+      .then((nets) => {
         setNetworks(nets);
-        setLeases(ls);
-        setExistingPending(pending);
       })
       .catch(() => {
-        // Non-fatal: form is still usable without suggestions
+        // Non-fatal: network select will remain empty
       });
   }, []);
-
-  const existingMacs = useMemo(
-    () => new Set(existingPending.map((p) => p.mac_address.toLowerCase())),
-    [existingPending]
-  );
-
-  const filteredSuggestions = useMemo(() => {
-    if (!macAddress) return [];
-    const query = macAddress.toLowerCase();
-    const selectedNetworkId = networkId ? parseInt(networkId) : null;
-
-    return leases
-      .filter((lease) => {
-        if (lease.device_uuid) return false;
-        if (existingMacs.has(lease.mac_address.toLowerCase())) return false;
-        if (selectedNetworkId !== null && lease.network_id !== selectedNetworkId) return false;
-        if (!lease.mac_address.toLowerCase().startsWith(query)) return false;
-        return true;
-      })
-      .slice(0, 10);
-  }, [macAddress, networkId, leases, existingMacs]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -146,43 +114,19 @@ export default function PendingDeviceNew() {
             </div>
 
             {/* MAC Address */}
-            <div className="relative">
+            <div>
               <label
                 htmlFor="macAddress"
                 className={labelClassName}
               >
                 MAC Address <span className="text-status-broken">*</span>
               </label>
-              <input
-                id="macAddress"
-                type="text"
+              <SeenMacInput
                 value={macAddress}
-                onChange={(e) => { setMacAddress(e.target.value); clearFieldError("mac_address"); }}
-                onFocus={() => { if (macAddress) setShowSuggestions(true); }}
-                onBlur={() => { setTimeout(() => setShowSuggestions(false), 150); }}
-                placeholder="e.g., aa:bb:cc:dd:ee:ff"
-                required
-                aria-invalid={!!getError("mac_address")}
-                autoComplete="off"
-                className={inputClassName}
+                onChange={(m) => { setMacAddress(m); clearFieldError("mac_address"); }}
+                networkId={networkId ? parseInt(networkId) : null}
+                error={getError("mac_address")}
               />
-              <FormFieldError error={getError("mac_address")} />
-              {showSuggestions && filteredSuggestions.length > 0 && (
-                <div className="absolute z-10 w-full bg-bg-surface border border-border mt-1 max-h-48 overflow-y-auto">
-                  {filteredSuggestions.map((lease) => (
-                    <div
-                      key={lease.id}
-                      className="px-3 py-2 text-xs text-text-primary hover:bg-bg-raised cursor-pointer"
-                      onMouseDown={() => {
-                        setMacAddress(lease.mac_address);
-                        setShowSuggestions(false);
-                      }}
-                    >
-                      {lease.mac_address} &mdash; {lease.ip_address}
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </div>
         </div>
