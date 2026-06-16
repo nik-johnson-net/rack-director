@@ -33,7 +33,8 @@ type Action =
   | { type: "REMOVE_VG"; vgIndex: number }
   | { type: "ADD_LV"; vgIndex: number }
   | { type: "REMOVE_LV"; vgIndex: number; lvIndex: number }
-  | { type: "UPDATE_LV"; vgIndex: number; lvIndex: number; lv: Partial<LogicalVolume> };
+  | { type: "UPDATE_LV"; vgIndex: number; lvIndex: number; lv: Partial<LogicalVolume> }
+  | { type: "SET_WIPE_ALL_DISKS"; value: boolean };
 
 const DEFAULT_DISK_LABELS = ["ROOT", "DATA1", "DATA2", "DATA3", "DATA4"];
 
@@ -212,6 +213,9 @@ function reducer(state: DiskLayout, action: Action): DiskLayout {
       return { ...state, volume_groups: newVgs };
     }
 
+    case "SET_WIPE_ALL_DISKS":
+      return { ...state, wipe_all_disks: action.value || undefined };
+
     default:
       return state;
   }
@@ -322,6 +326,19 @@ export default function DiskLayoutEditor({
           </button>
         </>
       )}
+
+      {/* Wipe all disks */}
+      <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+        <input
+          type="checkbox"
+          checked={layout.wipe_all_disks ?? false}
+          onChange={(e) =>
+            dispatch({ type: "SET_WIPE_ALL_DISKS", value: e.target.checked })
+          }
+          className="accent-[var(--color-accent)]"
+        />
+        Wipe partition info from ALL disks (not just those listed above)
+      </label>
 
       {/* Volume Groups */}
       <VolumeGroupSection

@@ -2002,6 +2002,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -2073,6 +2074,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -2139,6 +2141,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -2184,6 +2187,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -2232,6 +2236,7 @@ mod tests {
             disks: vec![],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -2285,6 +2290,7 @@ mod tests {
             disks: vec![],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -2326,6 +2332,7 @@ mod tests {
             disks: vec![],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let role = crate::roles::store::create(
             &conn,

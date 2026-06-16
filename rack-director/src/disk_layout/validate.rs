@@ -412,6 +412,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         }
     }
 
@@ -431,6 +432,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         }
     }
 
@@ -442,6 +444,7 @@ mod tests {
             disks: vec![],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -472,6 +475,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -505,6 +509,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -531,6 +536,7 @@ mod tests {
                 }],
                 volume_groups: None,
                 zfs_pools: None,
+                wipe_all_disks: false,
             };
             assert!(
                 validate_disk_layout(&layout, None).is_ok(),
@@ -569,6 +575,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -614,6 +621,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -656,6 +664,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -682,6 +691,7 @@ mod tests {
                 }],
                 volume_groups: None,
                 zfs_pools: None,
+                wipe_all_disks: false,
             };
             assert!(
                 validate_disk_layout(&layout, None).is_ok(),
@@ -717,6 +727,7 @@ mod tests {
                 }],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, None).is_ok());
     }
@@ -740,6 +751,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -765,6 +777,7 @@ mod tests {
             }],
             volume_groups: None, // no VGs defined!
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -800,6 +813,7 @@ mod tests {
                 }],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -839,6 +853,7 @@ mod tests {
                 }],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -873,6 +888,7 @@ mod tests {
                 }],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, None).is_ok());
     }
@@ -902,6 +918,7 @@ mod tests {
                 }],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -926,6 +943,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -976,6 +994,7 @@ mod tests {
                 ],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, None).is_ok());
     }
@@ -1000,6 +1019,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -1046,6 +1066,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, Some(FirmwareMode::Uefi)).is_ok());
     }
@@ -1069,6 +1090,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, Some(FirmwareMode::Uefi));
         assert!(result.is_err());
@@ -1110,6 +1132,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, Some(FirmwareMode::Uefi)).is_ok());
     }
@@ -1131,6 +1154,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, Some(FirmwareMode::Bios));
         assert!(result.is_err());
@@ -1156,6 +1180,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, Some(FirmwareMode::Bios)).is_ok());
     }
@@ -1178,6 +1203,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let result = validate_disk_layout(&layout, None);
         assert!(result.is_err());
@@ -1212,6 +1238,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, None).is_ok());
     }
@@ -1243,6 +1270,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, Some(FirmwareMode::Bios)).is_ok());
     }
@@ -1274,6 +1302,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, None).is_ok());
     }
@@ -1296,6 +1325,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, None).is_ok());
     }
@@ -1318,6 +1348,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         // No boot partition, but path-based — should be OK even with UEFI mode.
         assert!(validate_disk_layout(&layout, Some(FirmwareMode::Uefi)).is_ok());
