@@ -2,6 +2,7 @@ import type { Device } from "@/lib/client"
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const columns: ColumnDef<Device>[] = [
   {
     accessorKey: "uuid",

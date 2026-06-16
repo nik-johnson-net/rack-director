@@ -189,7 +189,7 @@ function DeviceDetail() {
   const [status, setStatus] = useState<DeviceStatus | null>(null);
   const [transitions, setTransitions] = useState<LifecycleTransition[]>([]);
   const [warnings, setWarnings] = useState<DeviceWarning[]>([]);
-  const [_dhcpLease, setDhcpLease] = useState<DhcpLease | null>(null);
+  const [, setDhcpLease] = useState<DhcpLease | null>(null);
   const [availableRoles, setAvailableRoles] = useState<Role[]>([]);
   const [availablePlatforms, setAvailablePlatforms] = useState<Platform[]>([]);
   const [networks, setNetworks] = useState<DhcpNetwork[]>([]);
@@ -394,7 +394,9 @@ function DeviceDetail() {
   const hostname = device.attributes?.hostname || device.uuid;
   const lifecycle = status?.current_lifecycle ?? device.lifecycle ?? "new";
   const nics = device.attributes?.network_interfaces ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const disksAttr: any[] = device.attributes?.disks ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cpusAttr: any[] = device.attributes?.cpus ?? [];
   const memoryGib: number | undefined = device.attributes?.memory_gib;
   const bootMode: string | undefined = device.attributes?.boot_mode;
@@ -542,7 +544,7 @@ function DeviceDetail() {
         <CardTable
           headers={["Label", "Path", "Size", "Type"]}
           emptyMessage="No disk information available"
-          rows={disksAttr.map((disk: any) => [
+          rows={disksAttr.map((disk) => [
             disk.label ? (
               <span key="label" className="text-xs font-medium text-accent">{disk.label}</span>
             ) : (
@@ -587,7 +589,7 @@ function DeviceDetail() {
       <SectionCard title="CPU">
         {cpusAttr.length > 0 ? (
           <KVGrid>
-            {cpusAttr.map((cpu: any, i: number) => (
+            {cpusAttr.map((cpu, i: number) => (
               <>
                 {cpusAttr.length > 1 && (
                   <KVRow
@@ -632,7 +634,7 @@ function DeviceDetail() {
         <CardTable
           headers={["Label", "Path", "Size", "Type"]}
           emptyMessage="No disk information available"
-          rows={disksAttr.map((disk: any) => [
+          rows={disksAttr.map((disk) => [
             disk.label ? (
               <span key="label" className="text-xs font-medium text-accent">{disk.label}</span>
             ) : (

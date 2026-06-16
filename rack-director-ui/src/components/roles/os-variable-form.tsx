@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { OsmModule, OsmOperatingSystem, OsmTemplateVariable } from "@/lib/client";

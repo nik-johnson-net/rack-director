@@ -114,7 +114,7 @@ function RoleNew() {
           setAvailableArchs(first.config.architectures.map((a) => a.arch));
           setOsConfigValues(buildDefaultValues(first.config.template_variables));
         }
-      } catch (err) {
+      } catch {
         setError("Failed to load operating systems");
       } finally {
         setLoadingOs(false);
