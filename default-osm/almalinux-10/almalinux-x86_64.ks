@@ -1,8 +1,8 @@
 cmdline
 
-repo --name=baseos --mirrorlist=https://mirrors.almalinux.org/mirrorlist/10.1/baseos
-repo --name=appstream --mirrorlist=https://mirrors.almalinux.org/mirrorlist/10.1/appstream
-url --url="https://repo.almalinux.org/almalinux/10.1/BaseOS/x86_64/kickstart/"
+repo --name=baseos --mirrorlist=https://mirrors.almalinux.org/mirrorlist/10/baseos
+repo --name=appstream --mirrorlist=https://mirrors.almalinux.org/mirrorlist/10/appstream
+url --url="https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/kickstart/"
 
 lang en_US.UTF-8
 keyboard --vckeymap=us --xlayouts='us'
