@@ -69,12 +69,18 @@ pub async fn partition_disks(client: &CncClient, plan_id: Option<i64>) -> Result
 /// Apply a disk layout to the system
 ///
 /// Execution order:
-/// 1. Wipe and partition each disk
+/// 0. If `wipe_all_disks` is true, erase partition info from every whole disk
+/// 1. Wipe and partition each disk in the layout
 /// 2. Wait for udev to settle
 /// 3. Set up LVM volume groups and logical volumes
 /// 4. Set up ZFS pools and datasets
 /// 5. Format simple partitions (not LVM/ZFS)
 async fn apply_disk_layout(layout: &DiskLayout) -> Result<()> {
+    // Step 0: Optionally wipe partition info from ALL disks on the machine.
+    if layout.wipe_all_disks {
+        wipe_all_disks().await?;
+    }
+
     // Step 1: Wipe and partition each disk
     for disk in &layout.disks {
         wipe_and_partition_disk(disk).await?;
@@ -106,6 +112,23 @@ async fn apply_disk_layout(layout: &DiskLayout) -> Result<()> {
 }
 
 // ========== Disk Operations ==========
+
+/// Erase partition info (`wipefs --all --force` + `sgdisk --zap-all`) from every whole
+/// disk on the machine. Does NOT create partition tables — that stays in
+/// `wipe_and_partition_disk` for disks that are in the layout. Targeted disks get
+/// re-wiped there; running these commands twice is idempotent and harmless.
+async fn wipe_all_disks() -> Result<()> {
+    let paths = crate::scan::list_disk_paths().await?;
+    info!(
+        "wipe_all_disks: erasing partition info from {} disk(s)",
+        paths.len()
+    );
+    for dev in &paths {
+        run_command("wipefs", &["--all", "--force", dev]).await?;
+        run_command("sgdisk", &["--zap-all", dev]).await?;
+    }
+    Ok(())
+}
 
 async fn wipe_and_partition_disk(disk: &DiskConfig) -> Result<()> {
     let device = &disk.device;
@@ -859,6 +882,7 @@ mod tests {
                 datasets: vec![],
                 properties: None,
             }]),
+            wipe_all_disks: false,
         };
         let labels = build_zfs_partition_labels(&disk, &layout);
         assert!(labels.contains("zfs1"));
@@ -877,6 +901,7 @@ mod tests {
             disks: vec![disk.clone()],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let labels = build_zfs_partition_labels(&disk, &layout);
         assert!(labels.is_empty());
@@ -900,9 +925,31 @@ mod tests {
                 datasets: vec![],
                 properties: None,
             }]),
+            wipe_all_disks: false,
         };
         let labels = build_zfs_partition_labels(&disk, &layout);
         assert!(labels.is_empty());
+    }
+
+    /// Deserializing a disk layout JSON with `"wipe_all_disks": true` must produce a
+    /// `DiskLayout` where the field is `true`. This validates the serde path used when
+    /// `partition_disks` receives the layout from rack-director over the network.
+    #[test]
+    fn test_wipe_all_disks_field_deserializes_true() {
+        let json = r#"{
+            "disks": [{
+                "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
+                "partition_table": "gpt",
+                "partitions": []
+            }],
+            "wipe_all_disks": true
+        }"#;
+
+        let layout: DiskLayout = serde_json::from_str(json).unwrap();
+        assert!(
+            layout.wipe_all_disks,
+            "wipe_all_disks must be true when set in JSON"
+        );
     }
 
     // ========== fs_type_hint tests ==========

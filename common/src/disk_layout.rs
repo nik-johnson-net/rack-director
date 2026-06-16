@@ -9,6 +9,10 @@ pub struct DiskLayout {
     pub volume_groups: Option<Vec<VolumeGroup>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zfs_pools: Option<Vec<ZfsPool>>,
+    /// When true, erase partition info from ALL whole disks on the machine during
+    /// partition_disks (not just those in `disks`). Default false.
+    #[serde(default)]
+    pub wipe_all_disks: bool,
 }
 
 /// Configuration for a single disk
@@ -170,6 +174,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let json = serde_json::to_string(&layout).unwrap();
@@ -233,6 +238,7 @@ mod tests {
                 ],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let json = serde_json::to_string(&layout).unwrap();
@@ -297,6 +303,7 @@ mod tests {
                 ],
                 properties: Some(pool_properties),
             }]),
+            wipe_all_disks: false,
         };
 
         let json = serde_json::to_string(&layout).unwrap();
@@ -330,6 +337,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let json = serde_json::to_string(&layout).unwrap();
@@ -360,6 +368,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let json = serde_json::to_string(&layout).unwrap();
@@ -378,5 +387,47 @@ mod tests {
         // Verify it round-trips correctly
         let deserialized: DiskLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(layout, deserialized);
+    }
+
+    /// Deserializing a JSON layout that omits `wipe_all_disks` must produce `false`.
+    /// This validates backward-compatibility with old rows in the `roles.disk_layout`
+    /// JSON column that predate the field.
+    #[test]
+    fn test_wipe_all_disks_defaults_to_false() {
+        let json = r#"{
+            "disks": [{
+                "device": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1",
+                "partitions": []
+            }]
+        }"#;
+
+        let layout: DiskLayout = serde_json::from_str(json).unwrap();
+        assert!(
+            !layout.wipe_all_disks,
+            "wipe_all_disks must default to false"
+        );
+    }
+
+    /// A layout with `wipe_all_disks: true` must survive a serde round-trip with
+    /// the value preserved.
+    #[test]
+    fn test_wipe_all_disks_round_trip() {
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "/dev/disk/by-path/pci-0000:00:1f.2-ata-1".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+            wipe_all_disks: true,
+        };
+
+        let json = serde_json::to_string(&layout).unwrap();
+        let deserialized: DiskLayout = serde_json::from_str(&json).unwrap();
+        assert!(
+            deserialized.wipe_all_disks,
+            "wipe_all_disks must remain true after round-trip"
+        );
     }
 }

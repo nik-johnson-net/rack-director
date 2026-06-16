@@ -935,6 +935,7 @@ mod tests {
                 disks: vec![],
                 volume_groups: None,
                 zfs_pools: None,
+                wipe_all_disks: false,
             },
             None,
             None,

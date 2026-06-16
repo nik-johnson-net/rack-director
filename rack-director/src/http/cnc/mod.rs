@@ -1524,6 +1524,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: true,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -1564,6 +1565,10 @@ mod tests {
         assert_eq!(
             result.disks[0].device,
             "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+        );
+        assert!(
+            result.wipe_all_disks,
+            "wipe_all_disks should be true as stored in the role layout"
         );
     }
 
@@ -1682,6 +1687,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: true,
         };
         let role = crate::roles::store::create(
             &conn,
@@ -1720,6 +1726,10 @@ mod tests {
         assert_eq!(
             result.disks[0].device, "/dev/disk/by-path/pci-0000:05:00.0-ata-1",
             "ROOT label should resolve to the device's own by-path"
+        );
+        assert!(
+            result.wipe_all_disks,
+            "wipe_all_disks should be true as stored in the role layout, even after label resolution"
         );
     }
 }

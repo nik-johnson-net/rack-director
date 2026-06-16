@@ -263,6 +263,7 @@ mod tests {
             disks: vec![],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         }
     }
 
@@ -303,6 +304,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let (partitions, logical_volumes) = build_disk_layout_context(&layout);
@@ -359,6 +361,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let (partitions, _) = build_disk_layout_context(&layout);
@@ -384,6 +387,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let (partitions, _) = build_disk_layout_context(&layout);
@@ -442,6 +446,7 @@ mod tests {
                 ],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let (partitions, logical_volumes) = build_disk_layout_context(&layout);
@@ -492,6 +497,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let (partitions, _) = build_disk_layout_context(&layout);
@@ -546,6 +552,7 @@ mod tests {
                 }],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let (partitions, logical_volumes) = build_disk_layout_context(&layout);
@@ -663,6 +670,7 @@ mod tests {
                 ],
             }]),
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let config_template = Some(serde_json::json!({

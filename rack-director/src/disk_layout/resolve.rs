@@ -118,6 +118,9 @@ pub fn resolve_disk_layout(
 
     let overrides = &device_attrs.disk_label_overrides;
 
+    // `wipe_all_disks` and all other scalar fields are preserved by the clone — no
+    // explicit copy is needed. If `DiskLayout` gains new fields in the future, verify
+    // that this clone still carries them through correctly.
     let mut resolved = layout.clone();
 
     for disk in &mut resolved.disks {
@@ -553,6 +556,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let resolved = resolve_disk_layout(&layout, &platform, &device).unwrap();
@@ -587,6 +591,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let resolved = resolve_disk_layout(&layout, &platform, &device).unwrap();
@@ -622,6 +627,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let resolved = resolve_disk_layout(&layout, &platform, &device).unwrap();
@@ -656,6 +662,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let resolved = resolve_disk_layout(&layout, &platform, &device).unwrap();
@@ -678,6 +685,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = resolve_disk_layout(&layout, &platform, &device);
@@ -709,6 +717,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = resolve_disk_layout(&layout, &platform, &device);
@@ -754,6 +763,7 @@ mod tests {
             ],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let resolved = resolve_disk_layout(&layout, &platform, &device).unwrap();
@@ -804,6 +814,7 @@ mod tests {
                 datasets: vec![],
                 properties: None,
             }]),
+            wipe_all_disks: false,
         };
 
         let resolved = resolve_disk_layout(&layout, &platform, &device).unwrap();
@@ -830,6 +841,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = resolve_disk_layout(&layout, &empty_platform, &device);
@@ -858,6 +870,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = validate_layout_against_platform(&layout, &platform);
@@ -875,6 +888,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = validate_layout_against_platform(&layout, &platform);
@@ -898,6 +912,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = validate_layout_against_platform(&layout, &platform);
@@ -922,6 +937,7 @@ mod tests {
             ],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = validate_layout_against_platform(&layout, &platform);
@@ -944,6 +960,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         let result = validate_layout_against_platform(&layout, &empty_platform);
@@ -970,6 +987,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         assert!(layout_uses_labels(&layout));
@@ -985,6 +1003,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
 
         assert!(!layout_uses_labels(&layout));
@@ -1006,8 +1025,48 @@ mod tests {
                 datasets: vec![],
                 properties: None,
             }]),
+            wipe_all_disks: false,
         };
 
         assert!(layout_uses_labels(&layout));
+    }
+
+    /// `resolve_disk_layout` must carry `wipe_all_disks: true` through the clone
+    /// so the agent receives the flag after label resolution.
+    #[test]
+    fn test_resolve_disk_layout_preserves_wipe_all_disks() {
+        let platform = make_simple_platform();
+        let device = make_device_attrs(vec![
+            make_disk_info(
+                "/dev/disk/by-path/pci-0000:05:00.0-ata-1",
+                480,
+                DiskType::Ssd,
+            ),
+            make_disk_info(
+                "/dev/disk/by-path/pci-0000:06:00.0-ata-2",
+                2000,
+                DiskType::Hdd,
+            ),
+        ]);
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "ROOT".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+            wipe_all_disks: true,
+        };
+
+        let resolved = resolve_disk_layout(&layout, &platform, &device).unwrap();
+        assert!(
+            resolved.wipe_all_disks,
+            "wipe_all_disks must be preserved through resolve_disk_layout"
+        );
+        assert_eq!(
+            resolved.disks[0].device, "/dev/disk/by-path/pci-0000:05:00.0-ata-1",
+            "ROOT label must still be resolved correctly"
+        );
     }
 }

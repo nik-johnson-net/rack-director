@@ -273,6 +273,7 @@ export type VolumeGroup = {
 export type DiskLayout = {
   disks: DiskConfig[];
   volume_groups?: VolumeGroup[];
+  wipe_all_disks?: boolean;
 };
 
 export type Role = {

@@ -182,6 +182,23 @@ logical_volumes = [
 ]
 ```
 
+### `wipe_all_disks`
+
+Optional boolean field on the disk layout (default `false`).
+
+When `true`, the agent erases partition info (`wipefs --all --force` + `sgdisk --zap-all`) from **every** whole disk on the machine before partitioning the disks listed in the layout. This clears stale metadata from disks that are not part of the layout (e.g., leftover data disks from a previous role). Disks in the layout are re-wiped afterwards; this is idempotent.
+
+```json
+{
+  "disks": [
+    { "device": "ROOT", "partition_table": "gpt", "partitions": [ ... ] }
+  ],
+  "wipe_all_disks": true
+}
+```
+
+When `false` (the default), only the disks listed in `disks` are wiped.
+
 ### Disk Label Resolution
 
 Platform labels (`ROOT`, `DATA1`, `DATA2`, etc.) are resolved to actual device paths using a two-level override system before being sent to the agent:

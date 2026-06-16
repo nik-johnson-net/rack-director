@@ -145,6 +145,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         }
     }
 
@@ -157,6 +158,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         }
     }
 
@@ -300,6 +302,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let original_partitions = layout.disks[0].partitions.clone();
         let changed = backfill_layout(&mut layout, Some("uefi"));
@@ -346,6 +349,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let changed = backfill_layout(&mut layout, None);
         assert!(changed, "ESP should be added");
@@ -379,6 +383,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         let changed = backfill_layout(&mut layout, Some("riscv"));
         assert!(!changed, "unknown firmware_mode must not modify the layout");

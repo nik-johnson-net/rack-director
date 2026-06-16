@@ -50,12 +50,13 @@ rack-agent/src/
 #### `scan.rs` - Hardware Scanning
 - Device hardware discovery using SMBIOS/DMI tables
 - Network interface detection
-- Disk enumeration using `lsblk`
+- Disk enumeration from `/dev/disk/by-path/`
 - CPU and memory information gathering
 - Delegates BMC scanning to `bmc.rs` module
+- `list_disk_paths()` — public helper that returns the by-path of every whole disk (used by `partition.rs` for whole-machine pre-wipe)
 
 #### `partition.rs` - Disk Partitioning
-- Multi-stage disk provisioning (wipe, partition, LVM, ZFS, format, **verify**)
+- Multi-stage disk provisioning (optional pre-wipe all, wipe, partition, LVM, ZFS, format, **verify**)
 - Partition table creation (GPT or MBR)
 - Disk partitioning with flexible sizing (fixed, percentage, rest)
 - 1MiB-aligned partition offsets
@@ -65,6 +66,7 @@ rack-agent/src/
 - Partition flag management (boot, esp, lvm)
 - SATA and NVMe partition path generation
 - Post-apply verification via `sfdisk --json` and `vgs --noheadings`
+- Optional whole-machine pre-wipe via `DiskLayout.wipe_all_disks`
 
 ## Supported Commands
 
@@ -219,8 +221,9 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=partition-dis
 1. Gets device UUID from SMBIOS
 2. Fetches resolved disk layout from rack-director (`GET /cnc/devices/{uuid}/disk_layout`)
    - Platform labels are already resolved to device paths by rack-director
-3. Applies layout in 5 stages:
-   - **Stage 1:** Wipe and partition each disk (wipefs, sgdisk, parted mklabel/mkpart, partprobe)
+3. Applies layout in up to 6 stages:
+   - **Stage 0 (optional):** If `wipe_all_disks: true`, erase partition info from **every** whole disk on the machine via `wipefs --all --force` + `sgdisk --zap-all` (uses `scan::list_disk_paths()` to enumerate targets). Disks in the layout are re-wiped in Stage 1; this is intentional and idempotent.
+   - **Stage 1:** Wipe and partition each disk in the layout (wipefs, sgdisk, parted mklabel/mkpart, partprobe)
    - **Stage 2:** Wait for udev to settle
    - **Stage 3:** Set up LVM volume groups (pvcreate, vgcreate, lvcreate, mkfs)
    - **Stage 4:** Set up ZFS pools and datasets (zpool create, zfs create)
@@ -253,9 +256,13 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=partition-dis
         }
       ]
     }
-  ]
+  ],
+  "wipe_all_disks": true
 }
 ```
+
+**`wipe_all_disks` field (optional, default `false`):**
+When `true`, the agent erases partition info (`wipefs --all --force` + `sgdisk --zap-all`) from **every** whole disk on the machine **before** applying the layout. This ensures no stale partition metadata remains on disks not listed in the layout (e.g., extra data disks from a previous use). Disks listed in `disks` are wiped again during Stage 1; running the commands twice is idempotent and harmless. When `false` (default), only the disks listed in `disks` are wiped.
 
 **Supported Features:**
 - **Size formats:** Binary (`512MiB`, `100GiB`), decimal (`500GB`), shorthand (`50G`), percentage (`50%`), rest

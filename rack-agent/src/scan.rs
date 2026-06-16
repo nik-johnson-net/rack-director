@@ -805,6 +805,16 @@ pub async fn read_dmi_for_uuid() -> Result<Option<String>> {
     Ok(hardware_info.uuid)
 }
 
+/// Return the by-path device path of every whole disk on the machine.
+///
+/// Reuses `scan_disks()` filtering: partitions, removable devices, and
+/// zero-size devices are excluded. Used by `partition.rs` when
+/// `DiskLayout.wipe_all_disks` is true to enumerate targets for pre-wipe.
+pub async fn list_disk_paths() -> Result<Vec<String>> {
+    let disks = scan_disks().await?;
+    Ok(disks.into_iter().filter_map(|d| d.path).collect())
+}
+
 // Parse DMI tables from sysfs (separate entry point and structures files)
 fn parse_dmi_sysfs(entry_point_data: &[u8], structures_data: &[u8]) -> Result<HardwareInfo> {
     let entry_point = dmidecode::EntryPoint::search(entry_point_data)?;
