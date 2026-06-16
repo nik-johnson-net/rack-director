@@ -18,21 +18,26 @@ interface PartitionRowProps {
   initiallyExpanded?: boolean;
 }
 
+const NO_FILESYSTEM = "__none__";
+
 const FILESYSTEM_OPTIONS = [
   ...BASE_FILESYSTEM_OPTIONS,
   { value: "__lvm__", label: "— LVM Physical Volume" },
+  { value: NO_FILESYSTEM, label: "— None (raw)" },
 ];
 
 const ADDITIONAL_FLAGS = ["boot", "esp", "bios_grub"];
 
 function getFilesystemSelectValue(partition: PartitionConfig): string {
   if (partition.flags?.includes("lvm")) return "__lvm__";
-  return partition.filesystem ?? "ext4";
+  if (partition.filesystem === undefined) return NO_FILESYSTEM;
+  return partition.filesystem;
 }
 
 function getFilesystemSummary(partition: PartitionConfig): string {
   if (partition.flags?.includes("lvm")) return "LVM PV";
-  return partition.filesystem ?? "—";
+  if (partition.filesystem === undefined) return "raw";
+  return partition.filesystem;
 }
 
 // Badge for partition flags
@@ -65,7 +70,7 @@ export default function PartitionRow({
   const volumeGroupError = errors?.[`${errorPrefix}.volume_group`];
 
   const isLvm = partition.flags?.includes("lvm") ?? false;
-  const showMountPoint = !isLvm && partition.filesystem !== "swap";
+  const showMountPoint = !isLvm && partition.filesystem !== undefined && partition.filesystem !== "swap";
 
   const displayFlags = (partition.flags ?? []).filter((f) => f !== "lvm");
   if (isLvm) displayFlags.unshift("lvm");
@@ -89,6 +94,15 @@ export default function PartitionRow({
         filesystem: undefined,
         mount_point: undefined,
         flags: newFlags,
+      });
+    } else if (val === NO_FILESYSTEM) {
+      const newFlags = (partition.flags ?? []).filter((f) => f !== "lvm");
+      onUpdate({
+        ...partition,
+        filesystem: undefined,
+        mount_point: undefined,
+        volume_group: undefined,
+        flags: newFlags.length > 0 ? newFlags : undefined,
       });
     } else {
       const newFlags = (partition.flags ?? []).filter((f) => f !== "lvm");
