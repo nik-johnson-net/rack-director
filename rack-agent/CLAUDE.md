@@ -260,6 +260,7 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=partition-dis
 **Supported Features:**
 - **Size formats:** Binary (`512MiB`, `100GiB`), decimal (`500GB`), shorthand (`50G`), percentage (`50%`), rest
 - **Filesystems:** ext2, ext3, ext4, xfs, btrfs, vfat, swap
+- **Raw partitions:** A partition may omit its filesystem (`filesystem: null`) to be defined but left unformatted. Stage 5 skips formatting it, just as a raw LVM logical volume (e.g. a Ceph OSD) is left unformatted. Such a partition must not declare a `mount_point`.
 - **Partition flags:** boot, esp, lvm
 - **Multiple devices:** Can partition multiple disks in one layout
 - **LVM:** Volume groups with logical volumes, supports `100%FREE`/`rest` for last LV

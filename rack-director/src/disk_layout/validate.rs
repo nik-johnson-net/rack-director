@@ -692,6 +692,29 @@ mod tests {
     }
 
     #[test]
+    fn test_raw_partition_without_lvm_is_ok() {
+        // A plain raw partition — defined but intentionally left unformatted, and not consumed
+        // by LVM or ZFS — is valid. The agent skips formatting when filesystem is None.
+        let layout = DiskLayout {
+            disks: vec![DiskConfig {
+                device: "/dev/sda".to_string(),
+                partition_table: "gpt".to_string(),
+                partitions: vec![PartitionConfig {
+                    label: "raw".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                    flags: None,
+                    volume_group: None,
+                }],
+            }],
+            volume_groups: None,
+            zfs_pools: None,
+        };
+        assert!(validate_disk_layout(&layout, None).is_ok());
+    }
+
+    #[test]
     fn test_none_filesystem_is_ok() {
         // Partitions without filesystem (LVM/ZFS raw) are allowed to have no filesystem.
         let layout = DiskLayout {
