@@ -1,8 +1,5 @@
 import { redirect } from "react-router";
 
-export type Plan = {
-
-}
 
 export type ValidationErrors = Record<string, string>;
 
@@ -77,6 +74,7 @@ export type Device = {
     // Legacy fields
     mac_address?: string;
     static_ip?: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [key: string]: any;
   };
   created_at?: string;
@@ -286,7 +284,7 @@ export type Role = {
   os_arch: string;
   disk_layout: DiskLayout;
   cmdline_args?: string;
-  config_template?: any;
+  config_template?: Record<string, unknown>;
   firmware_mode?: FirmwareMode;
   created_at?: string;
   updated_at?: string;
@@ -301,7 +299,7 @@ export type CreateRoleRequest = {
   os_arch: string;
   disk_layout: DiskLayout;
   cmdline_args?: string;
-  config_template?: any;
+  config_template?: Record<string, unknown>;
   firmware_mode?: FirmwareMode;
 }
 
@@ -314,7 +312,7 @@ export type UpdateRoleRequest = {
   os_arch?: string;
   disk_layout?: DiskLayout;
   cmdline_args?: string;
-  config_template?: any;
+  config_template?: Record<string, unknown>;
   firmware_mode?: FirmwareMode;
   clear_firmware_mode?: boolean;
 }
@@ -430,7 +428,7 @@ export async function getDevice(uuid: string): Promise<Device> {
   });
 }
 
-export async function updateDeviceAttributes(uuid: string, attributes: Record<string, any>): Promise<void> {
+export async function updateDeviceAttributes(uuid: string, attributes: Record<string, unknown>): Promise<void> {
   const response = await fetch(`/ui/devices/${uuid}/attributes`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -617,7 +615,7 @@ export type Action = {
 };
 
 export async function postDevicePlan(uuid: string, plan: Action[]): Promise<void> {
-  let data = { plan };
+  const data = { plan };
   return fetch(`/ui/devices/${uuid}/plan`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

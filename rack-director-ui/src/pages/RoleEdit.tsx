@@ -103,7 +103,7 @@ function RoleEdit() {
             mergeOsValues(prev, currentOs.config.template_variables)
           );
         }
-      } catch (err) {
+      } catch {
         setError("Failed to load data");
       } finally {
         setLoadingOs(false);

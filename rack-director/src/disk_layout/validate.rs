@@ -720,6 +720,7 @@ mod tests {
             }],
             volume_groups: None,
             zfs_pools: None,
+            wipe_all_disks: false,
         };
         assert!(validate_disk_layout(&layout, None).is_ok());
     }
