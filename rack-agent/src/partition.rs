@@ -69,41 +69,50 @@ pub async fn partition_disks(client: &CncClient, plan_id: Option<i64>) -> Result
 /// Apply a disk layout to the system
 ///
 /// Execution order:
-/// 0. If `wipe_all_disks` is true, erase partition info from every whole disk
-/// 1. Wipe and partition each disk in the layout
-/// 2. Wait for udev to settle
-/// 3. Set up LVM volume groups and logical volumes
-/// 4. Set up ZFS pools and datasets
-/// 5. Format simple partitions (not LVM/ZFS)
+/// 0. Clean up any existing LVM state for VGs we are about to recreate
+/// 1. If `wipe_all_disks` is true, erase partition info from every whole disk
+/// 2. Wipe and partition each disk in the layout
+/// 3. Wait for udev to settle
+/// 4. Set up LVM volume groups and logical volumes
+/// 5. Set up ZFS pools and datasets
+/// 6. Format simple partitions (not LVM/ZFS)
 async fn apply_disk_layout(layout: &DiskLayout) -> Result<()> {
-    // Step 0: Optionally wipe partition info from ALL disks on the machine.
+    // Step 0: Clean up any existing LVM state for VGs we are about to recreate.
+    // This prevents "VG already exists" / "PV in use" errors when retrying after
+    // a failed first attempt in daemon mode. Best-effort: errors are ignored
+    // because on a fresh system there is nothing to remove.
+    if let Some(ref volume_groups) = layout.volume_groups {
+        deactivate_lvm_volume_groups(volume_groups).await;
+    }
+
+    // Step 1: Optionally wipe partition info from ALL disks on the machine.
     if layout.wipe_all_disks {
         wipe_all_disks().await?;
     }
 
-    // Step 1: Wipe and partition each disk
+    // Step 2: Wipe and partition each disk
     for disk in &layout.disks {
         wipe_and_partition_disk(disk).await?;
     }
 
-    // Step 2: Wait for udev to settle after partition changes
+    // Step 3: Wait for udev to settle after partition changes
     run_command("udevadm", &["settle", "--timeout=10"]).await?;
 
-    // Step 3: LVM setup
+    // Step 4: LVM setup
     if let Some(ref volume_groups) = layout.volume_groups {
         for vg in volume_groups {
             setup_volume_group(vg, &layout.disks).await?;
         }
     }
 
-    // Step 4: ZFS setup
+    // Step 5: ZFS setup
     if let Some(ref zfs_pools) = layout.zfs_pools {
         for pool in zfs_pools {
             setup_zfs_pool(pool).await?;
         }
     }
 
-    // Step 5: Format simple partitions (not LVM, not ZFS)
+    // Step 6: Format simple partitions (not LVM, not ZFS)
     for disk in &layout.disks {
         format_simple_partitions(disk, layout).await?;
     }
@@ -184,6 +193,23 @@ async fn wipe_and_partition_disk(disk: &DiskConfig) -> Result<()> {
 }
 
 // ========== LVM Operations ==========
+
+/// Deactivate and remove LVM volume groups that will be recreated.
+///
+/// Best-effort: errors are logged and ignored. On a fresh system the VGs do not
+/// exist, and these commands will fail — that is expected and harmless.
+async fn deactivate_lvm_volume_groups(volume_groups: &[VolumeGroup]) {
+    for vg in volume_groups {
+        info!(
+            "Removing existing LVM volume group (if present): {}",
+            vg.name
+        );
+        // Deactivate all LVs in the VG so device-mapper devices are released.
+        let _ = run_command("vgchange", &["-an", &vg.name]).await;
+        // Remove the VG and all its LVs.
+        let _ = run_command("vgremove", &["--force", &vg.name]).await;
+    }
+}
 
 async fn setup_volume_group(vg: &VolumeGroup, disks: &[DiskConfig]) -> Result<()> {
     info!("Setting up LVM volume group: {}", vg.name);
@@ -950,6 +976,14 @@ mod tests {
             layout.wipe_all_disks,
             "wipe_all_disks must be true when set in JSON"
         );
+    }
+
+    // ========== deactivate_lvm_volume_groups tests ==========
+
+    #[tokio::test]
+    async fn test_deactivate_lvm_volume_groups_empty() {
+        // Should not panic or error on empty input
+        deactivate_lvm_volume_groups(&[]).await;
     }
 
     // ========== fs_type_hint tests ==========
