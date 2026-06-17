@@ -261,17 +261,16 @@ pub async fn get_all_devices(conn: &Connection) -> Result<Vec<Device>> {
 
 /// Find device UUID by MAC address from device attributes.
 ///
-/// Searches both legacy mac_address field and network_interfaces array.
+/// Searches the network_interfaces array for the given MAC address.
 pub async fn find_device_by_mac(conn: &Connection, mac: &str) -> Result<Option<Uuid>> {
     let mac = mac.to_string();
     let result = conn
         .query_row(
             "SELECT uuid FROM devices
-             WHERE json_extract(attributes, '$.mac_address') = ?1
-                OR EXISTS (
-                  SELECT 1 FROM json_each(attributes, '$.network_interfaces')
-                  WHERE json_extract(value, '$.mac_address') = ?1
-                )",
+             WHERE EXISTS (
+               SELECT 1 FROM json_each(attributes, '$.network_interfaces')
+               WHERE json_extract(value, '$.mac_address') = ?1
+             )",
             (mac,),
             |row| row.get(0),
         )
@@ -288,52 +287,6 @@ pub async fn set_hostname(conn: &Connection, uuid: &Uuid, hostname: &str) -> Res
         (hostname.to_string(), *uuid),
     )
     .await?;
-
-    Ok(())
-}
-
-/// Set MAC address in device attributes.
-pub async fn set_mac_address(conn: &Connection, uuid: &Uuid, mac: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE devices SET attributes = json_set(attributes, '$.mac_address', ?1) WHERE uuid = ?2",
-        (mac.to_string(), *uuid),
-    )
-    .await?;
-
-    let uuid_copy = *uuid;
-    let has_interfaces: bool = conn
-        .query_row(
-            "SELECT json_type(attributes, '$.network_interfaces') FROM devices WHERE uuid = ?1",
-            (*uuid,),
-            |row| {
-                let json_type: Option<String> = row.get(0)?;
-                Ok(json_type == Some("array".to_string()))
-            },
-        )
-        .await
-        .optional()?
-        .unwrap_or(false);
-
-    if has_interfaces {
-        let first_index: Option<i64> = conn
-            .query_row(
-                "SELECT key FROM json_each((SELECT attributes FROM devices WHERE uuid = ?1), '$.network_interfaces')
-                 LIMIT 1",
-                (uuid_copy,),
-                |row| row.get::<_, i64>(0),
-            )
-            .await
-            .optional()?;
-
-        if let Some(index) = first_index {
-            let path = format!("$.network_interfaces[{}].mac_address", index);
-            conn.execute(
-                "UPDATE devices SET attributes = json_set(attributes, ?1, ?2) WHERE uuid = ?3",
-                (path, mac.to_string(), uuid_copy),
-            )
-            .await?;
-        }
-    }
 
     Ok(())
 }
@@ -776,25 +729,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_mac_address() {
-        let db = setup_db(test_database_path!()).await;
-        let uuid = test_uuid(0x21);
-
-        register_device(&db, &uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-        set_mac_address(&db, &uuid, "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
-
-        let device = get_device(&db, &uuid).await.unwrap();
-        assert_eq!(
-            device.attributes.mac_address.as_ref().unwrap(),
-            "aa:bb:cc:dd:ee:ff"
-        );
-    }
-
-    #[tokio::test]
     async fn test_set_ip_address() {
         let db = setup_db(test_database_path!()).await;
         let uuid = test_uuid(0x23);
@@ -809,9 +743,6 @@ mod tests {
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].mac_address, mac);
         assert_eq!(interfaces[0].ip_address, Some("10.0.0.150".to_string()));
-
-        let device = get_device(&db, &uuid).await.unwrap();
-        assert!(device.attributes.static_ip.is_none());
     }
 
     #[tokio::test]
@@ -1087,25 +1018,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_device_by_mac_legacy_field() {
-        let db = setup_db(test_database_path!()).await;
-        let uuid = test_uuid(0x34);
-
-        register_device(&db, &uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-        set_mac_address(&db, &uuid, "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
-
-        let found = find_device_by_mac(&db, "aa:bb:cc:dd:ee:ff").await.unwrap();
-        assert_eq!(found, Some(uuid));
-
-        let not_found = find_device_by_mac(&db, "00:00:00:00:00:00").await.unwrap();
-        assert_eq!(not_found, None);
-    }
-
-    #[tokio::test]
     async fn test_find_device_by_mac_in_interfaces_array() {
         let db = setup_db(test_database_path!()).await;
         let uuid = test_uuid(0x35);
@@ -1156,9 +1068,6 @@ mod tests {
         register_device(&db, &uuid, Architecture::X86_64)
             .await
             .unwrap();
-        set_mac_address(&db, &uuid, "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
 
         let interfaces = vec![
             NetworkInterface {
@@ -1184,82 +1093,12 @@ mod tests {
             .await
             .unwrap();
 
-        // find_device_by_mac searches both legacy field and interfaces
-        let found_legacy = find_device_by_mac(&db, "aa:bb:cc:dd:ee:ff").await.unwrap();
-        assert_eq!(found_legacy, Some(uuid));
+        // find_device_by_mac searches network_interfaces
+        let found_first = find_device_by_mac(&db, "aa:bb:cc:dd:ee:01").await.unwrap();
+        assert_eq!(found_first, Some(uuid));
 
-        let found_iface = find_device_by_mac(&db, "aa:bb:cc:dd:ee:02").await.unwrap();
-        assert_eq!(found_iface, Some(uuid));
-    }
-
-    #[tokio::test]
-    async fn test_set_mac_address_legacy_only() {
-        let db = setup_db(test_database_path!()).await;
-        let uuid = test_uuid(0x37);
-
-        register_device(&db, &uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-        set_mac_address(&db, &uuid, "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
-
-        let device = get_device(&db, &uuid).await.unwrap();
-        assert_eq!(
-            device.attributes.mac_address.as_ref().unwrap(),
-            "aa:bb:cc:dd:ee:ff"
-        );
-
-        let interfaces = get_network_interfaces(&db, &uuid).await.unwrap();
-        assert_eq!(interfaces.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_set_mac_address_updates_first_interface() {
-        let db = setup_db(test_database_path!()).await;
-        let uuid = test_uuid(0x38);
-
-        register_device(&db, &uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-
-        let interfaces = vec![
-            NetworkInterface {
-                interface_name: "eth0".to_string(),
-                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
-                ip_address: Some("10.0.0.100".to_string()),
-                network_id: None,
-                speed_mbps: None,
-                disabled: false,
-                warning_label: None,
-            },
-            NetworkInterface {
-                interface_name: "eth1".to_string(),
-                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
-                ip_address: None,
-                network_id: None,
-                speed_mbps: None,
-                disabled: false,
-                warning_label: None,
-            },
-        ];
-        set_network_interfaces(&db, &uuid, &interfaces)
-            .await
-            .unwrap();
-
-        set_mac_address(&db, &uuid, "11:22:33:44:55:66")
-            .await
-            .unwrap();
-
-        let device = get_device(&db, &uuid).await.unwrap();
-        assert_eq!(
-            device.attributes.mac_address.as_ref().unwrap(),
-            "11:22:33:44:55:66"
-        );
-
-        let updated_interfaces = get_network_interfaces(&db, &uuid).await.unwrap();
-        assert_eq!(updated_interfaces[0].mac_address, "11:22:33:44:55:66");
-        assert_eq!(updated_interfaces[1].mac_address, "aa:bb:cc:dd:ee:02");
+        let found_second = find_device_by_mac(&db, "aa:bb:cc:dd:ee:02").await.unwrap();
+        assert_eq!(found_second, Some(uuid));
     }
 
     #[tokio::test]
@@ -1277,9 +1116,6 @@ mod tests {
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].mac_address, mac);
         assert_eq!(interfaces[0].ip_address, Some("10.0.0.100".to_string()));
-
-        let device = get_device(&db, &uuid).await.unwrap();
-        assert!(device.attributes.static_ip.is_none());
     }
 
     #[tokio::test]
@@ -1328,40 +1164,6 @@ mod tests {
             updated_interfaces[0].ip_address,
             Some("10.0.0.100".to_string())
         );
-
-        let device = get_device(&db, &uuid).await.unwrap();
-        assert!(device.attributes.static_ip.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_backward_compatibility_legacy_device() {
-        let db = setup_db(test_database_path!()).await;
-        let uuid = test_uuid(0x41);
-
-        register_device(&db, &uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-        set_mac_address(&db, &uuid, "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
-        set_ip_address(&db, &uuid, "10.0.0.100", "aa:bb:cc:dd:ee:ff")
-            .await
-            .unwrap();
-
-        let device = get_device(&db, &uuid).await.unwrap();
-        assert_eq!(
-            device.attributes.mac_address.as_ref().unwrap(),
-            "aa:bb:cc:dd:ee:ff"
-        );
-        assert!(device.attributes.static_ip.is_none());
-
-        let found = find_device_by_mac(&db, "aa:bb:cc:dd:ee:ff").await.unwrap();
-        assert_eq!(found, Some(uuid));
-
-        let interfaces = get_network_interfaces(&db, &uuid).await.unwrap();
-        assert_eq!(interfaces.len(), 1);
-        assert_eq!(interfaces[0].mac_address, "aa:bb:cc:dd:ee:ff");
-        assert_eq!(interfaces[0].ip_address, Some("10.0.0.100".to_string()));
     }
 
     #[tokio::test]

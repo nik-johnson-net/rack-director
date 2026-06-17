@@ -136,11 +136,6 @@ fn build_attributes(
         })
         .collect();
 
-    // Legacy mac_address field for backward compatibility
-    if let Some(primary_mac) = state.mac_addresses.first() {
-        attributes.mac_address = Some(crate::server::format_mac(primary_mac));
-    }
-
     attributes.bmc = build_bmc(state);
 
     attributes
@@ -227,8 +222,6 @@ mod tests {
         assert_eq!(nic0.interface_name, "eth0");
         assert_eq!(nic0.mac_address, "52:54:00:12:34:56");
         assert_eq!(nic0.ip_address, Some("192.168.1.100".to_string()));
-
-        assert_eq!(attrs.mac_address, Some("52:54:00:12:34:56".to_string()));
     }
 
     #[test]
@@ -260,8 +253,6 @@ mod tests {
         assert_eq!(nic1.interface_name, "eth1");
         assert_eq!(nic1.mac_address, "52:54:00:12:34:57");
         assert_eq!(nic1.ip_address, Some("192.168.1.101".to_string()));
-
-        assert_eq!(attrs.mac_address, Some("52:54:00:12:34:56".to_string()));
     }
 
     #[test]

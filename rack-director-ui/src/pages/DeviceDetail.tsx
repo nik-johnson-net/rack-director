@@ -243,8 +243,9 @@ function DeviceDetail() {
         setAvailablePlatforms(platformsData);
         setNetworks(networksData);
 
-        if (deviceData.attributes?.mac_address) {
-          const lease = await getDhcpLeaseByMac(deviceData.attributes.mac_address);
+        const primaryMac = deviceData.attributes?.network_interfaces?.[0]?.mac_address;
+        if (primaryMac) {
+          const lease = await getDhcpLeaseByMac(primaryMac);
           setDhcpLease(lease);
         }
 
@@ -530,13 +531,6 @@ function DeviceDetail() {
             ];
           })}
         />
-        {/* Legacy MAC fallback */}
-        {nics.length === 0 && device.attributes?.mac_address && (
-          <div className="mt-2 text-xs text-text-secondary font-mono">
-            {device.attributes.mac_address}
-            <span className="ml-2 text-text-muted">(legacy – re-scan to update)</span>
-          </div>
-        )}
       </SectionCard>
 
       {/* Disks card */}
@@ -930,7 +924,7 @@ function DeviceDetail() {
         title={hostname}
         status={<StatusBadge status={lifecycle} />}
         description={[
-          device.attributes?.mac_address ?? nics[0]?.mac_address,
+          nics[0]?.mac_address,
           assignedPlatform?.name,
           assignedRole?.name,
         ]

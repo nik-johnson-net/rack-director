@@ -46,15 +46,13 @@ function Devices() {
       if (search.trim()) {
         const q = search.trim().toLowerCase();
         const hostname = (device.attributes?.hostname ?? "").toLowerCase();
-        const mac = (device.attributes?.mac_address ?? "").toLowerCase();
-        // Also check network interfaces for MAC
+        // Match against network interface MACs
         const ifaceMacs = (device.attributes?.network_interfaces ?? [])
           .map((i) => i.mac_address.toLowerCase())
           .join(" ");
         const uuid = device.uuid.toLowerCase();
         if (
           !hostname.includes(q) &&
-          !mac.includes(q) &&
           !ifaceMacs.includes(q) &&
           !uuid.includes(q)
         ) {
@@ -274,10 +272,7 @@ function Devices() {
             ) : (
               filtered.map((device, idx) => {
                 const hostname = device.attributes?.hostname;
-                // Prefer the first NIC MAC, fall back to legacy mac_address field
-                const mac =
-                  device.attributes?.network_interfaces?.[0]?.mac_address ??
-                  device.attributes?.mac_address;
+                const mac = device.attributes?.network_interfaces?.[0]?.mac_address;
                 const platformName = device.platform_id
                   ? platformsMap.get(device.platform_id)
                   : undefined;

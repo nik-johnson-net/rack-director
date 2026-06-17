@@ -119,14 +119,6 @@ pub struct DeviceAttributes {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 
-    /// Legacy field - MAC address (prefer network_interfaces)
-    #[serde(default)]
-    pub mac_address: Option<String>,
-
-    /// Legacy field - static IP (prefer network_interfaces)
-    #[serde(default)]
-    pub static_ip: Option<String>,
-
     /// Firmware mode detected at device intake (x86/x86_64 only).
     /// None means not applicable (non-x86) or not yet detected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,7 +350,9 @@ mod tests {
 
     #[test]
     fn test_backward_compatibility_old_json() {
-        // Simulate old JSON format without typed fields
+        // Simulate old JSON format that used top-level mac_address and static_ip fields.
+        // These fields no longer exist on DeviceAttributes; the #[serde(flatten)] extra
+        // map absorbs them so old DB rows are not corrupted on re-serialization.
         let old_json = json!({
             "hostname": "legacy-server",
             "mac_address": "aa:bb:cc:dd:ee:ff",
@@ -368,8 +362,15 @@ mod tests {
         let attrs: DeviceAttributes = serde_json::from_value(old_json).unwrap();
 
         assert_eq!(attrs.hostname, Some("legacy-server".to_string()));
-        assert_eq!(attrs.mac_address, Some("aa:bb:cc:dd:ee:ff".to_string()));
-        assert_eq!(attrs.static_ip, Some("10.0.0.50".to_string()));
+        // Legacy fields must be captured in extra, not dropped
+        assert_eq!(
+            attrs.extra.get("mac_address").and_then(|v| v.as_str()),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
+        assert_eq!(
+            attrs.extra.get("static_ip").and_then(|v| v.as_str()),
+            Some("10.0.0.50")
+        );
         assert!(attrs.network_interfaces.is_empty());
     }
 
