@@ -221,8 +221,6 @@ struct DeviceResponse {
     created_at: Option<String>,
     first_seen_at: Option<String>,
     last_seen_at: Option<String>,
-    ip_address: Option<String>,
-    mac_address: Option<String>,
     hostname: Option<String>,
 }
 
@@ -307,10 +305,7 @@ async fn get_all_devices(
     let device_responses: Vec<DeviceResponse> = devices
         .into_iter()
         .map(|device| {
-            // Extract all network info from device attributes
             let hostname = device.attributes.hostname.clone();
-            let mac_address = device.attributes.mac_address.clone();
-            let ip_address = device.attributes.static_ip.clone();
 
             // Serialize DeviceAttributes to JSON map for API response
             let mut attributes_json = serde_json::to_value(&device.attributes)
@@ -331,8 +326,6 @@ async fn get_all_devices(
                 created_at: device.created_at,
                 first_seen_at: device.first_seen_at,
                 last_seen_at: device.last_seen_at,
-                ip_address,
-                mac_address,
                 hostname,
             }
         })
@@ -359,10 +352,7 @@ async fn get_device_by_uuid(
         Err(_) => return Err(StatusCode::NOT_FOUND),
     };
 
-    // Extract all info from device attributes
     let hostname = device.attributes.hostname.clone();
-    let mac_address = device.attributes.mac_address.clone();
-    let ip_address = device.attributes.static_ip.clone();
 
     // Serialize DeviceAttributes to JSON map for API response
     let mut attributes_json = serde_json::to_value(&device.attributes)
@@ -383,8 +373,6 @@ async fn get_device_by_uuid(
         created_at: device.created_at,
         first_seen_at: device.first_seen_at,
         last_seen_at: device.last_seen_at,
-        ip_address,
-        mac_address,
         hostname,
     }))
 }

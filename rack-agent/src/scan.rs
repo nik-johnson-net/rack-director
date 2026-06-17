@@ -681,11 +681,6 @@ async fn perform_scan_and_upload(
                         warning_label: None,
                     })
                     .collect();
-
-                // Also set legacy mac_address field for backward compatibility
-                if let Some(primary) = network_interfaces.first() {
-                    attributes.mac_address = Some(primary.mac_address.clone());
-                }
             } else {
                 info!("No physical Ethernet interfaces found");
             }

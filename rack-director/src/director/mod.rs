@@ -704,10 +704,6 @@ impl<'a> Director<'a> {
         store::find_device_by_mac(self.conn, mac).await
     }
 
-    pub async fn set_device_mac_address(&self, uuid: &Uuid, mac: &str) -> anyhow::Result<()> {
-        store::set_mac_address(self.conn, uuid, mac).await
-    }
-
     pub async fn set_device_ip_address(
         &self,
         uuid: &Uuid,
@@ -882,15 +878,7 @@ impl<'a> Director<'a> {
             }
         }
 
-        // 2. Check legacy mac_address field (backward compatibility)
-        if let Ok(device) = store::get_device(self.conn, uuid).await
-            && let Some(mac) = &device.attributes.mac_address
-            && !interfaces.iter().any(|nic| &nic.mac_address == mac)
-        {
-            let _ = crate::dhcp::store::delete_static_reservations_by_mac(self.conn, mac).await;
-        }
-
-        // 3. Delete device (cascades to plans, transitions)
+        // 2. Delete device (cascades to plans, transitions)
         store::delete_device(self.conn, uuid).await
     }
 

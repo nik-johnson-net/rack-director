@@ -157,14 +157,6 @@ async fn ipxe_handler(
             {
                 warn!("Couldn't store IP address for device {uuid}: {e}");
             }
-
-            // Update legacy MAC address field for backward compatibility
-            if let Err(e) = director
-                .set_device_mac_address(&uuid, &lease.mac_address)
-                .await
-            {
-                warn!("Couldn't store MAC address for device {uuid}: {e}");
-            }
         }
     } else {
         log::debug!("No MAC address available for device {}", uuid);

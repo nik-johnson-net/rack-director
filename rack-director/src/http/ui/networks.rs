@@ -400,8 +400,7 @@ async fn make_lease_static(
 ///
 /// This function searches for the given MAC address in:
 /// 1. Device network_interfaces array (all NICs)
-/// 2. Legacy mac_address field
-/// 3. BMC mac_address field
+/// 2. BMC mac_address field
 ///
 /// The MAC comparison is case-insensitive.
 ///
@@ -421,13 +420,6 @@ fn find_device_uuid_by_mac(devices: &[Device], mac: &str) -> Option<Uuid> {
             if interface.mac_address.to_lowercase() == mac_lower {
                 return Some(device.uuid);
             }
-        }
-
-        // Check legacy mac_address field
-        if let Some(legacy_mac) = &device.attributes.mac_address
-            && legacy_mac.to_lowercase() == mac_lower
-        {
-            return Some(device.uuid);
         }
 
         // Check BMC MAC address
@@ -450,7 +442,6 @@ mod tests {
     fn create_test_device(
         uuid: Uuid,
         network_interfaces: Vec<NetworkInterface>,
-        mac_address: Option<String>,
         bmc: Option<BmcInfo>,
     ) -> Device {
         Device {
@@ -462,7 +453,6 @@ mod tests {
             platform_id: None,
             attributes: DeviceAttributes {
                 network_interfaces,
-                mac_address,
                 bmc,
                 ..Default::default()
             },
@@ -487,7 +477,6 @@ mod tests {
                 disabled: false,
                 warning_label: None,
             }],
-            None,
             None,
         )];
 
@@ -521,25 +510,10 @@ mod tests {
                 },
             ],
             None,
-            None,
         )];
 
         // Should find device by secondary NIC MAC
         let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:02");
-        assert_eq!(result, Some(uuid));
-    }
-
-    #[test]
-    fn test_find_device_by_legacy_mac() {
-        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440003").unwrap();
-        let devices = vec![create_test_device(
-            uuid,
-            vec![],
-            Some("aa:bb:cc:dd:ee:ff".to_string()),
-            None,
-        )];
-
-        let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:ff");
         assert_eq!(result, Some(uuid));
     }
 
@@ -549,7 +523,6 @@ mod tests {
         let devices = vec![create_test_device(
             uuid,
             vec![],
-            None,
             Some(BmcInfo {
                 mac_address: "11:22:33:44:55:66".to_string(),
                 ip_address: Some("10.0.1.10".to_string()),
@@ -575,7 +548,6 @@ mod tests {
                 disabled: false,
                 warning_label: None,
             }],
-            None,
             None,
         )];
 
@@ -607,7 +579,6 @@ mod tests {
                 warning_label: None,
             }],
             None,
-            None,
         )];
 
         let result = find_device_uuid_by_mac(&devices, "ff:ff:ff:ff:ff:ff");
@@ -633,7 +604,6 @@ mod tests {
                     warning_label: None,
                 }],
                 None,
-                None,
             ),
             create_test_device(
                 uuid2,
@@ -647,12 +617,10 @@ mod tests {
                     warning_label: None,
                 }],
                 None,
-                None,
             ),
             create_test_device(
                 uuid3,
                 vec![],
-                None,
                 Some(BmcInfo {
                     mac_address: "11:22:33:44:55:66".to_string(),
                     ip_address: Some("10.0.1.10".to_string()),

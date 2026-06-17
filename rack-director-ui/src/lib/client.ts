@@ -71,9 +71,6 @@ export type Device = {
     bmc?: BmcInfo;
     bmc_config?: BmcConfig;
     disk_label_overrides?: Record<string, string>;
-    // Legacy fields
-    mac_address?: string;
-    static_ip?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [key: string]: any;
   };
