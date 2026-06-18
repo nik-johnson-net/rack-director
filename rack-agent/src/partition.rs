@@ -77,12 +77,13 @@ pub async fn partition_disks(client: &CncClient, plan_id: Option<i64>) -> Result
 /// 5. Set up ZFS pools and datasets
 /// 6. Format simple partitions (not LVM/ZFS)
 async fn apply_disk_layout(layout: &DiskLayout) -> Result<()> {
-    // Step 0: Clean up any existing LVM state for VGs we are about to recreate.
-    // This prevents "VG already exists" / "PV in use" errors when retrying after
-    // a failed first attempt in daemon mode. Best-effort: errors are ignored
-    // because on a fresh system there is nothing to remove.
-    if let Some(ref volume_groups) = layout.volume_groups {
-        deactivate_lvm_volume_groups(volume_groups).await;
+    // Step 0: Clean up any existing LVM state on the target disks before wiping.
+    // This prevents stale VGs/PVs (from a failed prior run) from blocking pvcreate/
+    // vgcreate when the daemon retries without a reboot. Best-effort: errors ignored.
+    if layout.wipe_all_disks {
+        remove_all_lvm().await;
+    } else if !layout.disks.is_empty() {
+        remove_lvm_on_disks(&layout.disks).await;
     }
 
     // Step 1: Optionally wipe partition info from ALL disks on the machine.
@@ -194,20 +195,77 @@ async fn wipe_and_partition_disk(disk: &DiskConfig) -> Result<()> {
 
 // ========== LVM Operations ==========
 
-/// Deactivate and remove LVM volume groups that will be recreated.
+/// Remove all LVM volume groups whose physical volumes reside on the given disks.
 ///
-/// Best-effort: errors are logged and ignored. On a fresh system the VGs do not
-/// exist, and these commands will fail — that is expected and harmless.
-async fn deactivate_lvm_volume_groups(volume_groups: &[VolumeGroup]) {
-    for vg in volume_groups {
-        info!(
-            "Removing existing LVM volume group (if present): {}",
-            vg.name
-        );
-        // Deactivate all LVs in the VG so device-mapper devices are released.
-        let _ = run_command("vgchange", &["-an", &vg.name]).await;
-        // Remove the VG and all its LVs.
-        let _ = run_command("vgremove", &["--force", &vg.name]).await;
+/// Resolves each disk device to its canonical path so that by-path/by-id symlinks
+/// match the real device names reported by `pvs`. Best-effort: errors are logged
+/// and ignored because on a fresh system there are no PVs to remove.
+async fn remove_lvm_on_disks(disks: &[DiskConfig]) {
+    // Resolve disk paths to canonical device paths (/dev/sda, /dev/nvme0n1, …)
+    let canonical: Vec<String> = disks
+        .iter()
+        .map(|d| {
+            std::fs::canonicalize(&d.device)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| d.device.clone())
+        })
+        .collect();
+
+    remove_lvm_on_canonical_disks(&canonical).await;
+}
+
+/// Remove all LVM volume groups whose PVs live on any of the given canonical disk paths.
+async fn remove_lvm_on_canonical_disks(canonical_disks: &[String]) {
+    let output = match tokio::process::Command::new("pvs")
+        .args(["--noheadings", "-o", "pv_name,vg_name"])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return, // pvs unavailable or no PVs — nothing to clean up
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut vgs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(pv), Some(vg)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if vg.is_empty() {
+            continue;
+        }
+        if canonical_disks.iter().any(|d| pv.starts_with(d.as_str())) {
+            vgs.insert(vg.to_string());
+        }
+    }
+
+    for vg in &vgs {
+        info!("Removing stale LVM volume group on target disk: {}", vg);
+        let _ = run_command("vgchange", &["-an", vg]).await;
+        let _ = run_command("vgremove", &["--force", vg]).await;
+    }
+}
+
+/// Remove all LVM volume groups on the system (used before a full disk wipe).
+async fn remove_all_lvm() {
+    let output = match tokio::process::Command::new("vgs")
+        .args(["--noheadings", "-o", "vg_name"])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(vg) = line.split_whitespace().next() {
+            info!("Removing existing LVM volume group: {}", vg);
+            let _ = run_command("vgchange", &["-an", vg]).await;
+            let _ = run_command("vgremove", &["--force", vg]).await;
+        }
     }
 }
 
@@ -978,12 +1036,24 @@ mod tests {
         );
     }
 
-    // ========== deactivate_lvm_volume_groups tests ==========
+    // ========== LVM discovery cleanup tests ==========
 
     #[tokio::test]
-    async fn test_deactivate_lvm_volume_groups_empty() {
-        // Should not panic or error on empty input
-        deactivate_lvm_volume_groups(&[]).await;
+    async fn test_remove_lvm_on_disks_empty() {
+        // Should not panic on empty disk list
+        remove_lvm_on_disks(&[]).await;
+    }
+
+    #[tokio::test]
+    async fn test_remove_all_lvm_no_panic() {
+        // vgs will fail (no LVM in test env) — should not panic
+        remove_all_lvm().await;
+    }
+
+    #[tokio::test]
+    async fn test_remove_lvm_on_canonical_disks_no_match() {
+        // pvs will fail (no LVM in test env) — should not panic
+        remove_lvm_on_canonical_disks(&["/dev/nonexistent".to_string()]).await;
     }
 
     // ========== fs_type_hint tests ==========
