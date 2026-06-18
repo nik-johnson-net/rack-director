@@ -80,11 +80,13 @@ async fn apply_disk_layout(layout: &DiskLayout) -> Result<()> {
     // Step 0: Clean up any existing LVM state on the target disks before wiping.
     // This prevents stale VGs/PVs (from a failed prior run) from blocking pvcreate/
     // vgcreate when the daemon retries without a reboot. Best-effort: errors ignored.
-    if layout.wipe_all_disks {
-        remove_all_lvm().await;
-    } else if !layout.disks.is_empty() {
-        remove_lvm_on_disks(&layout.disks).await;
-    }
+    // Pass an empty slice when wiping all disks so remove_lvm_on_disks removes every VG.
+    let lvm_disks = if layout.wipe_all_disks {
+        &[][..]
+    } else {
+        &layout.disks[..]
+    };
+    remove_lvm_on_disks(lvm_disks).await;
 
     // Step 1: Optionally wipe partition info from ALL disks on the machine.
     if layout.wipe_all_disks {
@@ -195,13 +197,16 @@ async fn wipe_and_partition_disk(disk: &DiskConfig) -> Result<()> {
 
 // ========== LVM Operations ==========
 
-/// Remove all LVM volume groups whose physical volumes reside on the given disks.
+/// Remove LVM volume groups whose PVs reside on the given disks.
 ///
-/// Resolves each disk device to its canonical path so that by-path/by-id symlinks
-/// match the real device names reported by `pvs`. Best-effort: errors are logged
-/// and ignored because on a fresh system there are no PVs to remove.
+/// Resolves each disk path to its canonical device name (so by-path/by-id
+/// symlinks match what `pvs` reports), then queries `pvs` to discover which
+/// VGs have PVs on those devices. An empty `disks` slice means wipe_all_disks
+/// is active — every VG on the system is removed.
+///
+/// Best-effort: errors are silently ignored because on a fresh system there
+/// are no PVs to remove.
 async fn remove_lvm_on_disks(disks: &[DiskConfig]) {
-    // Resolve disk paths to canonical device paths (/dev/sda, /dev/nvme0n1, …)
     let canonical: Vec<String> = disks
         .iter()
         .map(|d| {
@@ -211,18 +216,14 @@ async fn remove_lvm_on_disks(disks: &[DiskConfig]) {
         })
         .collect();
 
-    remove_lvm_on_canonical_disks(&canonical).await;
-}
-
-/// Remove all LVM volume groups whose PVs live on any of the given canonical disk paths.
-async fn remove_lvm_on_canonical_disks(canonical_disks: &[String]) {
+    // Query all PV→VG mappings. pvs failure means no LVM state — nothing to do.
     let output = match tokio::process::Command::new("pvs")
         .args(["--noheadings", "-o", "pv_name,vg_name"])
         .output()
         .await
     {
         Ok(o) if o.status.success() => o,
-        _ => return, // pvs unavailable or no PVs — nothing to clean up
+        _ => return,
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -236,36 +237,18 @@ async fn remove_lvm_on_canonical_disks(canonical_disks: &[String]) {
         if vg.is_empty() {
             continue;
         }
-        if canonical_disks.iter().any(|d| pv.starts_with(d.as_str())) {
+        // Empty canonical list = wipe_all_disks: match every VG.
+        let on_target =
+            canonical.is_empty() || canonical.iter().any(|d| pv.starts_with(d.as_str()));
+        if on_target {
             vgs.insert(vg.to_string());
         }
     }
 
     for vg in &vgs {
-        info!("Removing stale LVM volume group on target disk: {}", vg);
+        info!("Removing LVM volume group: {}", vg);
         let _ = run_command("vgchange", &["-an", vg]).await;
         let _ = run_command("vgremove", &["--force", vg]).await;
-    }
-}
-
-/// Remove all LVM volume groups on the system (used before a full disk wipe).
-async fn remove_all_lvm() {
-    let output = match tokio::process::Command::new("vgs")
-        .args(["--noheadings", "-o", "vg_name"])
-        .output()
-        .await
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return,
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Some(vg) = line.split_whitespace().next() {
-            info!("Removing existing LVM volume group: {}", vg);
-            let _ = run_command("vgchange", &["-an", vg]).await;
-            let _ = run_command("vgremove", &["--force", vg]).await;
-        }
     }
 }
 
@@ -1045,15 +1028,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_all_lvm_no_panic() {
-        // vgs will fail (no LVM in test env) — should not panic
-        remove_all_lvm().await;
-    }
-
-    #[tokio::test]
-    async fn test_remove_lvm_on_canonical_disks_no_match() {
-        // pvs will fail (no LVM in test env) — should not panic
-        remove_lvm_on_canonical_disks(&["/dev/nonexistent".to_string()]).await;
+    async fn test_remove_lvm_on_disks_all_when_empty() {
+        // Empty slice = wipe_all_disks path. pvs will fail (no LVM in test env) — should not panic.
+        remove_lvm_on_disks(&[]).await;
     }
 
     // ========== fs_type_hint tests ==========
