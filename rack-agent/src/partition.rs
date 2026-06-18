@@ -252,8 +252,43 @@ async fn remove_lvm_on_disks(disks: &[DiskConfig]) {
     }
 }
 
+/// Returns true if the logical volume size is a free-space percentage value.
+///
+/// `lvcreate` requires these sizes to be passed with the `-l` extents flag rather
+/// than the `-L` absolute-size flag.  The agent treats `"rest"` as an alias for
+/// `"100%FREE"` so that disk-layout configs can use either term consistently.
+fn is_free_size(size: &str) -> bool {
+    size == "100%FREE" || size == "rest"
+}
+
+/// Validate that at most one logical volume in a VG uses a free-space size
+/// (`100%FREE` or `rest`).
+///
+/// Having two such LVs is nonsensical — only one can consume the remaining
+/// free extents.  The agent automatically places the free-size LV last when
+/// creating volumes (see `setup_volume_group`), so users do not need to
+/// order their config manually.
+fn validate_volume_group(vg: &VolumeGroup) -> Result<()> {
+    let free_count = vg
+        .logical_volumes
+        .iter()
+        .filter(|lv| is_free_size(&lv.size))
+        .count();
+    if free_count > 1 {
+        return Err(anyhow!(
+            "Volume group '{}' has {} logical volumes with size '100%FREE'/'rest', \
+             but at most one is allowed",
+            vg.name,
+            free_count,
+        ));
+    }
+    Ok(())
+}
+
 async fn setup_volume_group(vg: &VolumeGroup, disks: &[DiskConfig]) -> Result<()> {
     info!("Setting up LVM volume group: {}", vg.name);
+
+    validate_volume_group(vg)?;
 
     // Find all partitions that belong to this VG
     let mut pv_devices = Vec::new();
@@ -283,13 +318,22 @@ async fn setup_volume_group(vg: &VolumeGroup, disks: &[DiskConfig]) -> Result<()
     vgcreate_args.extend(pv_refs);
     run_command("vgcreate", &vgcreate_args).await?;
 
-    // Create logical volumes
-    let lv_count = vg.logical_volumes.len();
-    for (i, lv) in vg.logical_volumes.iter().enumerate() {
-        let is_last = i == lv_count - 1;
+    // Create logical volumes, always processing the free-size LV last so that
+    // `100%FREE` / `rest` is submitted to lvcreate after all fixed-size LVs
+    // have claimed their space — regardless of the order in the config.
+    let (fixed_lvs, free_lvs): (Vec<_>, Vec<_>) = vg
+        .logical_volumes
+        .iter()
+        .partition(|lv| !is_free_size(&lv.size));
+    let ordered_lvs = fixed_lvs.into_iter().chain(free_lvs);
+
+    for lv in ordered_lvs {
         info!("Creating logical volume: {}/{}", vg.name, lv.name);
 
-        if is_last && (lv.size == "100%FREE" || lv.size == "rest") {
+        // Use the extents flag (-l) for percentage-style sizes; lvcreate rejects them
+        // with the absolute-size flag (-L).  validate_volume_group guarantees that
+        // these values only appear on the last LV.
+        if lv.size == "100%FREE" || lv.size == "rest" {
             run_command(
                 "lvcreate",
                 &[
@@ -1031,6 +1075,128 @@ mod tests {
     async fn test_remove_lvm_on_disks_all_when_empty() {
         // Empty slice = wipe_all_disks path. pvs will fail (no LVM in test env) — should not panic.
         remove_lvm_on_disks(&[]).await;
+    }
+
+    // ========== validate_volume_group tests ==========
+
+    #[test]
+    fn test_validate_volume_group_rest_on_last_lv_is_valid() {
+        use common::disk_layout::LogicalVolume;
+        let vg = VolumeGroup {
+            name: "vg0".to_string(),
+            logical_volumes: vec![
+                LogicalVolume {
+                    name: "data".to_string(),
+                    size: "20G".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                },
+                LogicalVolume {
+                    name: "scratch".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                },
+            ],
+        };
+        assert!(validate_volume_group(&vg).is_ok());
+    }
+
+    #[test]
+    fn test_validate_volume_group_100pct_free_on_last_lv_is_valid() {
+        use common::disk_layout::LogicalVolume;
+        let vg = VolumeGroup {
+            name: "vg0".to_string(),
+            logical_volumes: vec![
+                LogicalVolume {
+                    name: "swap".to_string(),
+                    size: "4G".to_string(),
+                    filesystem: Some("swap".to_string()),
+                    mount_point: None,
+                },
+                LogicalVolume {
+                    name: "root".to_string(),
+                    size: "100%FREE".to_string(),
+                    filesystem: Some("ext4".to_string()),
+                    mount_point: None,
+                },
+            ],
+        };
+        assert!(validate_volume_group(&vg).is_ok());
+    }
+
+    /// A VG with a single `rest`-sized LV not at position zero is valid now that
+    /// the agent auto-reorders — validate_volume_group only cares about count.
+    #[test]
+    fn test_validate_volume_group_rest_not_at_end_is_valid() {
+        use common::disk_layout::LogicalVolume;
+        let vg = VolumeGroup {
+            name: "vg0".to_string(),
+            logical_volumes: vec![
+                LogicalVolume {
+                    name: "scratch".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                },
+                LogicalVolume {
+                    name: "data".to_string(),
+                    size: "10G".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                },
+            ],
+        };
+        // One free-size LV is allowed regardless of position — setup_volume_group reorders.
+        assert!(validate_volume_group(&vg).is_ok());
+    }
+
+    /// Two free-size LVs in the same VG must be rejected — only one can consume
+    /// remaining free extents.
+    #[test]
+    fn test_validate_volume_group_two_free_size_lvs_is_error() {
+        use common::disk_layout::LogicalVolume;
+        let vg = VolumeGroup {
+            name: "vg0".to_string(),
+            logical_volumes: vec![
+                LogicalVolume {
+                    name: "first".to_string(),
+                    size: "100%FREE".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                },
+                LogicalVolume {
+                    name: "second".to_string(),
+                    size: "rest".to_string(),
+                    filesystem: None,
+                    mount_point: None,
+                },
+            ],
+        };
+        let err = validate_volume_group(&vg).unwrap_err();
+        assert!(
+            err.to_string().contains("2"),
+            "error should report the count of offending LVs: {err}"
+        );
+        assert!(
+            err.to_string().contains("vg0"),
+            "error should name the VG: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_volume_group_single_lv_with_rest_is_valid() {
+        use common::disk_layout::LogicalVolume;
+        let vg = VolumeGroup {
+            name: "vg0".to_string(),
+            logical_volumes: vec![LogicalVolume {
+                name: "root".to_string(),
+                size: "100%FREE".to_string(),
+                filesystem: Some("ext4".to_string()),
+                mount_point: None,
+            }],
+        };
+        assert!(validate_volume_group(&vg).is_ok());
     }
 
     // ========== fs_type_hint tests ==========
