@@ -85,7 +85,9 @@ pub struct DhcpNetwork {
     pub id: i64,
     pub name: String,
     pub subnet: String,
-    pub gateway: String,
+    /// Default gateway for hosts on this network. `None` means no default route
+    /// will be advertised in DHCP offers.
+    pub gateway: Option<String>,
     pub dns_servers: Vec<String>,
     pub lease_duration: u32,
     pub relay_agent_address: Option<String>,
@@ -103,6 +105,7 @@ impl FromRow for DhcpNetwork {
         let created_at_str: String = row.get("created_at")?;
         let updated_at_str: String = row.get("updated_at")?;
 
+        // `gateway` is `Option<String>` — rusqlite maps NULL columns to None automatically.
         Ok(DhcpNetwork {
             id: row.get("id")?,
             name: row.get("name")?,
@@ -417,12 +420,15 @@ pub async fn get_l2_networks(conn: &Connection) -> Result<Vec<DhcpNetwork>> {
 }
 
 /// Create a new network.
+///
+/// `gateway` is optional — pass `None` for networks that should not advertise a
+/// default route in DHCP offers (e.g., isolated provisioning segments).
 #[allow(clippy::too_many_arguments)]
 pub async fn create_network(
     conn: &Connection,
     name: &str,
     subnet: &str,
-    gateway: &str,
+    gateway: Option<&str>,
     dns_servers: &[String],
     lease_duration: u32,
     relay_agent_address: Option<&str>,
@@ -431,11 +437,12 @@ pub async fn create_network(
     let dns_servers_json = serde_json::to_string(dns_servers)?;
     let now = Utc::now().to_rfc3339();
     let relay = relay_agent_address.map(|s| s.to_string());
+    let gw = gateway.map(|s| s.to_string());
 
     conn.execute(
         "INSERT INTO dhcp_networks (name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        (name.to_string(), subnet.to_string(), gateway.to_string(), dns_servers_json, lease_duration, relay, enable_autodiscovery, now.clone(), now),
+        (name.to_string(), subnet.to_string(), gw, dns_servers_json, lease_duration, relay, enable_autodiscovery, now.clone(), now),
     )
     .await?;
 
@@ -804,7 +811,7 @@ mod tests {
             &db,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             86400,
             None,
@@ -826,7 +833,7 @@ mod tests {
         let network = get_network(&db, network_id).await.unwrap();
         assert_eq!(network.name, "Test Network");
         assert_eq!(network.subnet, "10.0.0.0/24");
-        assert_eq!(network.gateway, "10.0.0.1");
+        assert_eq!(network.gateway, Some("10.0.0.1".to_string()));
     }
 
     #[tokio::test]
@@ -838,7 +845,7 @@ mod tests {
             &db,
             "Relay Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -874,7 +881,7 @@ mod tests {
             &db,
             "Relay Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -1129,7 +1136,7 @@ mod tests {
             &db,
             "Second Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,

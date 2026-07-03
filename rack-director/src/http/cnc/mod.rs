@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::http::error::Error;
 use crate::{
-    dhcp,
+    device_warnings, dhcp,
     director::{Director, NetworkInterface},
     http::AppState,
 };
@@ -315,6 +315,20 @@ async fn update_attributes(
         // Enrich interfaces with DHCP lease information
         let mut enriched_interfaces =
             network_processing::enrich_interfaces_with_dhcp_info(&conn, interfaces).await;
+
+        // Preserve operator-configured NIC assignments across the rescan.
+        // Incoming NICs always have assigned_network_id=None/assigned_ip=None from the agent;
+        // this step copies forward any stored assignments, dropping them (with a warning) if
+        // the referenced network no longer exists or the IP left the subnet.
+        if let Ok(Some(device_id)) = device_warnings::get_device_id_by_uuid(&conn, &uuid).await {
+            network_processing::preserve_nic_assignments(
+                &conn,
+                &uuid,
+                device_id,
+                &mut enriched_interfaces,
+            )
+            .await;
+        }
 
         // Detect and mark duplicate MACs on the same network
         network_processing::detect_and_mark_duplicates(&conn, &uuid, &mut enriched_interfaces)
@@ -691,7 +705,7 @@ mod tests {
             &conn,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,

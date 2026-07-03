@@ -959,6 +959,8 @@ mod tests {
             network_id: None,
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
         let cpus = vec![CpuInfo {
             manufacturer: Some("Intel Corporation".to_string()),

@@ -46,8 +46,12 @@ pub fn add_network_options(msg: &mut Message, network: &DhcpNetwork) -> Result<(
     let subnet: Ipv4Subnet = network.subnet.parse()?;
     msg.opts_mut()
         .insert(v4::DhcpOption::SubnetMask(subnet.netmask()));
-    msg.opts_mut()
-        .insert(v4::DhcpOption::Router(vec![network.gateway.parse()?]));
+
+    // Only advertise a default route when the network has a configured gateway.
+    if let Some(ref gw) = network.gateway {
+        msg.opts_mut()
+            .insert(v4::DhcpOption::Router(vec![gw.parse()?]));
+    }
 
     let dns_servers: Vec<Ipv4Addr> = network
         .dns_servers
@@ -120,7 +124,7 @@ mod tests {
             id: 1,
             name: "test-network".to_string(),
             subnet: "10.0.0.0/24".to_string(),
-            gateway: "10.0.0.1".to_string(),
+            gateway: Some("10.0.0.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             lease_duration: 3600,
             relay_agent_address: None,
@@ -186,7 +190,7 @@ mod tests {
             id: 1,
             name: "test-network".to_string(),
             subnet: "10.0.0.0/24".to_string(),
-            gateway: "10.0.0.1".to_string(),
+            gateway: Some("10.0.0.1".to_string()),
             dns_servers: vec![],
             lease_duration: 3600,
             relay_agent_address: None,
@@ -204,6 +208,55 @@ mod tests {
             .iter()
             .find(|(_, opt)| matches!(opt, v4::DhcpOption::DomainNameServer(_)));
         assert!(dns.is_none());
+    }
+
+    #[test]
+    fn test_add_network_options_no_gateway() {
+        use chrono::Utc;
+
+        // A network without a gateway must not emit a Router DHCP option.
+        let network = DhcpNetwork {
+            id: 1,
+            name: "no-gw-network".to_string(),
+            subnet: "10.0.0.0/24".to_string(),
+            gateway: None,
+            dns_servers: vec![],
+            lease_duration: 3600,
+            relay_agent_address: None,
+            enable_autodiscovery: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mut msg = Message::default();
+        add_network_options(&mut msg, &network).unwrap();
+
+        // SubnetMask must still be present
+        let subnet_mask = msg
+            .opts()
+            .iter()
+            .find(|(_, opt)| matches!(opt, v4::DhcpOption::SubnetMask(_)));
+        assert!(subnet_mask.is_some(), "SubnetMask should be present");
+
+        // Router option must be absent when gateway is None
+        let router = msg
+            .opts()
+            .iter()
+            .find(|(_, opt)| matches!(opt, v4::DhcpOption::Router(_)));
+        assert!(
+            router.is_none(),
+            "Router option should be absent when gateway is None"
+        );
+
+        // DNS option must also be absent (empty list)
+        let dns = msg
+            .opts()
+            .iter()
+            .find(|(_, opt)| matches!(opt, v4::DhcpOption::DomainNameServer(_)));
+        assert!(
+            dns.is_none(),
+            "DNS option should be absent when dns_servers is empty"
+        );
     }
 
     #[test]

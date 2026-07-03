@@ -14,6 +14,21 @@ pub async fn allocate_for_device_in_network(
     uuid: &Uuid,
     network_id: i64,
 ) -> Result<Ipv4Addr> {
+    // 0. Check device NIC assignment: if the operator configured a static IP for this
+    //    MAC/network combination, hand it out immediately ahead of any other check.
+    if let Some(ip) =
+        crate::director::store::get_configured_ip_for_mac(conn, mac, network_id).await?
+    {
+        log::debug!(
+            "Device {} NIC {} has configured IP {} in network {} — using it",
+            uuid,
+            mac,
+            ip,
+            network_id
+        );
+        return Ok(ip);
+    }
+
     // 1. Check static reservation in this network
     if let Some(reservation) = store::get_static_reservation(conn, network_id, mac).await? {
         log::debug!(
@@ -49,6 +64,19 @@ pub async fn allocate_for_mac_in_network(
     mac: &str,
     network_id: i64,
 ) -> Result<Ipv4Addr> {
+    // 0. Check device NIC assignment ahead of everything else.
+    if let Some(ip) =
+        crate::director::store::get_configured_ip_for_mac(conn, mac, network_id).await?
+    {
+        log::debug!(
+            "NIC {} has configured IP {} in network {} — using it",
+            mac,
+            ip,
+            network_id
+        );
+        return Ok(ip);
+    }
+
     // 1. Check static reservation in this network
     if let Some(reservation) = store::get_static_reservation(conn, network_id, mac).await? {
         log::debug!(
@@ -157,7 +185,7 @@ mod tests {
             &db,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             86400,
             None,
@@ -312,5 +340,44 @@ mod tests {
         assert_eq!(range.len(), 5);
         assert_eq!(range[0].to_string(), "10.0.0.1");
         assert_eq!(range[4].to_string(), "10.0.0.5");
+    }
+
+    /// A device NIC configured with an assigned_ip in a network receives that IP from
+    /// the allocator ahead of pool allocation.
+    #[tokio::test]
+    async fn test_configured_nic_ip_takes_priority_over_pool() {
+        let (db, network_id) = create_test_db(test_connection_factory!()).await;
+        let mac = "aa:bb:cc:dd:ee:10";
+
+        // Register a device and set a NIC assignment
+        let uuid = Uuid::parse_str("a1000000-0000-0000-0000-000000000010").unwrap();
+        db.execute(
+            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', 'x86-64')",
+            (uuid,),
+        )
+        .await
+        .unwrap();
+
+        let nic_json = format!(
+            r#"[{{"interface_name":"eth0","mac_address":"{mac}","ip_address":null,"network_id":null,"speed_mbps":null,"disabled":false,"warning_label":null,"assigned_network_id":{network_id},"assigned_ip":"10.0.0.42"}}]"#
+        );
+        db.execute(
+            "UPDATE devices SET attributes = json_set(COALESCE(attributes, '{}'), '$.network_interfaces', json(?1)) WHERE uuid = ?2",
+            (nic_json, uuid),
+        )
+        .await
+        .unwrap();
+
+        // Allocator must return the configured IP, not the first pool address (10.0.0.100)
+        let ip = allocate_for_mac_in_network(&db, mac, network_id)
+            .await
+            .unwrap();
+        assert_eq!(ip.to_string(), "10.0.0.42");
+
+        // Also verify via allocate_for_device_in_network
+        let ip2 = allocate_for_device_in_network(&db, mac, &uuid, network_id)
+            .await
+            .unwrap();
+        assert_eq!(ip2.to_string(), "10.0.0.42");
     }
 }

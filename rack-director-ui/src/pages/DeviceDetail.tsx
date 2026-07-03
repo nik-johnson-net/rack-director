@@ -49,6 +49,7 @@ import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-di
 import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
 import { PlatformAssignment } from "@/components/devices/platform-assignment";
 import { DiskLabelOverrides } from "@/components/devices/disk-label-overrides";
+import { NicNetworkAssignment } from "@/components/devices/nic-network-assignment";
 
 type TabId = "overview" | "hardware" | "transitions" | "warnings";
 
@@ -485,7 +486,7 @@ function DeviceDetail() {
       {/* Network Interfaces card */}
       <SectionCard title="Network Interfaces">
         <CardTable
-          headers={["Interface", "MAC Address", "IP Address"]}
+          headers={["Interface", "MAC Address", "DHCP IP", "Network / Assigned IP"]}
           emptyMessage="No network interfaces discovered"
           rows={nics.map((nic) => {
             const hasStatic = staticReservations.has(nic.mac_address);
@@ -528,6 +529,23 @@ function DeviceDetail() {
                   </button>
                 )}
               </span>,
+              <NicNetworkAssignment
+                key="assign"
+                uuid={uuid}
+                nic={nic}
+                networks={networks}
+                onNicUpdate={(updated) => {
+                  if (!device) return;
+                  const updatedNics = (device.attributes?.network_interfaces ?? []).map(
+                    (n) => (n.mac_address === updated.mac_address ? updated : n)
+                  );
+                  setDevice({
+                    ...device,
+                    attributes: { ...device.attributes, network_interfaces: updatedNics },
+                  });
+                }}
+                onError={(msg) => setError(msg)}
+              />,
             ];
           })}
         />

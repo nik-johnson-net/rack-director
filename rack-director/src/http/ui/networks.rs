@@ -51,7 +51,11 @@ pub fn routes(state: Arc<AppState>) -> Router {
 pub struct CreateNetworkRequest {
     pub name: String,
     pub subnet: String,
-    pub gateway: String,
+    /// Optional gateway. When absent or `null`, the network will not advertise a default route.
+    #[serde(default)]
+    pub gateway: Option<String>,
+    /// DNS servers. An empty list means no DNS servers will be advertised in DHCP offers.
+    #[serde(default)]
     pub dns_servers: Vec<String>,
     pub lease_duration: u32,
     pub relay_agent_address: Option<String>,
@@ -137,7 +141,7 @@ async fn create_network(
         &conn,
         &req.name,
         &req.subnet,
-        &req.gateway,
+        req.gateway.as_deref(),
         &req.dns_servers,
         req.lease_duration,
         req.relay_agent_address.as_deref(),
@@ -476,6 +480,8 @@ mod tests {
                 speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
             None,
         )];
@@ -498,6 +504,8 @@ mod tests {
                     speed_mbps: Some(10000),
                     disabled: false,
                     warning_label: None,
+                    assigned_network_id: None,
+                    assigned_ip: None,
                 },
                 NetworkInterface {
                     interface_name: "eth1".to_string(),
@@ -507,6 +515,8 @@ mod tests {
                     speed_mbps: Some(10000),
                     disabled: false,
                     warning_label: None,
+                    assigned_network_id: None,
+                    assigned_ip: None,
                 },
             ],
             None,
@@ -547,6 +557,8 @@ mod tests {
                 speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
             None,
         )];
@@ -577,6 +589,8 @@ mod tests {
                 speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
             None,
         )];
@@ -602,6 +616,8 @@ mod tests {
                     speed_mbps: Some(10000),
                     disabled: false,
                     warning_label: None,
+                    assigned_network_id: None,
+                    assigned_ip: None,
                 }],
                 None,
             ),
@@ -615,6 +631,8 @@ mod tests {
                     speed_mbps: Some(10000),
                     disabled: false,
                     warning_label: None,
+                    assigned_network_id: None,
+                    assigned_ip: None,
                 }],
                 None,
             ),

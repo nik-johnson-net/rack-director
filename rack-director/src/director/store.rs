@@ -328,6 +328,8 @@ pub async fn set_ip_address(conn: &Connection, uuid: &Uuid, ip: &str, mac: &str)
             speed_mbps: None,
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         });
     }
 
@@ -482,6 +484,112 @@ pub async fn delete_device(conn: &Connection, uuid: &Uuid) -> Result<()> {
     conn.execute("DELETE FROM devices WHERE uuid = ?1", (*uuid,))
         .await?;
     Ok(())
+}
+
+/// Set the manual NIC assignment fields for a specific MAC address.
+///
+/// Loads the device's network interfaces, finds the NIC whose `mac_address` matches
+/// `mac` (case-insensitive), updates `assigned_network_id` and `assigned_ip`, and
+/// writes the interfaces back.  Passing `None` for both fields clears the assignment.
+///
+/// Returns an error if the device is not found or if no NIC matches `mac`.
+pub async fn set_nic_assignment(
+    conn: &Connection,
+    uuid: &Uuid,
+    mac: &str,
+    assigned_network_id: Option<i64>,
+    assigned_ip: Option<String>,
+) -> Result<()> {
+    let mac_lower = mac.to_lowercase();
+    let mut interfaces = get_network_interfaces(conn, uuid).await?;
+
+    let nic = interfaces
+        .iter_mut()
+        .find(|i| i.mac_address.to_lowercase() == mac_lower)
+        .ok_or_else(|| anyhow::anyhow!("No NIC with MAC {} found on device {}", mac, uuid))?;
+
+    nic.assigned_network_id = assigned_network_id;
+    nic.assigned_ip = assigned_ip;
+
+    set_network_interfaces(conn, uuid, &interfaces).await
+}
+
+/// Find the MAC address already using `ip` within `network_id`.
+///
+/// Checks two sources:
+/// 1. Any device NIC whose `assigned_network_id == network_id` AND `assigned_ip == ip`.
+/// 2. The `dhcp_static_reservations` table for that `(network_id, ip)` pair.
+///
+/// Returns the first MAC found, or `None` if the IP is unassigned.
+pub async fn find_mac_using_ip(
+    conn: &Connection,
+    network_id: i64,
+    ip: &str,
+) -> Result<Option<String>> {
+    // Check device NIC assignments via SQLite JSON functions
+    let result = conn
+        .query_row(
+            "SELECT json_extract(iface.value, '$.mac_address')
+             FROM devices, json_each(attributes, '$.network_interfaces') AS iface
+             WHERE json_extract(iface.value, '$.assigned_network_id') = ?1
+               AND json_extract(iface.value, '$.assigned_ip') = ?2
+             LIMIT 1",
+            (network_id, ip.to_string()),
+            |row| row.get::<_, String>(0),
+        )
+        .await
+        .optional()?;
+
+    if result.is_some() {
+        return Ok(result);
+    }
+
+    // Check dhcp_static_reservations
+    let reserved_mac = conn
+        .query_row(
+            "SELECT mac_address FROM dhcp_static_reservations
+             WHERE network_id = ?1 AND ip_address = ?2
+             LIMIT 1",
+            (network_id, ip.to_string()),
+            |row| row.get::<_, String>(0),
+        )
+        .await
+        .optional()?;
+
+    Ok(reserved_mac)
+}
+
+/// Return the configured IP for a NIC identified by `mac` within a specific network.
+///
+/// Finds the device NIC with `mac` whose `assigned_network_id == network_id` and returns
+/// its `assigned_ip` parsed to `Ipv4Addr`.  Returns `None` if the NIC is not configured
+/// for this network or has no assigned IP.
+pub async fn get_configured_ip_for_mac(
+    conn: &Connection,
+    mac: &str,
+    network_id: i64,
+) -> Result<Option<std::net::Ipv4Addr>> {
+    let mac_lower = mac.to_lowercase();
+    let result = conn
+        .query_row(
+            "SELECT json_extract(iface.value, '$.assigned_ip')
+             FROM devices, json_each(attributes, '$.network_interfaces') AS iface
+             WHERE json_extract(iface.value, '$.mac_address') = ?1
+               AND json_extract(iface.value, '$.assigned_network_id') = ?2
+             LIMIT 1",
+            (mac_lower, network_id),
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .await
+        .optional()?;
+
+    match result.flatten() {
+        Some(ip_str) => {
+            let ip: std::net::Ipv4Addr = ip_str.parse()?;
+            Ok(Some(ip))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Find device UUID by BMC MAC address.
@@ -683,7 +791,7 @@ mod tests {
             conn,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,
@@ -908,6 +1016,8 @@ mod tests {
             speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
         set_network_interfaces(&db, &uuid, &interfaces)
             .await
@@ -938,6 +1048,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
@@ -947,6 +1059,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "eth2".to_string(),
@@ -956,6 +1070,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
         ];
         set_network_interfaces(&db, &uuid, &interfaces)
@@ -986,6 +1102,8 @@ mod tests {
             speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
         set_network_interfaces(&db, &uuid, &initial).await.unwrap();
 
@@ -998,6 +1116,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "ens1".to_string(),
@@ -1007,6 +1127,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
         ];
         set_network_interfaces(&db, &uuid, &updated).await.unwrap();
@@ -1035,6 +1157,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
@@ -1044,6 +1168,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
         ];
         set_network_interfaces(&db, &uuid, &interfaces)
@@ -1078,6 +1204,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
@@ -1087,6 +1215,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
         ];
         set_network_interfaces(&db, &uuid, &interfaces)
@@ -1136,6 +1266,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
@@ -1145,6 +1277,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
         ];
         set_network_interfaces(&db, &uuid, &interfaces)
@@ -1234,6 +1368,8 @@ mod tests {
             speed_mbps: None,
             disabled: true,
             warning_label: Some("Duplicate MAC on network main".to_string()),
+            assigned_network_id: None,
+            assigned_ip: None,
         };
         set_network_interfaces(&db, &uuid, std::slice::from_ref(&interface))
             .await
@@ -1298,6 +1434,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1313,6 +1451,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1351,6 +1491,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1366,6 +1508,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1411,6 +1555,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1426,6 +1572,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1473,6 +1621,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1488,6 +1638,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1503,6 +1655,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1547,6 +1701,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1562,6 +1718,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
         )
         .await
@@ -1933,5 +2091,286 @@ mod tests {
             ..Default::default()
         };
         assert!(collect_stale_overrides(&attrs).is_empty());
+    }
+
+    // ===== set_nic_assignment tests =====
+
+    /// set_nic_assignment sets the assigned network and IP on the matching NIC.
+    #[tokio::test]
+    async fn test_set_nic_assignment_sets_fields() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x60);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        set_nic_assignment(
+            &db,
+            &uuid,
+            "aa:bb:cc:dd:ee:01",
+            Some(1),
+            Some("10.0.0.50".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let retrieved = get_network_interfaces(&db, &uuid).await.unwrap();
+        assert_eq!(retrieved[0].assigned_network_id, Some(1));
+        assert_eq!(retrieved[0].assigned_ip, Some("10.0.0.50".to_string()));
+    }
+
+    /// set_nic_assignment clears both fields when called with None, None.
+    #[tokio::test]
+    async fn test_set_nic_assignment_clears_fields() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x61);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(5),
+            assigned_ip: Some("10.0.0.55".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        set_nic_assignment(&db, &uuid, "aa:bb:cc:dd:ee:01", None, None)
+            .await
+            .unwrap();
+
+        let retrieved = get_network_interfaces(&db, &uuid).await.unwrap();
+        assert_eq!(retrieved[0].assigned_network_id, None);
+        assert_eq!(retrieved[0].assigned_ip, None);
+    }
+
+    /// set_nic_assignment returns an error when no NIC matches the MAC.
+    #[tokio::test]
+    async fn test_set_nic_assignment_unknown_mac_returns_error() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x62);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let result = set_nic_assignment(&db, &uuid, "ff:ff:ff:ff:ff:ff", Some(1), None).await;
+        assert!(result.is_err(), "unknown MAC must return Err");
+    }
+
+    // ===== find_mac_using_ip tests =====
+
+    /// find_mac_using_ip finds a MAC configured via NIC assignment.
+    #[tokio::test]
+    async fn test_find_mac_using_ip_finds_nic_assignment() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x63);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.50".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        let found = find_mac_using_ip(&db, 1, "10.0.0.50").await.unwrap();
+        assert_eq!(found, Some("aa:bb:cc:dd:ee:01".to_string()));
+    }
+
+    /// find_mac_using_ip finds a MAC from a dhcp_static_reservation.
+    #[tokio::test]
+    async fn test_find_mac_using_ip_finds_static_reservation() {
+        let db = setup_db(test_database_path!()).await;
+        let network_id = create_test_network(&db).await;
+
+        crate::dhcp::store::create_static_reservation(
+            &db,
+            network_id,
+            "bb:cc:dd:ee:ff:00",
+            "10.0.0.150",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let found = find_mac_using_ip(&db, network_id, "10.0.0.150")
+            .await
+            .unwrap();
+        assert_eq!(found, Some("bb:cc:dd:ee:ff:00".to_string()));
+    }
+
+    /// find_mac_using_ip returns None when the IP is unused in the network.
+    #[tokio::test]
+    async fn test_find_mac_using_ip_returns_none_when_unused() {
+        let db = setup_db(test_database_path!()).await;
+        let network_id = create_test_network(&db).await;
+
+        let found = find_mac_using_ip(&db, network_id, "10.0.0.99")
+            .await
+            .unwrap();
+        assert_eq!(found, None);
+    }
+
+    /// find_mac_using_ip does not return results from a different network.
+    #[tokio::test]
+    async fn test_find_mac_using_ip_ignores_different_network() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x64);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.50".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Query for a different network_id — should not find anything
+        let found = find_mac_using_ip(&db, 99, "10.0.0.50").await.unwrap();
+        assert_eq!(found, None);
+    }
+
+    // ===== get_configured_ip_for_mac tests =====
+
+    /// get_configured_ip_for_mac returns the configured IP for a matching NIC.
+    #[tokio::test]
+    async fn test_get_configured_ip_for_mac_returns_ip() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x65);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.77".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        let ip = get_configured_ip_for_mac(&db, "aa:bb:cc:dd:ee:01", 1)
+            .await
+            .unwrap();
+        assert_eq!(ip, Some("10.0.0.77".parse().unwrap()));
+    }
+
+    /// get_configured_ip_for_mac returns None when the NIC is not configured for the network.
+    #[tokio::test]
+    async fn test_get_configured_ip_for_mac_wrong_network_returns_none() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x66);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.77".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Different network_id
+        let ip = get_configured_ip_for_mac(&db, "aa:bb:cc:dd:ee:01", 99)
+            .await
+            .unwrap();
+        assert_eq!(ip, None);
+    }
+
+    /// get_configured_ip_for_mac returns None when the NIC has no assigned_ip.
+    #[tokio::test]
+    async fn test_get_configured_ip_for_mac_no_ip_returns_none() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x67);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: None,
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        let ip = get_configured_ip_for_mac(&db, "aa:bb:cc:dd:ee:01", 1)
+            .await
+            .unwrap();
+        assert_eq!(ip, None);
     }
 }

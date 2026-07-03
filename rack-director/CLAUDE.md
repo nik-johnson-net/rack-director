@@ -136,9 +136,9 @@ A table called plans is used to store a list of actions, their parameters, and t
 
 ## Overview
 
-Rack Director uses SQLite with 23 migrations. Schema is versioned and migrations are applied sequentially on startup.
+Rack Director uses SQLite with 24 migrations. Schema is versioned and migrations are applied sequentially on startup.
 
-**Current Version:** 23 (as of 2026-06)
+**Current Version:** 24 (as of 2026-06)
 
 **Migration Location:** `src/database/migrations/*.sql`
 
@@ -243,8 +243,8 @@ DHCP network configurations (multi-network support with relay agents).
 | `id` | INTEGER | Primary key |
 | `name` | TEXT | Network name (unique) |
 | `subnet` | TEXT | Subnet CIDR (e.g., "10.0.0.0/24") |
-| `gateway` | TEXT | Default gateway IP |
-| `dns_servers` | TEXT | JSON array of DNS server IPs |
+| `gateway` | TEXT | Default gateway IP — **nullable**; a network may have no gateway (no default route assigned to its NICs) |
+| `dns_servers` | TEXT | JSON array of DNS server IPs — may be empty (no DNS assigned) |
 | `lease_duration` | INTEGER | Lease duration in seconds |
 | `relay_agent_address` | TEXT | Relay agent IP (for remote networks) |
 | `created_at` | DATETIME | Creation time |
@@ -252,7 +252,7 @@ DHCP network configurations (multi-network support with relay agents).
 
 **Indexes:** `relay_agent_address`
 
-**Migration:** v4, v8 (multi-network support)
+**Migration:** v4, v8 (multi-network support), v24 (`gateway` made nullable)
 
 ### dhcp_pools
 
@@ -357,6 +357,18 @@ pending_devices
 ```
 
 ## Recent Schema Changes
+
+### Migration v24 (2026-06)
+- Made `dhcp_networks.gateway` **nullable** (table rebuilt) so a network can be defined with no default
+  gateway and/or no DNS; NICs on such a network are configured with an address but no default route /
+  nameserver.
+- No schema change for NIC configuration: manual NIC→network assignment is stored on the device's
+  `network_interfaces` JSON (`devices.attributes`) via two new fields per NIC — `assigned_network_id` and
+  `assigned_ip` (operator-set, distinct from the DHCP-derived `network_id`/`ip_address`). These are
+  preserved across hardware re-scans; a stale assignment (network deleted or IP no longer in subnet) is
+  dropped with a `NIC_ASSIGNMENT_DROPPED` device warning (sibling of `LABEL_OVERRIDE_DROPPED`). The DHCP
+  allocator hands a NIC its `assigned_ip` when it does DHCP. Managed via
+  `PUT/DELETE /api/devices/{uuid}/nic-assignments`.
 
 ### Migration v23 (2026-06)
 - Added `last_polled_at` column to `devices` table

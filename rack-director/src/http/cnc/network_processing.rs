@@ -1,6 +1,9 @@
+use std::str::FromStr;
+
 use crate::database::Connection;
 use crate::director::NetworkInterface;
-use crate::{dhcp, director};
+use crate::{device_warnings, dhcp, director};
+use common::Ipv4Subnet;
 use log::warn;
 use uuid::Uuid;
 
@@ -163,6 +166,118 @@ pub async fn complete_pending_devices_for_interfaces(
     }
 }
 
+/// Carry forward manual NIC assignments from the previously-stored interfaces.
+///
+/// Called right after `enrich_interfaces_with_dhcp_info` and before
+/// `set_network_interfaces`.  Scanned NICs arrive with `assigned_network_id=None` and
+/// `assigned_ip=None`; without this step, a hardware re-scan would silently wipe any
+/// operator-configured NIC assignment.
+///
+/// For each incoming NIC the function matches by MAC to the previously stored NIC and
+/// copies `assigned_network_id` and `assigned_ip`.  The carried-forward assignment is
+/// then validated:
+///
+/// - If the assigned network no longer exists → assignment is dropped and a
+///   `NIC_ASSIGNMENT_DROPPED` warning is created.
+/// - If `assigned_ip` is no longer within the network's subnet → same drop + warning.
+///
+/// # Arguments
+/// * `conn`         – Open database connection.
+/// * `device_uuid`  – UUID of the device being rescanned.
+/// * `device_id`    – Integer row ID of the device (for warning creation).
+/// * `interfaces`   – Incoming scanned NICs to update in-place.
+pub async fn preserve_nic_assignments(
+    conn: &Connection,
+    device_uuid: &Uuid,
+    device_id: i64,
+    interfaces: &mut [NetworkInterface],
+) {
+    // Load previously-stored NICs (errors are non-fatal — just skip preservation)
+    let stored = match director::store::get_network_interfaces(conn, device_uuid).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "preserve_nic_assignments: could not load stored NICs for {}: {}",
+                device_uuid, e
+            );
+            return;
+        }
+    };
+
+    for incoming in interfaces.iter_mut() {
+        // Find the previously-stored NIC by MAC (case-insensitive)
+        let mac_lower = incoming.mac_address.to_lowercase();
+        let stored_nic = stored
+            .iter()
+            .find(|s| s.mac_address.to_lowercase() == mac_lower);
+
+        let Some(stored) = stored_nic else {
+            continue;
+        };
+
+        let (Some(network_id), Some(assigned_ip)) =
+            (stored.assigned_network_id, stored.assigned_ip.clone())
+        else {
+            // No assignment to carry forward
+            continue;
+        };
+        let assigned_ip: String = assigned_ip;
+
+        // Validate: network must still exist
+        let network = match dhcp::store::get_network(conn, network_id).await {
+            Ok(n) => n,
+            Err(_) => {
+                let msg = format!(
+                    "NIC {} assignment to network {} cleared — network no longer exists",
+                    incoming.mac_address, network_id
+                );
+                drop_nic_assignment_with_warning(conn, device_id, &incoming.mac_address, &msg)
+                    .await;
+                continue;
+            }
+        };
+
+        // Validate: IP must still be within the network's subnet
+        let subnet_ok = Ipv4Subnet::from_str(&network.subnet)
+            .ok()
+            .and_then(|subnet| assigned_ip.parse().ok().map(|ip| subnet.ip_in_range(ip)))
+            .unwrap_or(false);
+
+        if !subnet_ok {
+            let msg = format!(
+                "NIC {} assignment IP {} cleared — no longer within network {} subnet {}",
+                incoming.mac_address, assigned_ip, network_id, network.subnet
+            );
+            drop_nic_assignment_with_warning(conn, device_id, &incoming.mac_address, &msg).await;
+            continue;
+        }
+
+        // Carry forward the valid assignment
+        incoming.assigned_network_id = Some(network_id);
+        incoming.assigned_ip = Some(assigned_ip.clone());
+    }
+}
+
+/// Create a `NIC_ASSIGNMENT_DROPPED` warning and log it.  Non-fatal — errors are only logged.
+async fn drop_nic_assignment_with_warning(
+    conn: &Connection,
+    device_id: i64,
+    mac: &str,
+    message: &str,
+) {
+    log::warn!("device id={}: {}", device_id, message);
+    if let Err(e) =
+        device_warnings::create_warning(conn, device_id, "NIC_ASSIGNMENT_DROPPED", message).await
+    {
+        log::warn!(
+            "device id={}: failed to create NIC_ASSIGNMENT_DROPPED warning for MAC {}: {}",
+            device_id,
+            mac,
+            e
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +302,7 @@ mod tests {
             conn,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,
@@ -215,6 +330,8 @@ mod tests {
             speed_mbps: None,
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
 
         let enriched = enrich_interfaces_with_dhcp_info(&conn, interfaces).await;
@@ -253,6 +370,8 @@ mod tests {
             speed_mbps: None,
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
 
         let enriched = enrich_interfaces_with_dhcp_info(&conn, interfaces).await;
@@ -281,6 +400,8 @@ mod tests {
             speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
 
         detect_and_mark_duplicates(&conn, &uuid, &mut interfaces).await;
@@ -302,6 +423,8 @@ mod tests {
             speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
 
         // Should not panic or error
@@ -342,6 +465,8 @@ mod tests {
             speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
 
         complete_pending_devices_for_interfaces(&conn, &uuid, &interfaces).await;
@@ -398,6 +523,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
@@ -407,6 +534,8 @@ mod tests {
                 speed_mbps: None,
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
         ];
 
@@ -430,5 +559,189 @@ mod tests {
             .unwrap();
         assert!(res2.is_some());
         assert_eq!(res2.unwrap().ip_address, "10.0.0.102");
+    }
+
+    // ===== preserve_nic_assignments tests =====
+
+    /// Helper: register a device, set stored NICs, and return (uuid, device_id).
+    async fn setup_device_with_nics(
+        conn: &Connection,
+        uuid: Uuid,
+        stored_nics: Vec<NetworkInterface>,
+    ) -> i64 {
+        Director::new(conn)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        director::store::set_network_interfaces(conn, &uuid, &stored_nics)
+            .await
+            .unwrap();
+
+        conn.query_one("SELECT id FROM devices WHERE uuid = ?1", (uuid,), |r| {
+            r.get(0)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A valid assignment is preserved across a hardware rescan.
+    #[tokio::test]
+    async fn test_preserve_nic_assignments_preserves_valid_assignment() {
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
+
+        let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000001").unwrap();
+        let device_id = setup_device_with_nics(
+            &conn,
+            uuid,
+            vec![NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+                ip_address: None,
+                network_id: None,
+                speed_mbps: None,
+                disabled: false,
+                warning_label: None,
+                assigned_network_id: Some(network_id),
+                assigned_ip: Some("10.0.0.50".to_string()),
+            }],
+        )
+        .await;
+
+        // Simulate incoming rescan NIC (both assignment fields are None)
+        let mut incoming = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
+        }];
+
+        preserve_nic_assignments(&conn, &uuid, device_id, &mut incoming).await;
+
+        assert_eq!(incoming[0].assigned_network_id, Some(network_id));
+        assert_eq!(incoming[0].assigned_ip, Some("10.0.0.50".to_string()));
+
+        // No warnings should have been created
+        let warnings = device_warnings::list_warnings(&conn, device_id)
+            .await
+            .unwrap();
+        assert_eq!(warnings.len(), 0, "no warnings for a valid assignment");
+    }
+
+    /// Assignment is dropped and a warning is created when the network is deleted.
+    #[tokio::test]
+    async fn test_preserve_nic_assignments_drops_when_network_deleted() {
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
+
+        let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000002").unwrap();
+        let device_id = setup_device_with_nics(
+            &conn,
+            uuid,
+            vec![NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                ip_address: None,
+                network_id: None,
+                speed_mbps: None,
+                disabled: false,
+                warning_label: None,
+                assigned_network_id: Some(network_id),
+                assigned_ip: Some("10.0.0.55".to_string()),
+            }],
+        )
+        .await;
+
+        // Delete the network to simulate it being removed
+        conn.execute("DELETE FROM dhcp_networks WHERE id = ?1", (network_id,))
+            .await
+            .unwrap();
+
+        let mut incoming = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
+        }];
+
+        preserve_nic_assignments(&conn, &uuid, device_id, &mut incoming).await;
+
+        // Assignment must be cleared
+        assert_eq!(incoming[0].assigned_network_id, None);
+        assert_eq!(incoming[0].assigned_ip, None);
+
+        // Exactly one NIC_ASSIGNMENT_DROPPED warning
+        let warnings = device_warnings::list_warnings(&conn, device_id)
+            .await
+            .unwrap();
+        assert_eq!(warnings.len(), 1, "exactly one warning");
+        assert_eq!(warnings[0].code, "NIC_ASSIGNMENT_DROPPED");
+    }
+
+    /// Assignment is dropped and a warning is created when the IP leaves the subnet.
+    #[tokio::test]
+    async fn test_preserve_nic_assignments_drops_when_ip_leaves_subnet() {
+        let conn = create_test_conn(test_database_path!()).await;
+        // Network is 10.0.0.0/24; stored IP will be from a different subnet
+        let network_id = create_test_network(&conn).await;
+
+        let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000003").unwrap();
+        let device_id = setup_device_with_nics(
+            &conn,
+            uuid,
+            vec![NetworkInterface {
+                interface_name: "eth0".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:03".to_string(),
+                ip_address: None,
+                network_id: None,
+                speed_mbps: None,
+                disabled: false,
+                warning_label: None,
+                assigned_network_id: Some(network_id),
+                // This IP is outside 10.0.0.0/24
+                assigned_ip: Some("192.168.1.99".to_string()),
+            }],
+        )
+        .await;
+
+        let mut incoming = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:03".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
+        }];
+
+        preserve_nic_assignments(&conn, &uuid, device_id, &mut incoming).await;
+
+        // Assignment must be cleared
+        assert_eq!(incoming[0].assigned_network_id, None);
+        assert_eq!(incoming[0].assigned_ip, None);
+
+        // Exactly one NIC_ASSIGNMENT_DROPPED warning
+        let warnings = device_warnings::list_warnings(&conn, device_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one warning for out-of-subnet IP"
+        );
+        assert_eq!(warnings[0].code, "NIC_ASSIGNMENT_DROPPED");
     }
 }

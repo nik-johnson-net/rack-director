@@ -12,12 +12,44 @@ Install scripts are Handlebars templates served to the OS installer via `GET /cn
 |---|---|
 | `{{ device.uuid }}` | Device UUID |
 | `{{ device.hostname }}` | Device hostname |
-| `{{ device.mac_address }}` | Primary MAC address |
-| `{{ device.ip_address }}` | IP address from DHCP lease |
-| `{{ device.gateway }}` | Network gateway |
-| `{{ device.dns_servers }}` | Space-separated DNS servers |
-| `{{ device.netmask }}` | Network netmask |
-| `{{ device.prefix_length }}` | Network prefix length (e.g. `24` for a /24 subnet) |
+| `{{ device.mac_address }}` | Primary NIC MAC address |
+| `{{ device.ip_address }}` | Primary NIC IP address |
+| `{{ device.gateway }}` | Primary NIC gateway (empty string when its network has no gateway) |
+| `{{ device.dns_servers }}` | Comma-separated DNS servers for the primary NIC |
+| `{{ device.netmask }}` | Primary NIC netmask |
+| `{{ device.prefix_length }}` | Primary NIC network prefix length (e.g. `24` for a /24 subnet) |
+
+The single `device.*` network fields above describe the **primary** NIC — the one with a DHCP lease, or
+(when no lease exists) the first NIC that has been assigned a network and IP. They are retained for
+backward compatibility. For multi-NIC configuration use `{{ device.network_interfaces }}` below.
+
+#### `{{ device.network_interfaces }}` — per-NIC network configuration
+
+Iterate with `{{#each device.network_interfaces}}`. Contains one entry for **every** NIC that has an
+**effective network** and an **effective IP**, where:
+
+- **effective network** = the operator-assigned network (`assigned_network_id`) if set, otherwise the
+  DHCP-derived `network_id`
+- **effective IP** = the operator-assigned static IP (`assigned_ip`) if set, otherwise the DHCP-derived
+  `ip_address`
+
+This lets a NIC be configured with a static IP **even on a segment with no DHCP**. Each NIC applies its
+**own** network's gateway and DNS (per-NIC gateway). Each item has:
+
+| Field | Description |
+|---|---|
+| `{{ this.interface_name }}` | Interface name (e.g. `eth0`) |
+| `{{ this.mac_address }}` | NIC MAC address |
+| `{{ this.ip_address }}` | Effective IP for this NIC |
+| `{{ this.netmask }}` | Netmask of this NIC's network |
+| `{{ this.prefix_length }}` | Prefix length of this NIC's network |
+| `{{ this.gateway }}` | This NIC's network gateway, or **absent** when the network has no gateway — guard with `{{#if this.gateway}}` |
+| `{{ this.dns_servers }}` | Comma-separated DNS servers, **empty** when the network has none — guard with `{{#if this.dns_servers}}` |
+| `{{ this.is_primary }}` | `true` for the primary NIC (see above) |
+
+A network may be defined with **no gateway and/or no DNS**, in which case those attributes are not set on
+NICs attached to it (no default route / no nameserver). Always guard `gateway`/`dns_servers` with
+`{{#if}}` in templates.
 
 ### Role & OS
 
@@ -66,8 +98,10 @@ Iterate with `{{#each logical_volumes}}`. Each item has:
 ### Example: Kickstart (RHEL/Anaconda)
 
 ```kickstart
-# Network
-network --bootproto=static --ip={{ device.ip_address }} --netmask={{ device.netmask }} --gateway={{ device.gateway }} --nameserver={{ device.dns_servers }} --hostname={{ device.hostname }}
+# Network — one directive per assigned NIC (gateway/DNS omitted when the network has none)
+{{#each device.network_interfaces}}
+network --bootproto=static --device={{this.mac_address}} --ip={{this.ip_address}} --netmask={{this.netmask}} {{#if this.gateway}}--gateway={{this.gateway}} {{/if}}{{#if this.dns_servers}}--nameserver={{this.dns_servers}} {{/if}}--activate{{#if this.is_primary}} --hostname={{../device.hostname}}{{/if}}
+{{/each}}
 
 # Partitions (pre-existing, created by partition_disks action)
 {{#each partitions}}{{#if this.mount_point}}{{#unless this.volume_group}}
@@ -98,13 +132,17 @@ autoinstall:
     network:
       version: 2
       ethernets:
-        primary:
+{{#each device.network_interfaces}}
+        {{this.interface_name}}:
           match:
-            macaddress: "{{ device.mac_address }}"
-          addresses: ["{{ device.ip_address }}/24"]
-          gateway4: {{ device.gateway }}
-          nameservers:
-            addresses: [{{ device.dns_servers }}]
+            macaddress: "{{this.mac_address}}"
+          addresses: ["{{this.ip_address}}/{{this.prefix_length}}"]
+{{#if this.gateway}}          routes:
+            - to: default
+              via: {{this.gateway}}
+{{/if}}{{#if this.dns_servers}}          nameservers:
+            addresses: [{{this.dns_servers}}]
+{{/if}}{{/each}}
   storage:
     layout:
       name: direct

@@ -1409,7 +1409,7 @@ mod tests {
             &conn,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,
@@ -1434,6 +1434,8 @@ mod tests {
             speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         }];
         director
             .set_network_interfaces(&test_uuid, &interfaces)
@@ -1478,7 +1480,7 @@ mod tests {
             &conn,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,
@@ -1505,6 +1507,8 @@ mod tests {
                 speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
             NetworkInterface {
                 interface_name: "eth1".to_string(),
@@ -1514,6 +1518,8 @@ mod tests {
                 speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             },
         ];
         director

@@ -160,7 +160,7 @@ mod tests {
             conn,
             "Test Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,

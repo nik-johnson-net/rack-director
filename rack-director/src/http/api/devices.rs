@@ -1,8 +1,8 @@
-//! `/api/devices` HTTP handlers for device-level disk label overrides and warnings.
+//! `/api/devices` HTTP handlers for device-level disk label overrides, NIC assignments, and warnings.
 //!
 //! These endpoints allow operators to pin platform labels to specific disk paths on a
-//! per-device basis, and to view or dismiss warnings that the system generates
-//! automatically (e.g. when a stale label override is removed).
+//! per-device basis, manually assign NICs to networks with a static IP, and view or
+//! dismiss warnings that the system generates automatically.
 
 use std::sync::Arc;
 
@@ -15,9 +15,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use common::Ipv4Subnet;
+
 use crate::{
-    device_warnings,
-    director::Director,
+    device_warnings, dhcp,
+    director::{self, Director},
     http::{AppState, error::Error as HttpError},
 };
 
@@ -48,6 +50,29 @@ pub struct LabelOverridesResponse {
 }
 
 // ---------------------------------------------------------------------------
+// NIC assignment request / response types
+// ---------------------------------------------------------------------------
+
+/// Body for `PUT /api/devices/{uuid}/nic-assignments`.
+#[derive(Deserialize)]
+pub struct PutNicAssignmentRequest {
+    /// MAC address of the NIC to configure (must exist on the device).
+    pub mac_address: String,
+    /// Network to assign this NIC to.  `None` clears both the network and IP.
+    pub network_id: Option<i64>,
+    /// Static IP within `network_id`'s subnet.  Requires `network_id` to be `Some`.
+    pub ip: Option<String>,
+}
+
+/// Response body returned by `PUT /api/devices/{uuid}/nic-assignments`.
+#[derive(Serialize)]
+pub struct NicAssignmentResponse {
+    pub mac_address: String,
+    pub network_id: Option<i64>,
+    pub ip: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -60,6 +85,14 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route(
             "/api/devices/{uuid}/label-overrides/{label}",
             delete(delete_label_override),
+        )
+        .route(
+            "/api/devices/{uuid}/nic-assignments",
+            put(put_nic_assignment),
+        )
+        .route(
+            "/api/devices/{uuid}/nic-assignments/{mac}",
+            delete(delete_nic_assignment),
         )
         .route("/api/devices/{uuid}/warnings", get(get_warnings))
         .route(
@@ -134,6 +167,136 @@ async fn delete_label_override(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /api/devices/{uuid}/nic-assignments`
+///
+/// Assign a NIC (identified by MAC address) to a network with an optional static IP.
+/// Passing `network_id: null` and `ip: null` clears the assignment.
+///
+/// Validation:
+/// - `mac_address` must match a NIC on the device.
+/// - If `network_id` is given, the network must exist.
+/// - If `ip` is given, it must be a valid IPv4 address within `network_id`'s subnet.
+/// - If `ip` is given without `network_id`, returns 422.
+/// - If `ip` is already in use by a different MAC in the same network, returns 422.
+async fn put_nic_assignment(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<PutNicAssignmentRequest>,
+) -> Result<(StatusCode, Json<NicAssignmentResponse>), HttpError> {
+    // Validate MAC address format (XX:XX:XX:XX:XX:XX)
+    if !is_valid_mac(&req.mac_address) {
+        return Err(HttpError::UnprocessableEntity(
+            "MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string(),
+        ));
+    }
+
+    let conn = state.connection_factory.open().await?;
+
+    // Load device and verify MAC exists
+    let device = director::store::get_device(&conn, &uuid)
+        .await
+        .map_err(|_| HttpError::NotFound(format!("Device {} not found", uuid)))?;
+
+    let mac_lower = req.mac_address.to_lowercase();
+    let nic_exists = device
+        .attributes
+        .network_interfaces
+        .iter()
+        .any(|n| n.mac_address.to_lowercase() == mac_lower);
+
+    if !nic_exists {
+        return Err(HttpError::NotFound(format!(
+            "No NIC with MAC {} found on device {}",
+            req.mac_address, uuid
+        )));
+    }
+
+    // If network_id is provided, verify the network exists
+    if let Some(network_id) = req.network_id {
+        let network = dhcp::store::get_network(&conn, network_id)
+            .await
+            .map_err(|_| {
+                HttpError::UnprocessableEntity(format!("Network {} not found", network_id))
+            })?;
+
+        // If ip is provided, validate it is a valid IPv4 within the network's subnet
+        if let Some(ref ip) = req.ip {
+            let subnet: Ipv4Subnet = network
+                .subnet
+                .parse()
+                .map_err(|e| HttpError::UnprocessableEntity(format!("Invalid subnet: {}", e)))?;
+
+            let ip_addr: std::net::Ipv4Addr = ip.parse().map_err(|_| {
+                HttpError::UnprocessableEntity("Must be a valid IPv4 address".to_string())
+            })?;
+
+            if !subnet.ip_in_range(ip_addr) {
+                return Err(HttpError::UnprocessableEntity(
+                    "IP address must be within the subnet range".to_string(),
+                ));
+            }
+
+            // Duplicate-IP check: reject if a different MAC already uses this IP
+            if let Some(owner_mac) =
+                director::store::find_mac_using_ip(&conn, network_id, ip).await?
+                && owner_mac.to_lowercase() != mac_lower
+            {
+                return Err(HttpError::UnprocessableEntity(format!(
+                    "IP {} is already assigned to MAC {} in network {}",
+                    ip, owner_mac, network_id
+                )));
+            }
+        }
+    } else if req.ip.is_some() {
+        // IP without a network is not allowed
+        return Err(HttpError::UnprocessableEntity(
+            "An IP address requires a network_id".to_string(),
+        ));
+    }
+
+    director::store::set_nic_assignment(
+        &conn,
+        &uuid,
+        &req.mac_address,
+        req.network_id,
+        req.ip.clone(),
+    )
+    .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(NicAssignmentResponse {
+            mac_address: req.mac_address,
+            network_id: req.network_id,
+            ip: req.ip,
+        }),
+    ))
+}
+
+/// `DELETE /api/devices/{uuid}/nic-assignments/{mac}`
+///
+/// Clear the NIC assignment for the given MAC address, removing both `assigned_network_id`
+/// and `assigned_ip`.  Returns `204 No Content` on success.
+async fn delete_nic_assignment(
+    State(state): State<Arc<AppState>>,
+    Path((uuid, mac)): Path<(Uuid, String)>,
+) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+
+    // Verify device exists
+    director::store::get_device(&conn, &uuid)
+        .await
+        .map_err(|_| HttpError::NotFound(format!("Device {} not found", uuid)))?;
+
+    director::store::set_nic_assignment(&conn, &uuid, &mac, None, None)
+        .await
+        .map_err(|_| {
+            HttpError::NotFound(format!("No NIC with MAC {} found on device {}", mac, uuid))
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `GET /api/devices/{uuid}/warnings`
 ///
 /// List all warnings for the device.
@@ -180,6 +343,15 @@ async fn delete_warning(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Returns `true` when `mac` is a valid `XX:XX:XX:XX:XX:XX` MAC address.
+fn is_valid_mac(mac: &str) -> bool {
+    let octets: Vec<&str> = mac.split(':').collect();
+    octets.len() == 6
+        && octets
+            .iter()
+            .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit()))
+}
 
 /// Validate a `PUT` label-override request.
 fn validate_label_override_request(req: &PutLabelOverrideRequest) -> Result<(), HttpError> {
@@ -483,6 +655,267 @@ mod tests {
         let req = Request::builder()
             .method(Method::DELETE)
             .uri(format!("/api/devices/{}/warnings/9999", uuid))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ===== NIC assignment endpoint tests =====
+
+    /// Helper: set up an app with a device that has a NIC and a test network.
+    async fn setup_app_with_nic(
+        factory: DatabaseConnectionFactory,
+    ) -> (axum::Router, database::Connection, Uuid, i64) {
+        let migration_conn = database::run_migrations(&factory).await.unwrap();
+        let uuid = Uuid::parse_str("d4000000-0000-0000-0000-000000000002").unwrap();
+
+        migration_conn
+            .execute(
+                "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', 'x86-64')",
+                (uuid,),
+            )
+            .await
+            .unwrap();
+
+        // Insert a NIC into device attributes
+        migration_conn
+            .execute(
+                r#"UPDATE devices SET attributes = json_set(COALESCE(attributes, '{}'), '$.network_interfaces',
+                   json('[{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:01","ip_address":null,"network_id":null,"speed_mbps":null,"disabled":false,"warning_label":null,"assigned_network_id":null,"assigned_ip":null}]')
+                ) WHERE uuid = ?1"#,
+                (uuid,),
+            )
+            .await
+            .unwrap();
+
+        // Create a test network
+        let network = crate::dhcp::store::create_network(
+            &migration_conn,
+            "Test Network",
+            "10.0.0.0/24",
+            Some("10.0.0.1"),
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        crate::dhcp::store::create_pool(
+            &migration_conn,
+            network.id,
+            "Test Pool",
+            "10.0.0.100",
+            "10.0.0.200",
+        )
+        .await
+        .unwrap();
+
+        let conn_factory: Arc<dyn database::ConnectionFactory> = Arc::new(factory);
+        let state = build_test_state(conn_factory);
+        let app = routes(state);
+        (app, migration_conn, uuid, network.id)
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_in_subnet_succeeds() {
+        let (app, _conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        let body = json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": network_id,
+            "ip": "10.0.0.50"
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["mac_address"], "aa:bb:cc:dd:ee:01");
+        assert_eq!(json["network_id"], network_id);
+        assert_eq!(json["ip"], "10.0.0.50");
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_out_of_subnet_returns_422() {
+        let (app, _conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        let body = json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": network_id,
+            "ip": "192.168.1.50"   // out of 10.0.0.0/24
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_ip_without_network_returns_422() {
+        let (app, _conn, uuid, _network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        let body = json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": null,
+            "ip": "10.0.0.50"
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_duplicate_ip_different_mac_returns_422() {
+        let (app, conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        // Reserve the IP for a different MAC via static reservation
+        crate::dhcp::store::create_static_reservation(
+            &conn,
+            network_id,
+            "ff:ff:ff:ff:ff:ff",
+            "10.0.0.50",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let body = json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": network_id,
+            "ip": "10.0.0.50"
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_same_mac_reconfigures_own_ip_succeeds() {
+        let (app, conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        // Set the NIC's own assignment first
+        crate::director::store::set_nic_assignment(
+            &conn,
+            &uuid,
+            "aa:bb:cc:dd:ee:01",
+            Some(network_id),
+            Some("10.0.0.50".to_string()),
+        )
+        .await
+        .unwrap();
+
+        // Re-configuring with the same IP should succeed (same MAC)
+        let body = json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": network_id,
+            "ip": "10.0.0.50"
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_unknown_mac_returns_404() {
+        let (app, _conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        let body = json!({
+            "mac_address": "ff:ff:ff:ff:ff:ff",
+            "network_id": network_id,
+            "ip": "10.0.0.50"
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nic_assignment_clears_assignment() {
+        let (app, conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        // First assign the NIC
+        crate::director::store::set_nic_assignment(
+            &conn,
+            &uuid,
+            "aa:bb:cc:dd:ee:01",
+            Some(network_id),
+            Some("10.0.0.50".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!(
+                "/api/devices/{}/nic-assignments/aa:bb:cc:dd:ee:01",
+                uuid
+            ))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify it was cleared
+        let ifaces = crate::director::store::get_network_interfaces(&conn, &uuid)
+            .await
+            .unwrap();
+        assert_eq!(ifaces[0].assigned_network_id, None);
+        assert_eq!(ifaces[0].assigned_ip, None);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nic_assignment_unknown_mac_returns_404() {
+        let (app, _conn, uuid, _network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!(
+                "/api/devices/{}/nic-assignments/ff:ff:ff:ff:ff:ff",
+                uuid
+            ))
             .body(Body::empty())
             .unwrap();
 
