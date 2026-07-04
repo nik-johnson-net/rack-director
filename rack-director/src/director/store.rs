@@ -594,10 +594,44 @@ pub async fn get_configured_ip_for_mac(
         .query_row(
             "SELECT json_extract(iface.value, '$.assigned_ip')
              FROM devices, json_each(attributes, '$.network_interfaces') AS iface
-             WHERE json_extract(iface.value, '$.mac_address') = ?1
+             WHERE lower(json_extract(iface.value, '$.mac_address')) = ?1
                AND json_extract(iface.value, '$.assigned_network_id') = ?2
              LIMIT 1",
             (mac_lower, network_id),
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .await
+        .optional()?;
+
+    match result.flatten() {
+        Some(ip_str) => {
+            let ip: std::net::Ipv4Addr = ip_str.parse()?;
+            Ok(Some(ip))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Return the configured IP for a NIC on a specific device, identified by `uuid`,
+/// `mac`, and `network_id`. Like `get_configured_ip_for_mac` but scoped to a single
+/// device row (uses the indexed `uuid` column), avoiding a fleet-wide JSON scan on the
+/// DHCP hot path. Returns `None` if the NIC is not configured for this network.
+pub async fn get_configured_ip_for_device(
+    conn: &Connection,
+    uuid: &Uuid,
+    mac: &str,
+    network_id: i64,
+) -> Result<Option<std::net::Ipv4Addr>> {
+    let mac_lower = mac.to_lowercase();
+    let result = conn
+        .query_row(
+            "SELECT json_extract(iface.value, '$.assigned_ip')
+             FROM devices, json_each(devices.attributes, '$.network_interfaces') AS iface
+             WHERE devices.uuid = ?1
+               AND lower(json_extract(iface.value, '$.mac_address')) = ?2
+               AND json_extract(iface.value, '$.assigned_network_id') = ?3
+             LIMIT 1",
+            (*uuid, mac_lower, network_id),
             |row| row.get::<_, Option<String>>(0),
         )
         .await
@@ -2443,5 +2477,141 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ip, None);
+    }
+
+    /// get_configured_ip_for_mac matches case-insensitively: a MAC stored in uppercase
+    /// is found when queried in lowercase.
+    #[tokio::test]
+    async fn test_get_configured_ip_for_mac_case_insensitive() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x68);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "AA:BB:CC:DD:EE:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.77".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        let ip = get_configured_ip_for_mac(&db, "aa:bb:cc:dd:ee:01", 1)
+            .await
+            .unwrap();
+        assert_eq!(ip, Some("10.0.0.77".parse().unwrap()));
+    }
+
+    // ===== get_configured_ip_for_device tests =====
+
+    /// get_configured_ip_for_device returns the configured IP for the matching
+    /// device+mac+network combination.
+    #[tokio::test]
+    async fn test_get_configured_ip_for_device_returns_ip() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x69);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.77".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        let ip = get_configured_ip_for_device(&db, &uuid, "aa:bb:cc:dd:ee:01", 1)
+            .await
+            .unwrap();
+        assert_eq!(ip, Some("10.0.0.77".parse().unwrap()));
+    }
+
+    /// get_configured_ip_for_device returns None when queried with a DIFFERENT device's
+    /// uuid, even though that other device has the matching mac+network assignment.
+    #[tokio::test]
+    async fn test_get_configured_ip_for_device_wrong_device_returns_none() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x6a);
+        let other_uuid = test_uuid(0x6b);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        register_device(&db, &other_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "aa:bb:cc:dd:ee:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.77".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        // Querying with a different device's uuid must not find the first device's
+        // assignment, even though the mac+network match.
+        let ip = get_configured_ip_for_device(&db, &other_uuid, "aa:bb:cc:dd:ee:01", 1)
+            .await
+            .unwrap();
+        assert_eq!(ip, None);
+    }
+
+    /// get_configured_ip_for_device matches case-insensitively: a MAC stored in
+    /// uppercase is found when queried in lowercase.
+    #[tokio::test]
+    async fn test_get_configured_ip_for_device_case_insensitive() {
+        let db = setup_db(test_database_path!()).await;
+        let uuid = test_uuid(0x6c);
+
+        register_device(&db, &uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let interfaces = vec![NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: "AA:BB:CC:DD:EE:01".to_string(),
+            ip_address: None,
+            network_id: None,
+            speed_mbps: None,
+            disabled: false,
+            warning_label: None,
+            assigned_network_id: Some(1),
+            assigned_ip: Some("10.0.0.77".to_string()),
+        }];
+        set_network_interfaces(&db, &uuid, &interfaces)
+            .await
+            .unwrap();
+
+        let ip = get_configured_ip_for_device(&db, &uuid, "aa:bb:cc:dd:ee:01", 1)
+            .await
+            .unwrap();
+        assert_eq!(ip, Some("10.0.0.77".parse().unwrap()));
     }
 }

@@ -322,7 +322,7 @@ async fn build_nic_context(
 
     let is_primary = lease_mac
         .as_deref()
-        .map(|m| m == iface.mac_address)
+        .map(|m| m.eq_ignore_ascii_case(&iface.mac_address))
         .unwrap_or(false);
 
     Ok(Some(templates::NicNetworkContext {
@@ -523,6 +523,63 @@ mod tests {
         assert!(nics[0].is_primary);
         assert_eq!(nics[0].mac_address, mac);
         assert_eq!(nics[0].gateway, Some("10.0.0.1".to_string()));
+    }
+
+    /// Verifies that primary-NIC selection matches the lease MAC case-insensitively:
+    /// a NIC MAC stored in uppercase must still be selected as primary when the DHCP
+    /// lease recorded the MAC in lowercase (or vice versa).
+    #[tokio::test]
+    async fn test_build_network_contexts_lease_mac_case_insensitive() {
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
+
+        let uuid = test_uuid();
+        // NIC's stored MAC is uppercase...
+        let nic_mac = "AA:BB:CC:DD:EE:FF";
+        // ...but the DHCP lease recorded the MAC in lowercase.
+        let lease_mac = "aa:bb:cc:dd:ee:ff";
+
+        Director::new(&conn)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let ip: Ipv4Addr = "10.0.0.100".parse().unwrap();
+        crate::dhcp::store::create_or_update_lease_with_network(
+            &conn,
+            lease_mac,
+            &ip,
+            Some(&uuid),
+            crate::dhcp::LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
+
+        let iface = common::device_attributes::NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: nic_mac.to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            network_id: Some(network_id),
+            assigned_network_id: None,
+            assigned_ip: None,
+            speed_mbps: Some(1000),
+            disabled: false,
+            warning_label: None,
+        };
+
+        let (network_info, nics) = match build_network_contexts(&conn, &uuid, &[iface]).await {
+            Ok(v) => v,
+            Err(_) => panic!("Expected Ok from build_network_contexts"),
+        };
+
+        assert_eq!(nics.len(), 1);
+        assert!(
+            nics[0].is_primary,
+            "NIC must be selected as primary despite MAC case mismatch with the lease"
+        );
+        assert_eq!(network_info.mac_address, nic_mac);
     }
 
     /// Verifies that a NIC with `assigned_network_id` and `assigned_ip` (no DHCP lease) is

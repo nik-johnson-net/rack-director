@@ -16,8 +16,10 @@ pub async fn allocate_for_device_in_network(
 ) -> Result<Ipv4Addr> {
     // 0. Check device NIC assignment: if the operator configured a static IP for this
     //    MAC/network combination, hand it out immediately ahead of any other check.
+    //    The device UUID is known here, so this is scoped to a single device row (indexed
+    //    `uuid` lookup) instead of scanning every device's `network_interfaces` JSON.
     if let Some(ip) =
-        crate::director::store::get_configured_ip_for_mac(conn, mac, network_id).await?
+        crate::director::store::get_configured_ip_for_device(conn, uuid, mac, network_id).await?
     {
         log::debug!(
             "Device {} NIC {} has configured IP {} in network {} — using it",
