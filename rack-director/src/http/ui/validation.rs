@@ -74,14 +74,7 @@ pub fn validate_ipv4_list(ips: &[String], field_name: &str, min_count: usize) ->
 ///
 /// Returns `Some(error_message)` when the format is invalid, `None` when valid.
 pub fn validate_mac_address(mac: &str) -> Option<String> {
-    let octets: Vec<&str> = mac.split(':').collect();
-    if octets.len() != 6 {
-        return Some("MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string());
-    }
-    let all_valid = octets
-        .iter()
-        .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit()));
-    if all_valid {
+    if common::is_valid_mac(mac) {
         None
     } else {
         Some("MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string())
@@ -452,6 +445,15 @@ mod tests {
         assert!(validate_ipv4_list(&["8.8.8.8".to_string()], "DNS", 1).is_none());
         assert!(validate_ipv4_list(&[], "DNS", 1).is_some());
         assert!(validate_ipv4_list(&["invalid".to_string()], "DNS", 1).is_some());
+    }
+
+    #[test]
+    fn test_validate_mac_address() {
+        assert!(validate_mac_address("aa:bb:cc:dd:ee:ff").is_none());
+        assert!(validate_mac_address("AA:BB:CC:DD:EE:FF").is_none());
+        assert!(validate_mac_address("aa:bb:cc:dd:ee").is_some());
+        assert!(validate_mac_address("aa:bb:cc:dd:ee:gg").is_some());
+        assert!(validate_mac_address("not-a-mac").is_some());
     }
 
     #[test]

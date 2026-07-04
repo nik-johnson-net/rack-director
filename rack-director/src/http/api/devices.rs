@@ -183,76 +183,10 @@ async fn put_nic_assignment(
     Path(uuid): Path<Uuid>,
     Json(req): Json<PutNicAssignmentRequest>,
 ) -> Result<(StatusCode, Json<NicAssignmentResponse>), HttpError> {
-    // Validate MAC address format (XX:XX:XX:XX:XX:XX)
-    if !is_valid_mac(&req.mac_address) {
-        return Err(HttpError::UnprocessableEntity(
-            "MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string(),
-        ));
-    }
-
     let conn = state.connection_factory.open().await?;
 
-    // Load device and verify MAC exists
-    let device = director::store::get_device(&conn, &uuid)
-        .await
-        .map_err(|_| HttpError::NotFound(format!("Device {} not found", uuid)))?;
-
-    let mac_lower = req.mac_address.to_lowercase();
-    let nic_exists = device
-        .attributes
-        .network_interfaces
-        .iter()
-        .any(|n| n.mac_address.to_lowercase() == mac_lower);
-
-    if !nic_exists {
-        return Err(HttpError::NotFound(format!(
-            "No NIC with MAC {} found on device {}",
-            req.mac_address, uuid
-        )));
-    }
-
-    // If network_id is provided, verify the network exists
-    if let Some(network_id) = req.network_id {
-        let network = dhcp::store::get_network(&conn, network_id)
-            .await
-            .map_err(|_| {
-                HttpError::UnprocessableEntity(format!("Network {} not found", network_id))
-            })?;
-
-        // If ip is provided, validate it is a valid IPv4 within the network's subnet
-        if let Some(ref ip) = req.ip {
-            let subnet: Ipv4Subnet = network
-                .subnet
-                .parse()
-                .map_err(|e| HttpError::UnprocessableEntity(format!("Invalid subnet: {}", e)))?;
-
-            let ip_addr: std::net::Ipv4Addr = ip.parse().map_err(|_| {
-                HttpError::UnprocessableEntity("Must be a valid IPv4 address".to_string())
-            })?;
-
-            if !subnet.ip_in_range(ip_addr) {
-                return Err(HttpError::UnprocessableEntity(
-                    "IP address must be within the subnet range".to_string(),
-                ));
-            }
-
-            // Duplicate-IP check: reject if a different MAC already uses this IP
-            if let Some(owner_mac) =
-                director::store::find_mac_using_ip(&conn, network_id, ip).await?
-                && owner_mac.to_lowercase() != mac_lower
-            {
-                return Err(HttpError::UnprocessableEntity(format!(
-                    "IP {} is already assigned to MAC {} in network {}",
-                    ip, owner_mac, network_id
-                )));
-            }
-        }
-    } else if req.ip.is_some() {
-        // IP without a network is not allowed
-        return Err(HttpError::UnprocessableEntity(
-            "An IP address requires a network_id".to_string(),
-        ));
-    }
+    let mac_lower = validate_mac_and_find_nic(&conn, &uuid, &req.mac_address).await?;
+    validate_network_and_ip(&conn, &req, &mac_lower).await?;
 
     director::store::set_nic_assignment(
         &conn,
@@ -271,6 +205,97 @@ async fn put_nic_assignment(
             ip: req.ip,
         }),
     ))
+}
+
+/// Validate the MAC address format on a `PUT` NIC-assignment request and confirm it
+/// matches a NIC present on the device's most recent hardware scan.
+///
+/// Returns the lowercased MAC address on success.
+async fn validate_mac_and_find_nic(
+    conn: &crate::database::Connection,
+    uuid: &Uuid,
+    mac_address: &str,
+) -> Result<String, HttpError> {
+    if !common::is_valid_mac(mac_address) {
+        return Err(HttpError::UnprocessableEntity(
+            "MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string(),
+        ));
+    }
+
+    let device = director::store::get_device(conn, uuid)
+        .await
+        .map_err(|_| HttpError::NotFound(format!("Device {} not found", uuid)))?;
+
+    let mac_lower = mac_address.to_lowercase();
+    let nic_exists = device
+        .attributes
+        .network_interfaces
+        .iter()
+        .any(|n| n.mac_address.to_lowercase() == mac_lower);
+
+    if !nic_exists {
+        return Err(HttpError::NotFound(format!(
+            "No NIC with MAC {} found on device {}",
+            mac_address, uuid
+        )));
+    }
+
+    Ok(mac_lower)
+}
+
+/// Validate the `network_id`/`ip` portion of a `PUT` NIC-assignment request:
+/// - if `network_id` is given, the network must exist;
+/// - if `ip` is given, it must be a valid IPv4 address that is a usable host within the
+///   network's subnet, and must not already be assigned to a different MAC;
+/// - if `ip` is given without `network_id`, the request is rejected.
+async fn validate_network_and_ip(
+    conn: &crate::database::Connection,
+    req: &PutNicAssignmentRequest,
+    mac_lower: &str,
+) -> Result<(), HttpError> {
+    let Some(network_id) = req.network_id else {
+        if req.ip.is_some() {
+            return Err(HttpError::UnprocessableEntity(
+                "An IP address requires a network_id".to_string(),
+            ));
+        }
+        return Ok(());
+    };
+
+    let network = dhcp::store::get_network(conn, network_id)
+        .await
+        .map_err(|_| HttpError::UnprocessableEntity(format!("Network {} not found", network_id)))?;
+
+    let Some(ref ip) = req.ip else {
+        return Ok(());
+    };
+
+    let subnet: Ipv4Subnet = network
+        .subnet
+        .parse()
+        .map_err(|e| HttpError::UnprocessableEntity(format!("Invalid subnet: {}", e)))?;
+
+    let ip_addr: std::net::Ipv4Addr = ip
+        .parse()
+        .map_err(|_| HttpError::UnprocessableEntity("Must be a valid IPv4 address".to_string()))?;
+
+    if !subnet.is_assignable_host(ip_addr) {
+        return Err(HttpError::UnprocessableEntity(
+            "IP address must be a usable host address within the subnet range (network and broadcast addresses are not allowed)".to_string(),
+        ));
+    }
+
+    // Duplicate-IP check: reject if a different MAC already uses this IP
+    if let Some(owner_mac) = director::store::find_mac_using_ip(conn, network_id, ip).await?
+        && owner_mac.to_lowercase() != mac_lower
+    {
+        return Err(HttpError::UnprocessableEntity(format!(
+            "IP {} is already assigned to MAC {} in network {}",
+            ip, owner_mac, network_id
+        )));
+    }
+
+    Ok(())
 }
 
 /// `DELETE /api/devices/{uuid}/nic-assignments/{mac}`
@@ -343,15 +368,6 @@ async fn delete_warning(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Returns `true` when `mac` is a valid `XX:XX:XX:XX:XX:XX` MAC address.
-fn is_valid_mac(mac: &str) -> bool {
-    let octets: Vec<&str> = mac.split(':').collect();
-    octets.len() == 6
-        && octets
-            .iter()
-            .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit()))
-}
 
 /// Validate a `PUT` label-override request.
 fn validate_label_override_request(req: &PutLabelOverrideRequest) -> Result<(), HttpError> {
@@ -746,6 +762,46 @@ mod tests {
         assert_eq!(json["mac_address"], "aa:bb:cc:dd:ee:01");
         assert_eq!(json["network_id"], network_id);
         assert_eq!(json["ip"], "10.0.0.50");
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_network_address_returns_422() {
+        let (app, _conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        let body = json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": network_id,
+            "ip": "10.0.0.0"   // network address of 10.0.0.0/24 - not a usable host
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_put_nic_assignment_broadcast_address_returns_422() {
+        let (app, _conn, uuid, network_id) = setup_app_with_nic(test_connection_factory!()).await;
+
+        let body = json!({
+            "mac_address": "aa:bb:cc:dd:ee:01",
+            "network_id": network_id,
+            "ip": "10.0.0.255"   // broadcast address of 10.0.0.0/24 - not a usable host
+        });
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/devices/{}/nic-assignments", uuid))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
