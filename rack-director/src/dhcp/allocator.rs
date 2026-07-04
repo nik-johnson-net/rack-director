@@ -132,12 +132,23 @@ async fn allocate_from_pools(conn: &Connection, network_id: i64, mac: &str) -> R
         .filter_map(|r| r.ip_address.parse().ok())
         .collect();
 
+    // Get all operator-assigned NIC static IPs in this network (may fall inside a pool range)
+    let assigned_ips: HashSet<Ipv4Addr> =
+        crate::director::store::list_assigned_nic_ips(conn, network_id)
+            .await?
+            .into_iter()
+            .filter_map(|ip| ip.parse().ok())
+            .collect();
+
     // Try each pool until allocation succeeds
     for pool in pools {
         let range = parse_ip_range(&pool.range_start, &pool.range_end)?;
 
         for ip in range {
-            if !active_ips.contains(&ip) && !reserved_ips.contains(&ip) {
+            if !active_ips.contains(&ip)
+                && !reserved_ips.contains(&ip)
+                && !assigned_ips.contains(&ip)
+            {
                 log::info!(
                     "Allocated {} from pool '{}' (network {}) for MAC {}",
                     ip,
@@ -379,5 +390,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ip2.to_string(), "10.0.0.42");
+    }
+
+    /// A pool allocation must not hand out an IP that is already claimed by another
+    /// device's operator-assigned NIC static IP, even if that device has never DHCP'd
+    /// (i.e. has no active lease).
+    #[tokio::test]
+    async fn test_pool_allocation_skips_assigned_nic_ip() {
+        let (db, network_id) = create_test_db(test_connection_factory!()).await;
+        let device_a_mac = "aa:bb:cc:dd:ee:20";
+
+        // Register device A and assign it the first pool address, but create no lease for it.
+        let uuid = Uuid::parse_str("a1000000-0000-0000-0000-000000000020").unwrap();
+        db.execute(
+            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', 'x86-64')",
+            (uuid,),
+        )
+        .await
+        .unwrap();
+
+        let nic_json = format!(
+            r#"[{{"interface_name":"eth0","mac_address":"{device_a_mac}","ip_address":null,"network_id":null,"speed_mbps":null,"disabled":false,"warning_label":null,"assigned_network_id":{network_id},"assigned_ip":"10.0.0.100"}}]"#
+        );
+        db.execute(
+            "UPDATE devices SET attributes = json_set(COALESCE(attributes, '{}'), '$.network_interfaces', json(?1)) WHERE uuid = ?2",
+            (nic_json, uuid),
+        )
+        .await
+        .unwrap();
+
+        // Device B (a different MAC, no assignment) requests an allocation. The pool scan
+        // must skip 10.0.0.100 (claimed by device A's assignment) and return the next
+        // available address instead.
+        let device_b_mac = "11:22:33:44:55:66";
+        let ip = allocate_for_mac_in_network(&db, device_b_mac, network_id)
+            .await
+            .unwrap();
+        assert_eq!(ip.to_string(), "10.0.0.101");
+    }
+
+    /// `list_assigned_nic_ips` returns only the assigned IPs for the given network,
+    /// ignoring NICs with no assignment or an assignment to a different network.
+    #[tokio::test]
+    async fn test_list_assigned_nic_ips_returns_assigned_ips_for_network() {
+        let (db, network_id) = create_test_db(test_connection_factory!()).await;
+        let other_network_id = network_id + 1;
+
+        let uuid = Uuid::parse_str("a1000000-0000-0000-0000-000000000030").unwrap();
+        db.execute(
+            "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', 'x86-64')",
+            (uuid,),
+        )
+        .await
+        .unwrap();
+
+        // One NIC assigned in `network_id`, one assigned to a different network, one
+        // with no assignment at all.
+        let nic_json = format!(
+            r#"[
+                {{"interface_name":"eth0","mac_address":"aa:bb:cc:dd:ee:30","ip_address":null,"network_id":null,"speed_mbps":null,"disabled":false,"warning_label":null,"assigned_network_id":{network_id},"assigned_ip":"10.0.0.150"}},
+                {{"interface_name":"eth1","mac_address":"aa:bb:cc:dd:ee:31","ip_address":null,"network_id":null,"speed_mbps":null,"disabled":false,"warning_label":null,"assigned_network_id":{other_network_id},"assigned_ip":"10.0.1.5"}},
+                {{"interface_name":"eth2","mac_address":"aa:bb:cc:dd:ee:32","ip_address":null,"network_id":null,"speed_mbps":null,"disabled":false,"warning_label":null,"assigned_network_id":null,"assigned_ip":null}}
+            ]"#
+        );
+        db.execute(
+            "UPDATE devices SET attributes = json_set(COALESCE(attributes, '{}'), '$.network_interfaces', json(?1)) WHERE uuid = ?2",
+            (nic_json, uuid),
+        )
+        .await
+        .unwrap();
+
+        let assigned = crate::director::store::list_assigned_nic_ips(&db, network_id)
+            .await
+            .unwrap();
+        assert_eq!(assigned, vec!["10.0.0.150".to_string()]);
+
+        // No assignments exist for a network with no matching NICs.
+        let none_assigned = crate::director::store::list_assigned_nic_ips(&db, other_network_id)
+            .await
+            .unwrap();
+        assert_eq!(none_assigned, vec!["10.0.1.5".to_string()]);
     }
 }

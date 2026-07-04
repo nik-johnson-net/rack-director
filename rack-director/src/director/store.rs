@@ -516,9 +516,10 @@ pub async fn set_nic_assignment(
 
 /// Find the MAC address already using `ip` within `network_id`.
 ///
-/// Checks two sources:
+/// Checks three sources, in order:
 /// 1. Any device NIC whose `assigned_network_id == network_id` AND `assigned_ip == ip`.
 /// 2. The `dhcp_static_reservations` table for that `(network_id, ip)` pair.
+/// 3. The `dhcp_leases` table for an active lease of that `(network_id, ip)` pair.
 ///
 /// Returns the first MAC found, or `None` if the IP is unassigned.
 pub async fn find_mac_using_ip(
@@ -556,7 +557,26 @@ pub async fn find_mac_using_ip(
         .await
         .optional()?;
 
-    Ok(reserved_mac)
+    if reserved_mac.is_some() {
+        return Ok(reserved_mac);
+    }
+
+    // Check active dhcp_leases. Elsewhere in the DHCP store (e.g.
+    // `dhcp::store::find_lease_by_device_uuid`), an "active" lease is identified purely by
+    // `state = 'active'` without an additional `lease_end` comparison, so we follow the same
+    // convention here for consistency.
+    let leased_mac = conn
+        .query_row(
+            "SELECT mac_address FROM dhcp_leases
+             WHERE network_id = ?1 AND ip_address = ?2 AND state = 'active'
+             LIMIT 1",
+            (network_id, ip.to_string()),
+            |row| row.get::<_, String>(0),
+        )
+        .await
+        .optional()?;
+
+    Ok(leased_mac)
 }
 
 /// Return the configured IP for a NIC identified by `mac` within a specific network.
@@ -590,6 +610,26 @@ pub async fn get_configured_ip_for_mac(
         }
         None => Ok(None),
     }
+}
+
+/// Return all operator-assigned NIC IPs within `network_id`.
+///
+/// Scans every device's `network_interfaces` for NICs whose `assigned_network_id`
+/// matches `network_id` and returns their non-null `assigned_ip` values. Used by the
+/// DHCP allocator to exclude manually-assigned addresses from dynamic pool allocation.
+pub async fn list_assigned_nic_ips(conn: &Connection, network_id: i64) -> Result<Vec<String>> {
+    let ips = conn
+        .query(
+            "SELECT json_extract(iface.value, '$.assigned_ip')
+             FROM devices, json_each(attributes, '$.network_interfaces') AS iface
+             WHERE json_extract(iface.value, '$.assigned_network_id') = ?1
+               AND json_extract(iface.value, '$.assigned_ip') IS NOT NULL",
+            (network_id,),
+            |row| row.get::<_, String>(0),
+        )
+        .await?;
+
+    Ok(ips)
 }
 
 /// Find device UUID by BMC MAC address.
@@ -2276,6 +2316,37 @@ mod tests {
         // Query for a different network_id — should not find anything
         let found = find_mac_using_ip(&db, 99, "10.0.0.50").await.unwrap();
         assert_eq!(found, None);
+    }
+
+    /// find_mac_using_ip finds a MAC with an active dhcp_lease, and still returns
+    /// None for an IP that isn't in use by any source.
+    #[tokio::test]
+    async fn test_find_mac_using_ip_finds_active_lease() {
+        let db = setup_db(test_database_path!()).await;
+        let network_id = create_test_network(&db).await;
+
+        crate::dhcp::store::create_or_update_lease_with_network(
+            &db,
+            "aa:bb:cc:dd:ee:ff",
+            &"10.0.0.120".parse().unwrap(),
+            None,
+            crate::dhcp::LeaseState::Active,
+            86400,
+            network_id,
+        )
+        .await
+        .unwrap();
+
+        let found = find_mac_using_ip(&db, network_id, "10.0.0.120")
+            .await
+            .unwrap();
+        assert_eq!(found, Some("aa:bb:cc:dd:ee:ff".to_string()));
+
+        // An unused IP in the same network still returns None.
+        let unused = find_mac_using_ip(&db, network_id, "10.0.0.121")
+            .await
+            .unwrap();
+        assert_eq!(unused, None);
     }
 
     // ===== get_configured_ip_for_mac tests =====
