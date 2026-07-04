@@ -53,6 +53,29 @@ impl Ipv4Subnet {
         let netmask_bits = self.netmask().to_bits();
         (ip.to_bits() & netmask_bits) == self.network().to_bits()
     }
+
+    /// Returns the broadcast address of the subnet (network address with all host bits set).
+    pub fn broadcast(&self) -> Ipv4Addr {
+        let netmask_bits = self.netmask().to_bits();
+        Ipv4Addr::from_bits(self.network().to_bits() | !netmask_bits)
+    }
+
+    /// Returns `true` when `ip` is a usable host address in this subnet.
+    ///
+    /// An assignable host address is in range and — for subnets with a distinct
+    /// network and broadcast address (prefix `/30` or shorter) — is neither the
+    /// network address nor the broadcast address. For `/31` (RFC 3021
+    /// point-to-point) and `/32` (single host) subnets there are no reserved
+    /// network/broadcast addresses, so any in-range address is assignable.
+    pub fn is_assignable_host(&self, ip: Ipv4Addr) -> bool {
+        if !self.ip_in_range(ip) {
+            return false;
+        }
+        if self.subnet >= 31 {
+            return true;
+        }
+        ip != self.network() && ip != self.broadcast()
+    }
 }
 
 impl FromStr for Ipv4Subnet {
@@ -120,5 +143,46 @@ mod tests {
         assert!(subnet.ip_in_range(Ipv4Addr::new(192, 168, 0, 255)));
         assert!(!subnet.ip_in_range(Ipv4Addr::new(192, 168, 1, 100)));
         assert!(!subnet.ip_in_range(Ipv4Addr::new(192, 167, 0, 255)));
+    }
+
+    #[test]
+    fn broadcast_slash_24() {
+        let subnet = Ipv4Subnet::new(Ipv4Addr::new(192, 168, 0, 15), 24);
+        assert_eq!(subnet.broadcast(), Ipv4Addr::new(192, 168, 0, 255));
+    }
+
+    #[test]
+    fn is_assignable_host_slash_24() {
+        let subnet = Ipv4Subnet::new(Ipv4Addr::new(192, 168, 0, 15), 24);
+
+        // Normal host address is assignable.
+        assert!(subnet.is_assignable_host(Ipv4Addr::new(192, 168, 0, 100)));
+
+        // Network and broadcast addresses are not assignable.
+        assert!(!subnet.is_assignable_host(Ipv4Addr::new(192, 168, 0, 0)));
+        assert!(!subnet.is_assignable_host(Ipv4Addr::new(192, 168, 0, 255)));
+
+        // Out-of-range address is not assignable.
+        assert!(!subnet.is_assignable_host(Ipv4Addr::new(192, 168, 1, 100)));
+    }
+
+    #[test]
+    fn is_assignable_host_slash_31() {
+        let subnet = Ipv4Subnet::new(Ipv4Addr::new(192, 168, 0, 0), 31);
+
+        // Both addresses in a /31 are assignable (RFC 3021 point-to-point link).
+        assert!(subnet.is_assignable_host(Ipv4Addr::new(192, 168, 0, 0)));
+        assert!(subnet.is_assignable_host(Ipv4Addr::new(192, 168, 0, 1)));
+    }
+
+    #[test]
+    fn is_assignable_host_slash_32() {
+        let subnet = Ipv4Subnet::new(Ipv4Addr::new(192, 168, 0, 5), 32);
+
+        // The single host address in a /32 is assignable.
+        assert!(subnet.is_assignable_host(Ipv4Addr::new(192, 168, 0, 5)));
+
+        // Any other address is out of range and therefore not assignable.
+        assert!(!subnet.is_assignable_host(Ipv4Addr::new(192, 168, 0, 6)));
     }
 }
