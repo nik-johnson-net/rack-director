@@ -365,8 +365,9 @@ pending_devices
 - No schema change for NIC configuration: manual NIC→network assignment is stored on the device's
   `network_interfaces` JSON (`devices.attributes`) via two new fields per NIC — `assigned_network_id` and
   `assigned_ip` (operator-set, distinct from the DHCP-derived `network_id`/`ip_address`). These are
-  preserved across hardware re-scans; a stale assignment (network deleted or IP no longer in subnet) is
-  dropped with a `NIC_ASSIGNMENT_DROPPED` device warning (sibling of `LABEL_OVERRIDE_DROPPED`). The DHCP
+  preserved across hardware re-scans; a stale assignment (network deleted, or IP no longer an assignable
+  host in the subnet — network/broadcast addresses are not assignable) is dropped with a
+  `NIC_ASSIGNMENT_DROPPED` device warning (sibling of `LABEL_OVERRIDE_DROPPED`). The DHCP
   allocator hands a NIC its `assigned_ip` when it does DHCP. Managed via
   `PUT/DELETE /api/devices/{uuid}/nic-assignments`.
 
