@@ -17,6 +17,7 @@ rack-agent/src/
 ├── bmc.rs          # BMC detection, configuration, and management
 ├── scan.rs         # Hardware scanning (CPU, memory, disks, NICs)
 ├── partition.rs    # Disk partitioning logic
+├── wipe.rs         # Secure disk erasure (shred, ATA secure erase, nvme format)
 └── daemon.rs       # Daemon mode: poll loop and action dispatch
 ```
 
@@ -54,6 +55,7 @@ rack-agent/src/
 - CPU and memory information gathering
 - Delegates BMC scanning to `bmc.rs` module
 - `list_disk_paths()` — public helper that returns the by-path of every whole disk (used by `partition.rs` for whole-machine pre-wipe)
+- `list_wipe_targets()` — public helper that returns every whole disk as a `WipeTarget` (device node, name, detected `DiskType`), used by `wipe.rs` for the `WipeDisks` action
 
 #### `partition.rs` - Disk Partitioning
 - Multi-stage disk provisioning (optional pre-wipe all, wipe, partition, LVM, ZFS, format, **verify**)
@@ -287,7 +289,49 @@ When `true`, the agent erases partition info (`wipefs --all --force` + `sgdisk -
 
 ---
 
-### 4. Daemon
+### 4. WipeDisks
+
+**Purpose:** Securely erases every whole disk on the machine, using the method appropriate to each disk's type
+
+**CLI Usage:**
+```bash
+rack-agent --director-url http://rack-director:3000/cnc wipe-disks
+```
+
+**Kernel Cmdline Usage:**
+```
+rackdirector.url=http://rack-director:3000/cnc rackdirector.action=wipe-disks
+```
+
+**What it does:**
+1. Gets device UUID from SMBIOS
+2. Enumerates every whole disk on the machine (`scan::list_wipe_targets()` — same by-path enumeration and type detection used by `device-scan`/`partition-disks`)
+3. Erases each disk with the method hardcoded to its detected type (not configurable):
+
+| Disk Type | Method |
+|-----------|--------|
+| HDD | `shred -v -n1 <dev>` — single random-data pass |
+| SATA SSD | ATA Secure Erase via `hdparm`. Reads `hdparm -I <dev>` to check security state, then sets a user password (`hdparm --user-master u --security-set-pass p <dev>`) and erases with `--security-erase-enhanced` if the drive reports enhanced erase support, else `--security-erase` |
+| NVMe | `nvme format <dev> --ses=2 --force` (cryptographic erase) if `nvme id-ctrl <dev>`'s `fna` field has bit 2 (`0x4`) set, else `--ses=1 --force` (user data erase) |
+
+4. Reports success or failure to rack-director
+
+**SATA SSD fail-hard cases:** If `hdparm -I` reports the drive as **frozen**, or reports the ATA security feature set as **not supported**, the action fails immediately with no fallback (no blkdiscard, no shred). A frozen drive typically requires a power cycle to unfreeze; unsupported security means secure erase is not possible on that drive at all.
+
+**No verification step:** Unlike `partition-disks`, `wipe-disks` does not attempt to verify erasure by reading data back — cryptographic and enhanced erase legitimately leave non-zero data on disk (only the encryption key is destroyed), so a data readback would produce false failures. Success is solely the erase command exiting 0.
+
+**No timeout:** `shred` and ATA secure erase can run for many hours on large or slow disks. The agent runs these commands with no hard timeout and streams their stdout/stderr to the log as progress.
+
+**Implementation:** `rack-agent/src/wipe.rs::wipe_disks()`
+
+**System Dependencies:**
+- `hdparm` - ATA Secure Erase (SATA SSDs)
+- `nvme-cli` (`nvme` command) - NVMe format/crypto erase
+- `coreutils` (`shred`) - HDD single-pass overwrite
+
+---
+
+### 5. Daemon
 
 **Purpose:** Continuously polls rack-director for actions and executes them without rebooting between actions
 

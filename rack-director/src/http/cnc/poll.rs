@@ -28,6 +28,7 @@ impl From<&Action> for PollAction {
             Action::DiscoverHardware => PollAction::DiscoverHardware,
             Action::ConfigureBmc => PollAction::ConfigureBmc,
             Action::PartitionDisks => PollAction::PartitionDisks,
+            Action::WipeDisks => PollAction::WipeDisks,
             Action::RebootDevice => PollAction::RebootDevice,
             Action::InstallOs => PollAction::InstallOs,
             Action::Console => PollAction::Console,
@@ -325,6 +326,7 @@ mod tests {
             PollAction::from(&Action::PartitionDisks),
             PollAction::PartitionDisks
         );
+        assert_eq!(PollAction::from(&Action::WipeDisks), PollAction::WipeDisks);
         assert_eq!(
             PollAction::from(&Action::RebootDevice),
             PollAction::RebootDevice

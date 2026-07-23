@@ -52,7 +52,8 @@ RUN dnf --noplugins -y --setopt=reposdir=/etc/yum.repos.d --releasever ${RELEASE
   kernel kernel-devel \
   ipmitool parted util-linux \
   e2fsprogs xfsprogs dosfstools \
-  dmidecode grep gawk sed
+  dmidecode grep gawk sed \
+  hdparm nvme-cli coreutils
 
 # Copy build dependencies
 COPY docker/build-agent.sh /usr/local/bin/build-agent.sh

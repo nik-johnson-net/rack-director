@@ -37,6 +37,7 @@ pub(crate) fn action_requires_boot(action: &Action) -> bool {
         Action::DiscoverHardware
             | Action::ConfigureBmc
             | Action::PartitionDisks
+            | Action::WipeDisks
             | Action::InstallOs
             | Action::Console
     )
@@ -242,6 +243,11 @@ mod tests {
     #[test]
     fn test_action_requires_boot_partition_disks() {
         assert!(action_requires_boot(&Action::PartitionDisks));
+    }
+
+    #[test]
+    fn test_action_requires_boot_wipe_disks() {
+        assert!(action_requires_boot(&Action::WipeDisks));
     }
 
     #[test]

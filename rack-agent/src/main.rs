@@ -11,6 +11,7 @@ mod console;
 mod daemon;
 mod partition;
 mod scan;
+mod wipe;
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -20,6 +21,8 @@ enum Command {
     ConfigureBmc,
     /// Partitions disks according to the device's role disk layout.
     PartitionDisks,
+    /// Securely erase all disks on the machine.
+    WipeDisks,
     /// Continuously polls rack-director for actions and executes them without rebooting between actions.
     Daemon,
     /// Give a shell
@@ -67,6 +70,7 @@ async fn main() {
             }
             Command::ConfigureBmc => bmc::bmc_configure(&client, None).await,
             Command::PartitionDisks => partition::partition_disks(&client, None).await,
+            Command::WipeDisks => wipe::wipe_disks(&client, None).await,
             Command::Daemon => daemon::run_daemon(&client).await,
             Command::Console => start_console_command(&client).await,
         }
@@ -85,6 +89,7 @@ async fn main() {
             }
             "configure-bmc" => bmc::bmc_configure(&client, None).await,
             "partition-disks" => partition::partition_disks(&client, None).await,
+            "wipe-disks" => wipe::wipe_disks(&client, None).await,
             "daemon" => daemon::run_daemon(&client).await,
             "console" => start_console_command(&client).await,
             _ => {

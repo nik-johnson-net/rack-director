@@ -3,7 +3,7 @@ use log::{error, info, warn};
 
 use common::cnc::{CncClient, PollAction, PollResponse};
 
-use crate::{bmc, console::start_console, partition, scan};
+use crate::{bmc, console::start_console, partition, scan, wipe};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -93,6 +93,13 @@ async fn dispatch_action(
             Ok(_) => LoopControl::PollImmediately,
             Err(e) => {
                 error!("PartitionDisks failed: {e}");
+                LoopControl::SleepThenPoll
+            }
+        },
+        PollAction::WipeDisks => match wipe::wipe_disks(client, plan_id).await {
+            Ok(_) => LoopControl::PollImmediately,
+            Err(e) => {
+                error!("WipeDisks failed: {e}");
                 LoopControl::SleepThenPoll
             }
         },
@@ -202,6 +209,22 @@ mod tests {
 
         let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, "", &PollAction::PartitionDisks, None).await;
+
+        assert!(matches!(control, LoopControl::SleepThenPoll));
+    }
+
+    /// Test that `dispatch_action` returns `SleepThenPoll` when `WipeDisks`
+    /// fails (no disks/SMBIOS available in the test environment).
+    #[tokio::test]
+    async fn test_dispatch_wipe_disks_sleeps_on_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/cnc/action_failed")
+            .create_async()
+            .await;
+
+        let client = CncClient::new(&server.url());
+        let control = dispatch_action(&client, "", &PollAction::WipeDisks, None).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
     }

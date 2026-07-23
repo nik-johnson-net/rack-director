@@ -19,6 +19,7 @@ pub enum Action {
     ConfigureBmc,
     InstallOs,
     PartitionDisks,
+    WipeDisks,
     RebootDevice,
     Console,
 }
@@ -38,9 +39,10 @@ impl Action {
     /// BMC configuration, and OS installation, it returns NetBoot with appropriate kernel/initramfs.
     pub async fn to_boot_target(&self, ctx: &ActionContext<'_>) -> Result<BootTarget> {
         match self {
-            Action::DiscoverHardware | Action::ConfigureBmc | Action::PartitionDisks => {
-                generate_agent_boot_target("daemon")
-            }
+            Action::DiscoverHardware
+            | Action::ConfigureBmc
+            | Action::PartitionDisks
+            | Action::WipeDisks => generate_agent_boot_target("daemon"),
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
             Action::Console => generate_agent_boot_target("console"),
             // All other actions default to local disk boot
@@ -205,6 +207,20 @@ mod tests {
         let json = r#"{"type":"partition_disks"}"#;
         let action: Action = serde_json::from_str(json).unwrap();
         assert_eq!(action, Action::PartitionDisks);
+    }
+
+    #[test]
+    fn test_wipe_disks_serialization() {
+        let action = Action::WipeDisks;
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"type":"wipe_disks"}"#);
+    }
+
+    #[test]
+    fn test_wipe_disks_deserialization() {
+        let json = r#"{"type":"wipe_disks"}"#;
+        let action: Action = serde_json::from_str(json).unwrap();
+        assert_eq!(action, Action::WipeDisks);
     }
 
     #[test]
@@ -524,6 +540,7 @@ mod tests {
         assert!(!Action::ConfigureBmc.advance_on_boot());
         assert!(!Action::InstallOs.advance_on_boot());
         assert!(!Action::PartitionDisks.advance_on_boot());
+        assert!(!Action::WipeDisks.advance_on_boot());
     }
 
     #[tokio::test]
@@ -628,6 +645,42 @@ mod tests {
                 "Expected AgentImage for PartitionDisks, got {:?}",
                 boot_target
             ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wipe_disks_boot_target() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+
+        let device = Device {
+            id: 0,
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440021").unwrap(),
+            architecture: Architecture::X86_64,
+            lifecycle: None,
+            role_id: None,
+            platform_id: None,
+            attributes: common::device_attributes::DeviceAttributes::default(),
+            created_at: None,
+            first_seen_at: None,
+            last_seen_at: None,
+            last_polled_at: None,
+        };
+
+        let ctx = ActionContext {
+            device: &device,
+            conn: &conn,
+            director: None,
+        };
+
+        let action = Action::WipeDisks;
+        let boot_target = action.to_boot_target(&ctx).await.unwrap();
+
+        match boot_target {
+            BootTarget::AgentImage { action, cmdline } => {
+                assert_eq!(action, "daemon");
+                assert!(cmdline.contains("console=ttyS1"));
+            }
+            _ => panic!("Expected AgentImage for WipeDisks, got {:?}", boot_target),
         }
     }
 }

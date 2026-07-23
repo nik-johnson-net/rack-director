@@ -813,6 +813,35 @@ pub async fn list_disk_paths() -> Result<Vec<String>> {
     Ok(disks.into_iter().filter_map(|d| d.path).collect())
 }
 
+/// A single whole-disk target for the `WipeDisks` action.
+pub struct WipeTarget {
+    /// Canonical device node to operate on, e.g. `/dev/sda` or `/dev/nvme0n1`.
+    pub dev_node: String,
+    /// Bare device name, e.g. `sda`.
+    pub name: String,
+    pub disk_type: DiskType,
+}
+
+/// Enumerate every whole disk on the machine as a wipe target.
+///
+/// Reuses `scan_disks()`'s by-path enumeration and disk-type detection, so the
+/// same partition/removable/zero-size filtering used by `device-scan` and
+/// `list_disk_paths` applies here too. `scan_disks` already resolves each
+/// by-path symlink down to its bare device name, so `dev_node` is simply
+/// `/dev/<name>`.
+pub async fn list_wipe_targets() -> Result<Vec<WipeTarget>> {
+    let disks = scan_disks().await?;
+    Ok(disks.into_iter().map(disk_info_to_wipe_target).collect())
+}
+
+fn disk_info_to_wipe_target(disk: DiskInfo) -> WipeTarget {
+    WipeTarget {
+        dev_node: format!("/dev/{}", disk.name),
+        disk_type: disk.disk_type.unwrap_or(DiskType::Hdd),
+        name: disk.name,
+    }
+}
+
 // Parse DMI tables from sysfs (separate entry point and structures files)
 fn parse_dmi_sysfs(entry_point_data: &[u8], structures_data: &[u8]) -> Result<HardwareInfo> {
     let entry_point = dmidecode::EntryPoint::search(entry_point_data)?;
@@ -1929,5 +1958,51 @@ ID_SERIAL=SN789\n";
     fn test_read_disk_uuid_nonexistent_device() {
         let result = read_disk_uuid("no_such_device_xyzzy_9999");
         assert_eq!(result, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for disk_info_to_wipe_target
+    // -----------------------------------------------------------------------
+
+    /// Builds the /dev/<name> node and carries through the detected disk type.
+    #[test]
+    fn test_disk_info_to_wipe_target_builds_dev_node() {
+        let disk = DiskInfo {
+            name: "nvme0n1".to_string(),
+            size: Some(1000),
+            disk_type: Some(DiskType::Nvme),
+            model: None,
+            serial: None,
+            vendor: None,
+            uuid: None,
+            path: Some("/dev/disk/by-path/pci-0000:01:00.0-nvme-1".to_string()),
+        };
+
+        let target = disk_info_to_wipe_target(disk);
+
+        assert_eq!(target.dev_node, "/dev/nvme0n1");
+        assert_eq!(target.name, "nvme0n1");
+        assert_eq!(target.disk_type, DiskType::Nvme);
+    }
+
+    /// A missing disk_type (e.g. detection failure) defaults to HDD, the
+    /// safest/most conservative erase method.
+    #[test]
+    fn test_disk_info_to_wipe_target_defaults_missing_type_to_hdd() {
+        let disk = DiskInfo {
+            name: "sdz".to_string(),
+            size: None,
+            disk_type: None,
+            model: None,
+            serial: None,
+            vendor: None,
+            uuid: None,
+            path: None,
+        };
+
+        let target = disk_info_to_wipe_target(disk);
+
+        assert_eq!(target.dev_node, "/dev/sdz");
+        assert_eq!(target.disk_type, DiskType::Hdd);
     }
 }

@@ -11,6 +11,7 @@ pub enum PollAction {
     DiscoverHardware,
     ConfigureBmc,
     PartitionDisks,
+    WipeDisks,
     RebootDevice,
     InstallOs,
     Console,
