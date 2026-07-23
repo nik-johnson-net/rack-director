@@ -362,6 +362,24 @@ pending_devices
 - Made `dhcp_networks.gateway` **nullable** (table rebuilt) so a network can be defined with no default
   gateway and/or no DNS; NICs on such a network are configured with an address but no default route /
   nameserver.
+- The rebuild drops and renames `dhcp_networks`, which is the parent of `dhcp_pools`,
+  `dhcp_static_reservations`, `pending_devices` (`ON DELETE CASCADE`) and `dhcp_leases`
+  (`ON DELETE SET NULL`). `rusqlite`'s `bundled` feature compiles SQLite with
+  `SQLITE_DEFAULT_FOREIGN_KEYS=1`, so FK enforcement is ON by default on every connection —
+  without a guard, `DROP TABLE dhcp_networks` would cascade-delete/null those child rows on any
+  upgrade with existing data. `PRAGMA foreign_keys` is a no-op while a transaction is pending, and
+  `perform_migrations` (`src/database/mod.rs`) wraps every migration version in its own transaction,
+  so a bare `PRAGMA foreign_keys=OFF;` inside a migration's `.sql` file (the pattern migration 11
+  appears to use) has **no effect** — verified empirically; migration 11 only gets away with this
+  because it fully recreates every child table before dropping the old ones, so its own cascade only
+  destroys already-superseded rows. Migration 24's children are not rebuilt, so this doesn't hold.
+  The guard is now global rather than per-migration: `perform_migrations` (`src/database/mod.rs`)
+  disables `PRAGMA foreign_keys` on the raw connection, outside any transaction, for the entire span
+  of a migration run whenever any migration is pending, runs every pending version's transaction as
+  before, and then verifies integrity with `PRAGMA foreign_key_check` before restoring
+  `PRAGMA foreign_keys=ON` — any violation aborts startup with an error (naming the offending
+  table(s) and violation count) instead of silently leaving corrupt data. A normal boot already at
+  the latest version touches none of this and is a pure no-op.
 - No schema change for NIC configuration: manual NIC→network assignment is stored on the device's
   `network_interfaces` JSON (`devices.attributes`) via two new fields per NIC — `assigned_network_id` and
   `assigned_ip` (operator-set, distinct from the DHCP-derived `network_id`/`ip_address`). These are

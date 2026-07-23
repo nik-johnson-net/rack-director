@@ -5,6 +5,7 @@ use axum::{Json, body::Body, http::StatusCode, response::IntoResponse};
 use common::Ipv4SubnetError;
 use serde::Serialize;
 
+#[derive(Debug)]
 pub enum Error {
     BadRequest(String),
     #[allow(clippy::enum_variant_names)]

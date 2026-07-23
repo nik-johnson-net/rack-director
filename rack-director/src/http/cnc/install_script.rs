@@ -227,7 +227,9 @@ async fn load_stored_template(
 ///
 /// For each NIC in `interfaces`, the effective network is `assigned_network_id.or(network_id)`
 /// and the effective IP is `assigned_ip.clone().or(ip_address.clone())`. NICs without both
-/// an effective network and an effective IP are skipped.
+/// an effective network and an effective IP are skipped. NICs marked `disabled` (e.g. by
+/// duplicate-MAC detection) are always skipped, even if they still carry an effective
+/// network+IP from DHCP enrichment.
 ///
 /// The primary NIC is the one whose MAC matches the active DHCP lease (preserving pre-existing
 /// behavior). If no lease exists but at least one NIC has a configured network+IP, the first
@@ -293,13 +295,21 @@ async fn find_lease_mac(
     Ok(lease.map(|l| l.mac_address))
 }
 
-/// Build a `NicNetworkContext` for a single NIC, or return `None` if the NIC lacks
-/// both an effective network and an effective IP.
+/// Build a `NicNetworkContext` for a single NIC, or return `None` if the NIC is
+/// disabled (e.g. duplicate-MAC detection) or lacks both an effective network
+/// and an effective IP.
 async fn build_nic_context(
     conn: &database::Connection,
     iface: &common::device_attributes::NetworkInterface,
     lease_mac: &Option<String>,
 ) -> Result<Option<templates::NicNetworkContext>, Error> {
+    // Disabled NICs (e.g. duplicate MAC on the network) may still carry a
+    // DHCP-derived network_id/ip_address from enrichment — they must never be
+    // emitted into the install script or selected as primary.
+    if iface.disabled {
+        return Ok(None);
+    }
+
     let effective_network_id = iface.assigned_network_id.or(iface.network_id);
     let effective_ip = iface
         .assigned_ip
@@ -672,6 +682,99 @@ mod tests {
 
         assert_eq!(nics.len(), 1, "NIC without effective IP must be skipped");
         assert_eq!(nics[0].mac_address, mac_with_ip);
+    }
+
+    /// Verifies that a NIC marked `disabled` (e.g. by duplicate-MAC detection) is excluded
+    /// from `nic_contexts` even though it still carries an effective network+IP from DHCP
+    /// enrichment, and that it is never selected as primary.
+    #[tokio::test]
+    async fn test_build_network_contexts_skips_disabled_nic() {
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
+
+        let uuid = test_uuid();
+        let mac = "aa:bb:cc:dd:ee:ff";
+
+        Director::new(&conn)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // NIC has a fully populated effective network+IP (as if enriched from a DHCP lease
+        // before duplicate-MAC detection ran), but is disabled due to a duplicate MAC.
+        let iface = common::device_attributes::NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: mac.to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            network_id: Some(network_id),
+            assigned_network_id: None,
+            assigned_ip: None,
+            speed_mbps: Some(1000),
+            disabled: true,
+            warning_label: Some("Duplicate MAC on Test Network".to_string()),
+        };
+
+        // No DHCP lease exists and the only NIC is disabled — no usable NIC remains.
+        let result = build_network_contexts(&conn, &uuid, &[iface]).await;
+        match result {
+            Err(Error::NotFound(msg)) => {
+                assert!(msg.contains("no DHCP lease"), "unexpected message: {}", msg);
+            }
+            Ok(_) => panic!("Expected NotFound error but got Ok"),
+            Err(_) => panic!("Expected NotFound error but got a different Error variant"),
+        }
+    }
+
+    /// Verifies that when one NIC is disabled and another is usable, the disabled NIC is
+    /// excluded from `nic_contexts` and the usable NIC is promoted to primary instead.
+    #[tokio::test]
+    async fn test_build_network_contexts_disabled_nic_not_selected_as_primary() {
+        let conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
+
+        let uuid = test_uuid();
+        let disabled_mac = "aa:bb:cc:dd:ee:01";
+        let usable_mac = "aa:bb:cc:dd:ee:02";
+
+        Director::new(&conn)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let disabled_iface = common::device_attributes::NetworkInterface {
+            interface_name: "eth0".to_string(),
+            mac_address: disabled_mac.to_string(),
+            ip_address: Some("10.0.0.100".to_string()),
+            network_id: Some(network_id),
+            assigned_network_id: None,
+            assigned_ip: None,
+            speed_mbps: Some(1000),
+            disabled: true,
+            warning_label: Some("Duplicate MAC on Test Network".to_string()),
+        };
+        let usable_iface = common::device_attributes::NetworkInterface {
+            interface_name: "eth1".to_string(),
+            mac_address: usable_mac.to_string(),
+            ip_address: None,
+            network_id: None,
+            assigned_network_id: Some(network_id),
+            assigned_ip: Some("10.0.0.50".to_string()),
+            speed_mbps: Some(1000),
+            disabled: false,
+            warning_label: None,
+        };
+
+        let (network_info, nics) =
+            match build_network_contexts(&conn, &uuid, &[disabled_iface, usable_iface]).await {
+                Ok(v) => v,
+                Err(_) => panic!("Expected Ok from build_network_contexts"),
+            };
+
+        assert_eq!(nics.len(), 1, "disabled NIC must be excluded");
+        assert_eq!(nics[0].mac_address, usable_mac);
+        assert!(nics[0].is_primary);
+        assert_eq!(network_info.mac_address, usable_mac);
+        assert_eq!(network_info.ip_address, "10.0.0.50");
     }
 
     #[tokio::test]

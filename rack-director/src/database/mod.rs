@@ -197,22 +197,89 @@ async fn get_or_init_current_migration(conn: &mut Connection) -> Result<usize> {
     }
 }
 
+/// Applies any pending SQL migrations to `conn`, bringing it from `current_version` up to
+/// `LATEST_VERSION`.
+///
+/// Some migrations rebuild a table that other tables reference via a foreign key with a
+/// cascading action (`ON DELETE CASCADE` / `ON DELETE SET NULL`) — for example, migration 24
+/// drops and recreates `dhcp_networks`, whose children (`dhcp_pools`, `dhcp_leases`, etc.) are
+/// not themselves rebuilt. SQLite's `DROP TABLE` performs an implicit `DELETE FROM` on the
+/// dropped table when foreign key enforcement is active, which would fire those cascading
+/// actions against live child rows. To guard against this, whenever any migration is pending
+/// this function disables foreign key enforcement for the entire span of the migration run
+/// (not just around the offending version), then verifies referential integrity afterward with
+/// `PRAGMA foreign_key_check` before restoring enforcement — any violation is treated as a hard
+/// failure rather than silently handed back to the caller.
+///
+/// IMPORTANT: `PRAGMA foreign_keys` is a documented no-op while a transaction is pending
+/// (see <https://www.sqlite.org/pragma.html#pragma_foreign_keys>), and every migration version
+/// runs inside its own explicit transaction (see below). A bare `PRAGMA foreign_keys=OFF;`
+/// placed inside a migration's own `.sql` file would therefore be silently ignored — the toggle
+/// must happen here, on the raw `conn`, strictly outside of any transaction.
+///
+/// When no migrations are pending (the common case on every normal boot once the schema is
+/// current), this function is a pure no-op: it touches no pragmas and issues no queries.
 async fn perform_migrations(conn: &mut Connection, current_version: usize) -> Result<()> {
+    if current_version >= LATEST_VERSION {
+        return Ok(());
+    }
+
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").await?;
+
     let mut version = current_version;
     while version < LATEST_VERSION {
         version += 1;
 
         let tx = conn.transaction().await?;
-
-        if let Err(e) = perform_migration(&tx, version).await {
-            tx.rollback().await?;
-            return Err(e);
+        let result = perform_migration(&tx, version).await;
+        match result {
+            Ok(()) => tx.commit().await?,
+            Err(e) => {
+                tx.rollback().await?;
+                // Intentionally leave foreign_keys=OFF here rather than attempting to
+                // restore it: a failed migration aborts the startup sequence, and the
+                // connection is not expected to be reused by the caller. Attempting a
+                // "best effort" restore would risk masking the real error with a second
+                // failure from this same pragma call.
+                return Err(e);
+            }
         }
-
-        tx.commit().await?;
     }
 
+    check_foreign_keys(conn).await?;
+
+    conn.execute_batch("PRAGMA foreign_keys=ON;").await?;
+
     Ok(())
+}
+
+/// Runs `PRAGMA foreign_key_check` on `conn` and fails if it reports any violations.
+///
+/// This is the integrity check that backstops disabling foreign key enforcement across a
+/// migration run: it must be run after all pending migrations have committed and before
+/// enforcement is restored, so that any child rows left dangling by a table rebuild are caught
+/// immediately rather than persisting silently. `foreign_key_check` works regardless of whether
+/// `PRAGMA foreign_keys` is currently on or off.
+async fn check_foreign_keys(conn: &Connection) -> Result<()> {
+    let violations: Vec<String> = conn
+        .query("PRAGMA foreign_key_check;", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    let mut tables: Vec<String> = violations.clone();
+    tables.sort();
+    tables.dedup();
+
+    anyhow::bail!(
+        "migrations completed but left {} foreign-key violation(s) in table(s): {}",
+        violations.len(),
+        tables.join(", ")
+    );
 }
 
 async fn perform_migration(conn: &Connection, version: usize) -> Result<()> {
@@ -612,5 +679,230 @@ mod tests {
         assert_eq!(disks[0]["label"], serde_json::json!("ROOT"));
         assert_eq!(disks[1]["size_gb"], serde_json::json!(2000));
         assert_eq!(disks[1]["label"], serde_json::json!("DATA1"));
+    }
+
+    /// Migration 24 rebuilds `dhcp_networks` (CREATE new table, INSERT-SELECT,
+    /// `DROP TABLE dhcp_networks`, `ALTER TABLE ... RENAME`) to make `gateway`
+    /// nullable. `dhcp_pools`, `dhcp_static_reservations`, and `pending_devices`
+    /// reference it with `ON DELETE CASCADE`; `dhcp_leases` with `ON DELETE SET
+    /// NULL`. Unlike migration 11, migration 24 does not rebuild those child
+    /// tables — they stay live across the rebuild.
+    ///
+    /// This upgrades a database (bootstrapped through migration 23, i.e. an
+    /// existing-install scenario, not a fresh install) with a network that has one
+    /// row in every dependent table, runs migration 24 through the real
+    /// `run_migrations` harness, and verifies none of those rows were deleted or
+    /// nulled out by an implicit foreign key cascade during the `DROP TABLE`.
+    #[tokio::test]
+    async fn test_migration_24_preserves_dhcp_child_rows() {
+        let conn = Connection::open(test_database_path!()).await.unwrap();
+
+        // Bootstrap to migration 23 (existing-install state, just before the
+        // dhcp_networks rebuild).
+        conn.execute_batch(
+            "CREATE TABLE migrations (version INTEGER);
+             INSERT INTO migrations (version) VALUES (0)",
+        )
+        .await
+        .unwrap();
+
+        for version in 1..=23 {
+            conn.execute_batch(MIGRATIONS[version - 1]).await.unwrap();
+            if let Some(hook) = POST_MIGRATION_HOOKS[version - 1] {
+                hook(&conn).await.unwrap();
+            }
+            conn.execute("UPDATE migrations SET version = ?1", [version])
+                .await
+                .unwrap();
+        }
+
+        // One network, plus one row in every table that references it.
+        conn.execute(
+            "INSERT INTO dhcp_networks (id, name, subnet, gateway, dns_servers)
+             VALUES (1, 'test-net', '10.0.0.0/24', '10.0.0.1', '[]')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
+             VALUES (1, 'pool1', '10.0.0.100', '10.0.0.200')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO dhcp_static_reservations (network_id, mac_address, ip_address, hostname)
+             VALUES (1, 'aa:bb:cc:dd:ee:ff', '10.0.0.50', 'host1')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO pending_devices (mac_address, network_id) VALUES ('11:22:33:44:55:66', 1)",
+            [],
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO dhcp_leases (mac_address, ip_address, lease_start, lease_end, state, network_id)
+             VALUES ('22:33:44:55:66:77', '10.0.0.60', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'active', 1)",
+            [],
+        )
+        .await
+        .unwrap();
+
+        // Run the remaining migrations (24 included) through the real harness —
+        // this is what exercises the global foreign-key-off migration guard.
+        let factory = test_connection_factory!();
+        run_migrations(&factory).await.unwrap();
+
+        // Read back via the original connection (shared in-memory DB).
+        let pool_count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM dhcp_pools WHERE network_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pool_count, 1, "dhcp_pools row must survive migration 24");
+
+        let reservation_count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM dhcp_static_reservations WHERE network_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reservation_count, 1,
+            "dhcp_static_reservations row must survive migration 24"
+        );
+
+        let pending_count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM pending_devices WHERE network_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_count, 1,
+            "pending_devices row must survive migration 24"
+        );
+
+        let lease_network_id: Option<i64> = conn
+            .query_one(
+                "SELECT network_id FROM dhcp_leases WHERE mac_address = '22:33:44:55:66:77'",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            lease_network_id,
+            Some(1),
+            "dhcp_leases.network_id must not be nulled by migration 24"
+        );
+
+        // The network row itself must survive with its data intact.
+        let network_name: String = conn
+            .query_one("SELECT name FROM dhcp_networks WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .await
+            .unwrap();
+        assert_eq!(network_name, "test-net");
+    }
+
+    /// `check_foreign_keys` must pass silently on a freshly migrated database, and must
+    /// fail loudly (naming the offending table and violation count) when a real dangling
+    /// foreign key reference is present. The orphan row here simulates what a buggy
+    /// migration could leave behind: it can only be inserted because enforcement is
+    /// (deliberately) off, exactly as it is for the duration of a real migration run.
+    #[tokio::test]
+    async fn test_check_foreign_keys_detects_violations() {
+        let factory = test_connection_factory!();
+        let conn = run_migrations(&factory).await.unwrap();
+
+        // A freshly migrated database must have no violations.
+        check_foreign_keys(&conn).await.unwrap();
+
+        // `run_migrations` must leave enforcement restored to on.
+        let fk_enabled: i64 = conn
+            .query_one("PRAGMA foreign_keys;", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            fk_enabled, 1,
+            "foreign key enforcement must be on after run_migrations"
+        );
+
+        // Disable enforcement so an orphan row can be inserted without SQLite rejecting
+        // the INSERT outright, then verify check_foreign_keys catches it.
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO dhcp_pools (network_id, name, range_start, range_end)
+             VALUES (9999, 'orphan-pool', '10.0.0.100', '10.0.0.200')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let err = check_foreign_keys(&conn).await.unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains('1'),
+            "error message must include the violation count: {message}"
+        );
+        assert!(
+            message.contains("dhcp_pools"),
+            "error message must name the offending table: {message}"
+        );
+
+        // Restore enforcement so the connection is left in a normal state, matching
+        // what perform_migrations does on the success path.
+        conn.execute_batch("PRAGMA foreign_keys=ON;").await.unwrap();
+    }
+
+    /// When the database is already at `LATEST_VERSION`, `perform_migrations` must be a
+    /// pure no-op: no migration is re-applied, the version is unchanged, and foreign key
+    /// enforcement — never having been touched — remains on throughout.
+    #[tokio::test]
+    async fn test_perform_migrations_noop_when_up_to_date() {
+        let factory = test_connection_factory!();
+        let mut conn = run_migrations(&factory).await.unwrap();
+
+        let version_before: usize = conn
+            .query_one("SELECT version FROM migrations", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(version_before, LATEST_VERSION);
+
+        perform_migrations(&mut conn, version_before).await.unwrap();
+
+        let version_after: usize = conn
+            .query_one("SELECT version FROM migrations", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            version_after, LATEST_VERSION,
+            "no-op run must not change the migration version"
+        );
+
+        let fk_enabled: i64 = conn
+            .query_one("PRAGMA foreign_keys;", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(fk_enabled, 1, "foreign key enforcement must remain on");
     }
 }
