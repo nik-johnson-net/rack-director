@@ -159,6 +159,19 @@ pub struct NetworkInterface {
     /// Warning message explaining why interface is disabled
     #[serde(default)]
     pub warning_label: Option<String>,
+
+    /// Operator-assigned network (manual config). Distinct from the DHCP-derived `network_id`.
+    ///
+    /// When set, this takes precedence over `network_id` for provisioning purposes,
+    /// allowing static addressing on networks that have no DHCP lease for this NIC.
+    #[serde(default)]
+    pub assigned_network_id: Option<i64>,
+
+    /// Operator-assigned IP address, validated to be within `assigned_network_id`'s subnet.
+    ///
+    /// When set, this takes precedence over `ip_address` for provisioning purposes.
+    #[serde(default)]
+    pub assigned_ip: Option<String>,
 }
 
 /// Baseboard Management Controller (BMC) information
@@ -328,6 +341,8 @@ mod tests {
                 speed_mbps: Some(10000),
                 disabled: false,
                 warning_label: None,
+                assigned_network_id: None,
+                assigned_ip: None,
             }],
             ..Default::default()
         };
@@ -445,6 +460,32 @@ mod tests {
         assert!(iface.speed_mbps.is_none());
         assert!(!iface.disabled);
         assert!(iface.warning_label.is_none());
+        // New fields default to None so old DB rows deserialize correctly
+        assert!(iface.assigned_network_id.is_none());
+        assert!(iface.assigned_ip.is_none());
+    }
+
+    #[test]
+    fn test_network_interface_backward_compat_without_new_fields() {
+        // Simulate a DB row written before assigned_network_id / assigned_ip were added.
+        // The #[serde(default)] annotation must make these fields deserialize to None.
+        let old_json = json!({
+            "interface_name": "eth0",
+            "mac_address": "aa:bb:cc:dd:ee:ff",
+            "ip_address": "10.0.0.100",
+            "network_id": 1,
+            "speed_mbps": 10000,
+            "disabled": false
+        });
+
+        let iface: NetworkInterface = serde_json::from_value(old_json).unwrap();
+
+        assert_eq!(iface.interface_name, "eth0");
+        assert_eq!(iface.ip_address, Some("10.0.0.100".to_string()));
+        assert_eq!(iface.network_id, Some(1));
+        // New fields must default to None even when absent from the JSON
+        assert!(iface.assigned_network_id.is_none());
+        assert!(iface.assigned_ip.is_none());
     }
 
     #[test]
@@ -815,6 +856,8 @@ mod tests {
             speed_mbps: Some(10000),
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         };
 
         // Serialize and verify JSON format
@@ -839,6 +882,8 @@ mod tests {
             speed_mbps: None,
             disabled: false,
             warning_label: None,
+            assigned_network_id: None,
+            assigned_ip: None,
         };
 
         // Serialize and verify JSON format

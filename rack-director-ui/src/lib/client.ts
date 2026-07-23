@@ -42,8 +42,11 @@ export type NetworkInterface = {
   mac_address: string;
   ip_address?: string;
   network_id?: number;
+  speed_mbps?: number;
   disabled?: boolean;
   warning_label?: string;
+  assigned_network_id?: number | null;
+  assigned_ip?: string | null;
 }
 
 export type BmcInfo = {
@@ -120,7 +123,7 @@ export type DhcpNetwork = {
   id: number;
   name: string;
   subnet: string;
-  gateway: string;
+  gateway?: string | null;
   dns_servers: string[];
   lease_duration: number;
   relay_agent_address?: string;
@@ -152,7 +155,7 @@ export type StaticReservation = {
 export type CreateDhcpNetworkRequest = {
   name: string;
   subnet: string;
-  gateway: string;
+  gateway?: string | null;
   dns_servers: string[];
   lease_duration: number;
   relay_agent_address?: string;
@@ -162,7 +165,7 @@ export type CreateDhcpNetworkRequest = {
 export type UpdateDhcpNetworkRequest = {
   name?: string;
   subnet?: string;
-  gateway?: string;
+  gateway?: string | null;
   dns_servers?: string[];
   lease_duration?: number;
   relay_agent_address?: string;
@@ -1042,6 +1045,41 @@ export async function deleteDeviceLabelOverride(uuid: string, label: string): Pr
   if (!response.ok) {
     console.error('Error removing label override:', response.statusText);
     throw new Error('Failed to remove label override');
+  }
+}
+
+// NIC Network Assignment API
+
+export type NicAssignmentRequest = {
+  mac_address: string;
+  network_id: number | null;
+  ip: string | null;
+}
+
+export async function setNicAssignment(uuid: string, body: NicAssignmentRequest): Promise<void> {
+  const response = await fetch(`/api/devices/${uuid}/nic-assignments`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    // Surface 422 validation messages to the caller
+    const errorData = await response.json().catch(() => null);
+    if (errorData && errorData.error) {
+      throw new Error(errorData.error);
+    }
+    console.error('Error setting NIC assignment:', response.statusText);
+    throw new Error('Failed to set NIC assignment');
+  }
+}
+
+export async function clearNicAssignment(uuid: string, mac: string): Promise<void> {
+  const response = await fetch(`/api/devices/${uuid}/nic-assignments/${encodeURIComponent(mac)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    console.error('Error clearing NIC assignment:', response.statusText);
+    throw new Error('Failed to clear NIC assignment');
   }
 }
 

@@ -34,7 +34,7 @@ export default function NetworkNew() {
       const network = await createNetwork({
         name,
         subnet,
-        gateway,
+        gateway: gateway.trim() || null,
         dns_servers: dnsArray,
         lease_duration: parseInt(leaseDuration),
         relay_agent_address: relayAgent || undefined,
@@ -126,15 +126,14 @@ export default function NetworkNew() {
                 htmlFor="gateway"
                 className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
               >
-                Gateway <span className="text-status-broken">*</span>
+                Gateway
               </label>
               <input
                 id="gateway"
                 type="text"
                 value={gateway}
                 onChange={(e) => { setGateway(e.target.value); clearFieldError("gateway"); }}
-                placeholder="e.g., 192.168.1.1"
-                required
+                placeholder="e.g., 192.168.1.1 (optional)"
                 aria-invalid={!!getError("gateway")}
                 className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
               />
@@ -168,19 +167,18 @@ export default function NetworkNew() {
                 htmlFor="dnsServers"
                 className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
               >
-                DNS Servers <span className="text-status-broken">*</span>
+                DNS Servers
               </label>
               <input
                 id="dnsServers"
                 type="text"
                 value={dnsServers}
                 onChange={(e) => { setDnsServers(e.target.value); clearFieldError("dns_servers"); }}
-                placeholder="e.g., 8.8.8.8, 8.8.4.4"
-                required
+                placeholder="e.g., 8.8.8.8, 8.8.4.4 (optional)"
                 aria-invalid={!!getError("dns_servers")}
                 className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
               />
-              <p className="text-xs text-text-muted mt-1">Enter multiple DNS servers separated by commas</p>
+              <p className="text-xs text-text-muted mt-1">Enter multiple DNS servers separated by commas. Leave empty for no DNS.</p>
               <FormFieldError error={getError("dns_servers")} />
             </div>
 

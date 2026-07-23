@@ -679,6 +679,9 @@ async fn perform_scan_and_upload(
                         speed_mbps: nic.speed_mbps,
                         disabled: false,
                         warning_label: None,
+                        // The agent never assigns these; they are set by the operator via rack-director.
+                        assigned_network_id: None,
+                        assigned_ip: None,
                     })
                     .collect();
             } else {

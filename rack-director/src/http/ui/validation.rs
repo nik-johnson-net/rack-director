@@ -74,14 +74,7 @@ pub fn validate_ipv4_list(ips: &[String], field_name: &str, min_count: usize) ->
 ///
 /// Returns `Some(error_message)` when the format is invalid, `None` when valid.
 pub fn validate_mac_address(mac: &str) -> Option<String> {
-    let octets: Vec<&str> = mac.split(':').collect();
-    if octets.len() != 6 {
-        return Some("MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string());
-    }
-    let all_valid = octets
-        .iter()
-        .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit()));
-    if all_valid {
+    if common::is_valid_mac(mac) {
         None
     } else {
         Some("MAC address must be in the format XX:XX:XX:XX:XX:XX".to_string())
@@ -215,22 +208,24 @@ pub async fn validate_create_network_request(
         }
     }
 
-    // Validate subnet and gateway together
+    // Validate subnet and (optional) gateway together
     match validate_cidr_subnet(&req.subnet) {
         Err(err) => {
             errors.add_if_err("subnet", Some(err));
         }
         Ok(subnet) => {
-            // Only validate gateway in subnet if subnet is valid
-            errors.add_if_err("gateway", validate_ipv4_address(&req.gateway));
-            errors.add_if_err("gateway", validate_ip_in_subnet(&req.gateway, &subnet));
+            // Only validate gateway when it is provided
+            if let Some(ref gw) = req.gateway {
+                errors.add_if_err("gateway", validate_ipv4_address(gw));
+                errors.add_if_err("gateway", validate_ip_in_subnet(gw, &subnet));
+            }
         }
     }
 
-    // Validate DNS servers using generic list validator
+    // Validate DNS servers using generic list validator (min 0 — empty list is allowed)
     errors.add_if_err(
         "dns_servers",
-        validate_ipv4_list(&req.dns_servers, "DNS server", 1),
+        validate_ipv4_list(&req.dns_servers, "DNS server", 0),
     );
 
     // Validate lease duration using generic range validator
@@ -308,7 +303,7 @@ pub async fn validate_update_network_request(
         }
     }
 
-    // Validate subnet and gateway together if either is provided
+    // Validate subnet and (optional) gateway together if either is provided
     if req.subnet.is_some() || req.gateway.is_some() {
         // Get the current network to fill in missing values
         let current_network = match dhcp::store::get_network(conn, network_id).await {
@@ -320,24 +315,33 @@ pub async fn validate_update_network_request(
         };
 
         let subnet_str = req.subnet.as_deref().unwrap_or(&current_network.subnet);
-        let gateway_str = req.gateway.as_deref().unwrap_or(&current_network.gateway);
+
+        // Determine the effective gateway: request value, then existing value, then None.
+        // When a new subnet is given we still validate the effective gateway against it.
+        let effective_gateway: Option<&str> = req
+            .gateway
+            .as_deref()
+            .or(current_network.gateway.as_deref());
 
         match validate_cidr_subnet(subnet_str) {
             Err(err) => {
                 errors.add_if_err("subnet", Some(err));
             }
             Ok(subnet) => {
-                errors.add_if_err("gateway", validate_ipv4_address(gateway_str));
-                errors.add_if_err("gateway", validate_ip_in_subnet(gateway_str, &subnet));
+                // Only validate the gateway when one is present (new or existing)
+                if let Some(gw) = effective_gateway {
+                    errors.add_if_err("gateway", validate_ipv4_address(gw));
+                    errors.add_if_err("gateway", validate_ip_in_subnet(gw, &subnet));
+                }
             }
         }
     }
 
-    // Validate DNS servers if provided
+    // Validate DNS servers if provided (min 0 — empty list is allowed)
     if let Some(ref dns_servers) = req.dns_servers {
         errors.add_if_err(
             "dns_servers",
-            validate_ipv4_list(dns_servers, "DNS server", 1),
+            validate_ipv4_list(dns_servers, "DNS server", 0),
         );
     }
 
@@ -444,6 +448,15 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_mac_address() {
+        assert!(validate_mac_address("aa:bb:cc:dd:ee:ff").is_none());
+        assert!(validate_mac_address("AA:BB:CC:DD:EE:FF").is_none());
+        assert!(validate_mac_address("aa:bb:cc:dd:ee").is_some());
+        assert!(validate_mac_address("aa:bb:cc:dd:ee:gg").is_some());
+        assert!(validate_mac_address("not-a-mac").is_some());
+    }
+
+    #[test]
     fn test_validate_u32_range() {
         assert!(validate_u32_range(50, 1, 100, "Value").is_none());
         assert!(validate_u32_range(0, 1, 100, "Value").is_some());
@@ -471,8 +484,25 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Test Network".to_string(),
             subnet: "192.168.1.0/24".to_string(),
-            gateway: "192.168.1.1".to_string(),
+            gateway: Some("192.168.1.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
+            lease_duration: 86400,
+            relay_agent_address: Some("10.0.0.2".to_string()),
+            enable_autodiscovery: false,
+        };
+
+        assert!(validate_create_network_request(&conn, &req).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_create_network_request_no_gateway_no_dns() {
+        // A network with no gateway and empty DNS list must be accepted.
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let req = CreateNetworkRequest {
+            name: "Isolated Network".to_string(),
+            subnet: "192.168.1.0/24".to_string(),
+            gateway: None,
+            dns_servers: vec![],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
@@ -487,7 +517,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "".to_string(),
             subnet: "192.168.1.0/24".to_string(),
-            gateway: "192.168.1.1".to_string(),
+            gateway: Some("192.168.1.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
@@ -509,7 +539,7 @@ mod tests {
             &conn,
             "Existing Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -522,7 +552,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Existing Network".to_string(),
             subnet: "192.168.2.0/24".to_string(),
-            gateway: "192.168.2.1".to_string(),
+            gateway: Some("192.168.2.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.3".to_string()),
@@ -545,7 +575,7 @@ mod tests {
             &conn,
             "Network 1",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -558,7 +588,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Network 2".to_string(),
             subnet: "192.168.2.0/24".to_string(),
-            gateway: "192.168.2.1".to_string(),
+            gateway: Some("192.168.2.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
@@ -586,7 +616,7 @@ mod tests {
             &conn,
             "Local Network",
             "10.0.0.0/24",
-            "10.0.0.1",
+            Some("10.0.0.1"),
             &["8.8.8.8".to_string()],
             86400,
             None,
@@ -599,7 +629,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Another Local Network".to_string(),
             subnet: "192.168.2.0/24".to_string(),
-            gateway: "192.168.2.1".to_string(),
+            gateway: Some("192.168.2.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: None,
@@ -624,7 +654,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "invalid".to_string(),
-            gateway: "192.168.1.1".to_string(),
+            gateway: Some("192.168.1.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
@@ -643,7 +673,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
-            gateway: "10.0.0.1".to_string(),
+            gateway: Some("10.0.0.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
@@ -658,21 +688,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_create_network_request_no_dns() {
+        // Empty dns_servers is now valid — min count changed from 1 to 0.
         let conn = create_test_store(Arc::new(test_connection_factory!())).await;
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
-            gateway: "192.168.1.1".to_string(),
+            gateway: Some("192.168.1.1".to_string()),
             dns_servers: vec![],
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
         };
 
-        let result = validate_create_network_request(&conn, &req).await;
-        assert!(result.is_err());
-        let errors = result.unwrap_err();
-        assert!(errors.contains_key("dns_servers"));
+        assert!(validate_create_network_request(&conn, &req).await.is_ok());
     }
 
     #[tokio::test]
@@ -681,7 +709,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
-            gateway: "192.168.1.1".to_string(),
+            gateway: Some("192.168.1.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 0,
             relay_agent_address: Some("10.0.0.2".to_string()),
@@ -700,7 +728,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "Test".to_string(),
             subnet: "192.168.1.0/24".to_string(),
-            gateway: "192.168.1.1".to_string(),
+            gateway: Some("192.168.1.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string()],
             lease_duration: 86400,
             relay_agent_address: Some("invalid".to_string()),
@@ -719,7 +747,7 @@ mod tests {
         let req = CreateNetworkRequest {
             name: "".to_string(),
             subnet: "invalid".to_string(),
-            gateway: "10.0.0.1".to_string(),
+            gateway: Some("10.0.0.1".to_string()),
             dns_servers: vec![],
             lease_duration: 0,
             relay_agent_address: None,
@@ -731,7 +759,7 @@ mod tests {
         let errors = result.unwrap_err();
         assert!(errors.contains_key("name"));
         assert!(errors.contains_key("subnet"));
-        assert!(errors.contains_key("dns_servers"));
+        // dns_servers is now allowed to be empty, so no error expected there
         assert!(errors.contains_key("lease_duration"));
     }
 
@@ -746,7 +774,7 @@ mod tests {
             &conn,
             "Original Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -781,7 +809,7 @@ mod tests {
             &conn,
             "Network 1",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -794,7 +822,7 @@ mod tests {
             &conn,
             "Network 2",
             "192.168.2.0/24",
-            "192.168.2.1",
+            Some("192.168.2.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.3"),
@@ -833,7 +861,7 @@ mod tests {
             &conn,
             "Test Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -869,7 +897,7 @@ mod tests {
             &conn,
             "Network 1",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -882,7 +910,7 @@ mod tests {
             &conn,
             "Network 2",
             "192.168.2.0/24",
-            "192.168.2.1",
+            Some("192.168.2.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.3"),
@@ -917,7 +945,7 @@ mod tests {
             &conn,
             "Test Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -953,7 +981,7 @@ mod tests {
             &conn,
             "Test Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),
@@ -988,7 +1016,7 @@ mod tests {
             &conn,
             "Test Network",
             "192.168.1.0/24",
-            "192.168.1.1",
+            Some("192.168.1.1"),
             &["8.8.8.8".to_string()],
             86400,
             Some("10.0.0.2"),

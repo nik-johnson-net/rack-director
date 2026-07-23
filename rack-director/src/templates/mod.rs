@@ -4,15 +4,45 @@ use handlebars::Handlebars;
 use serde_json::json;
 use uuid::Uuid;
 
-/// Network information for a device
+/// Network information for a device (primary NIC, for backward-compatible single-value template fields).
 #[derive(Debug, Clone)]
 pub struct NetworkInfo {
     pub mac_address: String,
     pub ip_address: String,
-    pub gateway: String,
+    /// Gateway for the primary NIC's network. `None` when the network has no gateway configured.
+    pub gateway: Option<String>,
     pub dns_servers: Vec<String>,
     pub netmask: String,
     pub prefix_length: u8,
+}
+
+/// Per-NIC network configuration context for install-script templates.
+///
+/// One entry is emitted for every NIC that has an effective network and IP.
+/// The "effective" values give operator-assigned config precedence over DHCP-derived info.
+///
+/// Available in templates as `{{#each device.network_interfaces}}`:
+/// - `{{ this.interface_name }}` — interface name (e.g. `eth0`)
+/// - `{{ this.mac_address }}` — NIC MAC address
+/// - `{{ this.ip_address }}` — effective IP
+/// - `{{ this.netmask }}` — netmask of the NIC's network
+/// - `{{ this.prefix_length }}` — prefix length of the NIC's network
+/// - `{{ this.gateway }}` — network gateway; absent when the network has no gateway — guard with `{{#if this.gateway}}`
+/// - `{{ this.dns_servers }}` — comma-separated DNS servers; empty when none — guard with `{{#if this.dns_servers}}`
+/// - `{{ this.is_primary }}` — `true` for the primary NIC (DHCP-lease NIC or first configured)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NicNetworkContext {
+    pub interface_name: String,
+    pub mac_address: String,
+    pub ip_address: String,
+    pub netmask: String,
+    pub prefix_length: u8,
+    /// `None` when the NIC's network has no gateway configured.
+    pub gateway: Option<String>,
+    /// Comma-separated DNS servers; empty string when the network has no DNS configured.
+    pub dns_servers: String,
+    /// `true` for the primary NIC (the DHCP-lease NIC if any, else the first configured NIC).
+    pub is_primary: bool,
 }
 
 /// Device attributes for template rendering
@@ -142,6 +172,14 @@ pub fn build_disk_layout_context(
 ///
 /// Similar to `render_install_script` but takes OS name/version as strings
 /// and template variables for the config context.
+///
+/// The `network` parameter describes the primary NIC and populates the legacy
+/// single-value `device.*` fields for backward compatibility.  The `nics` slice
+/// contains one entry per NIC with an effective network/IP and is exposed as
+/// `device.network_interfaces` for multi-NIC templates.
+///
+/// For the legacy `device.gateway` field, an empty string is emitted when the
+/// primary NIC's network has no gateway (so existing templates don't print "null").
 #[allow(clippy::too_many_arguments)]
 pub fn render_install_script_osm(
     template: &str,
@@ -152,6 +190,7 @@ pub fn render_install_script_osm(
     os_name: &str,
     os_version: &str,
     network: &NetworkInfo,
+    nics: &[NicNetworkContext],
     disk_layout: &DiskLayout,
     root_url: &str,
 ) -> Result<String> {
@@ -179,20 +218,26 @@ pub fn render_install_script_osm(
     let is_uefi = device.boot_mode == Some(common::FirmwareMode::Uefi);
     let is_bios = device.boot_mode == Some(common::FirmwareMode::Bios);
 
+    // Legacy `device.gateway` emits an empty string when the network has no gateway so that
+    // existing templates referencing `{{ device.gateway }}` don't render "null".
+    let legacy_gateway = network.gateway.clone().unwrap_or_default();
+    let dns_csv = network.dns_servers.join(",");
+
     let context = json!({
         "device": {
             "uuid": device.uuid.to_string(),
             "hostname": device.hostname.as_deref().unwrap_or("unknown"),
             "mac_address": network.mac_address,
             "ip_address": network.ip_address,
-            "gateway": network.gateway,
-            "dns_servers": network.dns_servers.join(","),
-            "dns_servers_csv": network.dns_servers.join(","),
+            "gateway": legacy_gateway,
+            "dns_servers": dns_csv,
+            "dns_servers_csv": dns_csv,
             "netmask": network.netmask,
             "prefix_length": network.prefix_length,
             "boot_mode": boot_mode_str,
             "is_uefi": is_uefi,
             "is_bios": is_bios,
+            "network_interfaces": nics,
         },
         "role": {
             "name": role_name,
@@ -251,10 +296,29 @@ mod tests {
         NetworkInfo {
             mac_address: "00:11:22:33:44:55".to_string(),
             ip_address: "10.0.0.100".to_string(),
-            gateway: "10.0.0.1".to_string(),
+            gateway: Some("10.0.0.1".to_string()),
             dns_servers: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             netmask: "255.255.255.0".to_string(),
             prefix_length: 24,
+        }
+    }
+
+    fn make_nic(
+        mac: &str,
+        ip: &str,
+        gateway: Option<&str>,
+        dns: &str,
+        primary: bool,
+    ) -> NicNetworkContext {
+        NicNetworkContext {
+            interface_name: "eth0".to_string(),
+            mac_address: mac.to_string(),
+            ip_address: ip.to_string(),
+            netmask: "255.255.255.0".to_string(),
+            prefix_length: 24,
+            gateway: gateway.map(|s| s.to_string()),
+            dns_servers: dns.to_string(),
+            is_primary: primary,
         }
     }
 
@@ -593,11 +657,157 @@ mod tests {
             "Ubuntu",
             "22.04",
             &make_network(),
+            &[],
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
         )
         .unwrap();
         assert_eq!(result, "hostname: server01\nos: Ubuntu 22.04");
+    }
+
+    /// Verifies that the legacy single-value `device.gateway` field emits an empty string
+    /// when the primary NIC's network has no gateway (so templates don't render "null").
+    #[test]
+    fn test_render_legacy_gateway_none_emits_empty_string() {
+        let template = "gateway={{ device.gateway }}";
+        let mut network = make_network();
+        network.gateway = None;
+        let result = render_install_script_osm(
+            template,
+            &make_device(),
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Linux",
+            "1.0",
+            &network,
+            &[],
+            &empty_disk_layout(),
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+        assert_eq!(result, "gateway=");
+    }
+
+    /// Verifies that `device.network_interfaces` is accessible in templates and that
+    /// per-NIC gateway/DNS fields render correctly, including the case where a NIC
+    /// has no gateway (the `{{#if this.gateway}}` guard prevents output).
+    #[test]
+    fn test_render_network_interfaces_loop() {
+        let template = concat!(
+            "{{#each device.network_interfaces}}",
+            "{{this.mac_address}}:{{this.ip_address}}",
+            "{{#if this.gateway}}:gw={{this.gateway}}{{/if}}",
+            "{{#if this.dns_servers}}:dns={{this.dns_servers}}{{/if}}",
+            "{{#if this.is_primary}}:PRIMARY{{/if}}",
+            "\n",
+            "{{/each}}"
+        );
+
+        let nics = vec![
+            // Primary NIC with gateway and DNS
+            make_nic(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.100",
+                Some("10.0.0.1"),
+                "8.8.8.8",
+                true,
+            ),
+            // Secondary NIC — different gateway
+            NicNetworkContext {
+                interface_name: "eth1".to_string(),
+                mac_address: "aa:bb:cc:dd:ee:02".to_string(),
+                ip_address: "192.168.1.50".to_string(),
+                netmask: "255.255.255.0".to_string(),
+                prefix_length: 24,
+                gateway: Some("192.168.1.1".to_string()),
+                dns_servers: String::new(),
+                is_primary: false,
+            },
+            // Third NIC — no gateway, no DNS
+            make_nic("aa:bb:cc:dd:ee:03", "172.16.0.10", None, "", false),
+        ];
+
+        let result = render_install_script_osm(
+            template,
+            &make_device(),
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Linux",
+            "1.0",
+            &make_network(),
+            &nics,
+            &empty_disk_layout(),
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+
+        let lines: Vec<&str> = result.lines().collect();
+        // Primary NIC has gateway and is_primary marker
+        assert!(
+            lines[0].contains("aa:bb:cc:dd:ee:01:10.0.0.100:gw=10.0.0.1:dns=8.8.8.8:PRIMARY"),
+            "Primary NIC line unexpected: {:?}",
+            lines[0]
+        );
+        // Secondary NIC has its own gateway, no DNS, no PRIMARY marker
+        assert!(
+            lines[1].contains("aa:bb:cc:dd:ee:02:192.168.1.50:gw=192.168.1.1"),
+            "Secondary NIC line unexpected: {:?}",
+            lines[1]
+        );
+        assert!(
+            !lines[1].contains("PRIMARY"),
+            "Secondary NIC must not have PRIMARY marker"
+        );
+        // Third NIC — no gateway, no DNS emitted
+        assert!(
+            lines[2].contains("aa:bb:cc:dd:ee:03:172.16.0.10"),
+            "Third NIC line unexpected: {:?}",
+            lines[2]
+        );
+        assert!(!lines[2].contains("gw="), "Third NIC must not emit gateway");
+        assert!(!lines[2].contains("dns="), "Third NIC must not emit dns");
+    }
+
+    /// Verifies that the legacy single-value fields resolve to the primary NIC even
+    /// when multiple NICs are present.
+    #[test]
+    fn test_render_legacy_fields_resolve_to_primary() {
+        let template =
+            "ip={{ device.ip_address }} gw={{ device.gateway }} mac={{ device.mac_address }}";
+        let nics = vec![
+            make_nic(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.100",
+                Some("10.0.0.1"),
+                "8.8.8.8",
+                true,
+            ),
+            make_nic(
+                "aa:bb:cc:dd:ee:02",
+                "192.168.1.50",
+                Some("192.168.1.1"),
+                "",
+                false,
+            ),
+        ];
+        let result = render_install_script_osm(
+            template,
+            &make_device(),
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Linux",
+            "1.0",
+            &make_network(),
+            &nics,
+            &empty_disk_layout(),
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+        // Legacy fields must come from `network` (the primary NetworkInfo), not the nics slice
+        assert_eq!(result, "ip=10.0.0.100 gw=10.0.0.1 mac=00:11:22:33:44:55");
     }
 
     /// Verifies that the CentOS 10 kickstart template renders correctly for a
@@ -685,6 +895,13 @@ mod tests {
             boot_mode: Some(common::FirmwareMode::Bios),
         };
 
+        let primary_nic = make_nic(
+            "00:11:22:33:44:55",
+            "10.0.0.100",
+            Some("10.0.0.1"),
+            "8.8.8.8",
+            true,
+        );
         let result = render_install_script_osm(
             &template,
             &device,
@@ -694,6 +911,7 @@ mod tests {
             "CentOS",
             "10",
             &make_network(),
+            &[primary_nic],
             &disk_layout,
             "http://127.0.0.1:3000",
         )

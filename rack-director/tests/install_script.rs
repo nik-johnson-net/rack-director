@@ -251,6 +251,43 @@ async fn assign_role(http_port: u16, device_uuid: &Uuid, role_id: i64) -> Result
     Ok(())
 }
 
+/// Format a 6-byte MAC as a lowercase colon-separated string (e.g. `52:54:00:c0:01:03`).
+fn format_mac(mac: [u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+/// Submit a minimal hardware scan for the device via `POST /cnc/update_attributes`,
+/// reporting a single NIC with the given MAC.
+///
+/// This mirrors the real provisioning flow: a device that reaches `install_os` has
+/// already submitted a hardware scan, so its `network_interfaces` are populated and
+/// then enriched with the DHCP lease's network/IP. `install_script` builds its
+/// network context from those interfaces, so the scan must precede the fetch — a
+/// device known only from a DHCP lease has no scanned NICs and yields a 404.
+async fn submit_nic_scan(http_port: u16, device_uuid: &Uuid, mac: [u8; 6]) -> Result<()> {
+    reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/cnc/update_attributes",
+            http_port
+        ))
+        .json(&json!({
+            "uuid": device_uuid,
+            "attributes": {
+                "network_interfaces": [{
+                    "interface_name": "eth0",
+                    "mac_address": format_mac(mac),
+                }]
+            }
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 /// Fetch the rendered install script for a device. Asserts HTTP 200.
 async fn get_install_script(http_port: u16, device_uuid: &Uuid) -> Result<String> {
     let response = reqwest::Client::new()
@@ -289,6 +326,10 @@ async fn run_install_script_test(
     disk_layout: serde_json::Value,
 ) -> Result<String> {
     common::register_test_device(http_port, dhcp_port, mac, device_uuid).await?;
+
+    // A real device submits a hardware scan before install_os; install_script builds
+    // its network context from the scanned (and DHCP-enriched) NICs, not the lease alone.
+    submit_nic_scan(http_port, &device_uuid, mac).await?;
 
     setup_os_with_osm(
         http_port,

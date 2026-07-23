@@ -16,8 +16,10 @@ clearpart --none
 {{#if device.is_bios}}zerombr
 {{/if}}ignoredisk --only-use={{#each partitions}}{{this.disk}}{{#unless @last}},{{/unless}}{{/each}}
 
-# Network
-network --bootproto=static --ip={{ device.ip_address }} --netmask={{ device.netmask }} --gateway={{ device.gateway }} --nameserver={{ device.dns_servers_csv }} --hostname={{ device.hostname }} --device={{ device.mac_address }}
+# Network — one directive per assigned NIC.
+# Gateway and nameserver are omitted when the network has none configured.
+{{#each device.network_interfaces}}network --bootproto=static --device={{this.mac_address}} --ip={{this.ip_address}} --netmask={{this.netmask}}{{#if this.gateway}} --gateway={{this.gateway}}{{/if}}{{#if this.dns_servers}} --nameserver={{this.dns_servers}}{{/if}}{{#if this.is_primary}} --hostname={{../device.hostname}}{{/if}} --activate
+{{/each}}
 
 # Every partition on the target disk, declared with --onpart --noformat.
 # Anaconda requires ALL partitions to be declared; omitting any causes the

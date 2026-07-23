@@ -113,7 +113,7 @@ mod tests {
             id: 1,
             name: "test".to_string(),
             subnet: subnet.to_string(),
-            gateway: "127.0.0.1".to_string(),
+            gateway: Some("127.0.0.1".to_string()),
             dns_servers: vec![],
             lease_duration: 3600,
             relay_agent_address: None,
