@@ -9,6 +9,7 @@ use crate::console::start_console_command;
 mod bmc;
 mod console;
 mod daemon;
+mod lvm;
 mod partition;
 mod scan;
 mod wipe;

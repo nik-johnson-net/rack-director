@@ -223,6 +223,22 @@ mod tests {
         assert_eq!(action, Action::WipeDisks);
     }
 
+    /// Compile-time guard ensuring [`test_all_action_variants_serialize`] covers
+    /// every `Action` variant. Adding a new variant to `Action` without adding
+    /// it here (and to the `actions` array below) fails to compile, since this
+    /// match has no wildcard arm.
+    fn assert_variant_covered(action: &Action) {
+        match action {
+            Action::DiscoverHardware
+            | Action::ConfigureBmc
+            | Action::InstallOs
+            | Action::PartitionDisks
+            | Action::WipeDisks
+            | Action::RebootDevice
+            | Action::Console => {}
+        }
+    }
+
     #[test]
     fn test_all_action_variants_serialize() {
         // Ensure all variants can be serialized without panic
@@ -231,13 +247,30 @@ mod tests {
             Action::ConfigureBmc,
             Action::InstallOs,
             Action::PartitionDisks,
+            Action::WipeDisks,
             Action::RebootDevice,
+            Action::Console,
         ];
 
-        for action in actions {
-            let json = serde_json::to_string(&action).unwrap();
+        for action in &actions {
+            assert_variant_covered(action);
+            let json = serde_json::to_string(action).unwrap();
             assert!(json.contains(r#"{"type":"#));
         }
+    }
+
+    #[test]
+    fn test_console_serialization() {
+        let action = Action::Console;
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"type":"console"}"#);
+    }
+
+    #[test]
+    fn test_console_deserialization() {
+        let json = r#"{"type":"console"}"#;
+        let action: Action = serde_json::from_str(json).unwrap();
+        assert_eq!(action, Action::Console);
     }
 
     #[test]
