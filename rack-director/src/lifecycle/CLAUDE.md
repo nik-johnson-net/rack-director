@@ -44,8 +44,8 @@ Actions are atomic operations that devices execute during lifecycle transitions.
 |-----------------|------------|----------|---------|
 | **Discover** | new | unprovisioned | discover_hardware, configure_bmc |
 | **Provision** | unprovisioned | provisioned | partition_disks, install_os |
-| **Deprovision** | provisioned | unprovisioned | backup_data, remove_software, factory_reset |
-| **Remove** | unprovisioned | removed | secure_wipe, inventory_removal |
+| **Deprovision** | provisioned | unprovisioned | wipe_disks |
+| **Remove** | unprovisioned | removed | wipe_disks |
 | **Repair** | broken | unprovisioned | run_diagnostics, repair_issues, verify_functionality |
 
 ## Action Details

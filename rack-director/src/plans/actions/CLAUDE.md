@@ -217,14 +217,44 @@ cmdline: <merged-cmdline>
 
 ---
 
+### wipe_disks
+
+**Purpose:** Securely erase ALL whole disks on the machine for reuse or removal
+
+**Lifecycle:** Deprovision transition (provisioned → unprovisioned) and Remove transition (unprovisioned → removed)
+
+**Agent Command:** `wipe-disks`
+
+**What it does:**
+- Enumerates every whole disk on the machine
+- Branches erase strategy per disk type:
+  - **HDD:** `shred -v -n1` (single-pass overwrite)
+  - **SATA SSD:** ATA Secure Erase (enhanced erase preferred when the drive supports it)
+  - **NVMe:** `nvme format` with crypto erase preferred (falls back to user-data erase if unsupported)
+- Reports success/failure to rack-director
+
+**Implementation:** `rack-agent/src/wipe.rs` (agent-side; not part of this crate)
+
+**Configuration:** None
+
+**Boot Target:** NetBoot with rack-agent image (daemon mode)
+```
+cmdline: rackdirector.url=http://<server>/cnc rackdirector.action=daemon
+```
+
+**Failure Handling:** Like all agent-reported actions, any failure (e.g. a disk that
+does not support secure erase, or an I/O error mid-wipe) is reported via
+`/cnc/action_failed`, which moves the device to the `Broken` lifecycle state —
+no special-casing is needed beyond the existing `mark_action_failed` path.
+
+---
+
 ### Planned Actions
 
 | Action | Lifecycle | Purpose |
 |--------|-----------|---------|
 | `backup_data` | Deprovision | Back up user data before deprovisioning |
 | `remove_software` | Deprovision | Remove installed software |
-| `factory_reset` | Deprovision | Reset device to factory state |
-| `secure_wipe` | Remove | Securely wipe all data |
 | `inventory_removal` | Remove | Remove device from active inventory |
 | `run_diagnostics` | Repair | Run hardware diagnostics on broken devices |
 | `repair_issues` | Repair | Attempt to repair known issues |

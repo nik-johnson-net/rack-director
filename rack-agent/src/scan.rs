@@ -813,6 +813,94 @@ pub async fn list_disk_paths() -> Result<Vec<String>> {
     Ok(disks.into_iter().filter_map(|d| d.path).collect())
 }
 
+/// A single whole-disk target for the `WipeDisks` action.
+#[derive(Debug)]
+pub struct WipeTarget {
+    /// Canonical device node to operate on, e.g. `/dev/sda` or `/dev/nvme0n1`.
+    pub dev_node: String,
+    /// Bare device name, e.g. `sda`.
+    pub name: String,
+    pub disk_type: DiskType,
+}
+
+/// Enumerate every whole disk on the machine as a wipe target.
+///
+/// Reuses `scan_disks()`'s by-path enumeration and disk-type detection, so the
+/// same partition/removable/zero-size filtering used by `device-scan` and
+/// `list_disk_paths` applies here too. `scan_disks` already resolves each
+/// by-path symlink down to its bare device name, so `dev_node` is simply
+/// `/dev/<name>`.
+pub async fn list_wipe_targets() -> Result<Vec<WipeTarget>> {
+    let disks = scan_disks().await?;
+    Ok(disks.into_iter().map(disk_info_to_wipe_target).collect())
+}
+
+fn disk_info_to_wipe_target(disk: DiskInfo) -> WipeTarget {
+    WipeTarget {
+        dev_node: format!("/dev/{}", disk.name),
+        disk_type: disk.disk_type.unwrap_or(DiskType::Hdd),
+        name: disk.name,
+    }
+}
+
+const SYS_BLOCK_DIR: &str = "/sys/block";
+
+/// Enumerate the names of every non-virtual whole block device under `/sys/block`.
+///
+/// This is a cheap cross-check for `list_wipe_targets()`'s by-path
+/// enumeration, which can silently omit real disks: e.g. systemd >= 254 does
+/// not create `/dev/disk/by-path/` symlinks for `mmcblk*` devices
+/// (see systemd issue #28671), so onboard eMMC would otherwise go unwiped
+/// with no error. Deliberately does not read any other disk metadata — this
+/// is a name-only existence check, not a second full scan.
+///
+/// Virtual aggregate devices (`md*` software RAID, `dm-*` device-mapper,
+/// `nbd*` network block devices) are excluded, since their member disks are
+/// separately enumerated and would otherwise be double-counted or wrongly
+/// treated as unwiped real disks — see `is_virtual_block_device_name`.
+pub async fn list_real_block_device_names() -> Result<Vec<String>> {
+    scan_real_block_device_names(std::path::Path::new(SYS_BLOCK_DIR)).await
+}
+
+/// Excludes loopback (`loop*`), RAM disks (`ram*`, `zram*`), device-mapper
+/// (`dm-*`), SCSI generic/optical (`sr*`), software RAID (`md*`), and network
+/// block (`nbd*`) devices by name. These are all virtual aggregates or
+/// non-disk block devices: `md*` and `dm-*` in particular do not correspond
+/// to a physical disk at all — they are assembled from member disks (e.g.
+/// mdraid components, LVM PVs) that appear separately in `/sys/block` and are
+/// enumerated as their own wipe targets. A previous OS's mdraid array can be
+/// auto-assembled by the agent's own initramfs before this scan runs, so
+/// `md*` must be excluded here or a healthy decommission would be wrongly
+/// flagged as having missed a disk.
+async fn scan_real_block_device_names(sys_block_dir: &std::path::Path) -> Result<Vec<String>> {
+    if !sys_block_dir.exists() {
+        warn!(
+            "{} not found, skipping block device cross-check",
+            sys_block_dir.display()
+        );
+        return Ok(Vec::new());
+    }
+
+    let mut names = Vec::new();
+    let mut entries = tokio::fs::read_dir(sys_block_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_virtual_block_device_name(&name) {
+            debug!("Skipping virtual block device: {}", name);
+            continue;
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
+fn is_virtual_block_device_name(name: &str) -> bool {
+    const VIRTUAL_PREFIXES: &[&str] = &["loop", "ram", "zram", "dm-", "sr", "md", "nbd"];
+    VIRTUAL_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
 // Parse DMI tables from sysfs (separate entry point and structures files)
 fn parse_dmi_sysfs(entry_point_data: &[u8], structures_data: &[u8]) -> Result<HardwareInfo> {
     let entry_point = dmidecode::EntryPoint::search(entry_point_data)?;
@@ -1929,5 +2017,109 @@ ID_SERIAL=SN789\n";
     fn test_read_disk_uuid_nonexistent_device() {
         let result = read_disk_uuid("no_such_device_xyzzy_9999");
         assert_eq!(result, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for disk_info_to_wipe_target
+    // -----------------------------------------------------------------------
+
+    /// Builds the /dev/<name> node and carries through the detected disk type.
+    #[test]
+    fn test_disk_info_to_wipe_target_builds_dev_node() {
+        let disk = DiskInfo {
+            name: "nvme0n1".to_string(),
+            size: Some(1000),
+            disk_type: Some(DiskType::Nvme),
+            model: None,
+            serial: None,
+            vendor: None,
+            uuid: None,
+            path: Some("/dev/disk/by-path/pci-0000:01:00.0-nvme-1".to_string()),
+        };
+
+        let target = disk_info_to_wipe_target(disk);
+
+        assert_eq!(target.dev_node, "/dev/nvme0n1");
+        assert_eq!(target.name, "nvme0n1");
+        assert_eq!(target.disk_type, DiskType::Nvme);
+    }
+
+    /// A missing disk_type (e.g. detection failure) defaults to HDD, the
+    /// safest/most conservative erase method.
+    #[test]
+    fn test_disk_info_to_wipe_target_defaults_missing_type_to_hdd() {
+        let disk = DiskInfo {
+            name: "sdz".to_string(),
+            size: None,
+            disk_type: None,
+            model: None,
+            serial: None,
+            vendor: None,
+            uuid: None,
+            path: None,
+        };
+
+        let target = disk_info_to_wipe_target(disk);
+
+        assert_eq!(target.dev_node, "/dev/sdz");
+        assert_eq!(target.disk_type, DiskType::Hdd);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for is_virtual_block_device_name / scan_real_block_device_names
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_virtual_block_device_name_excludes_known_virtual_prefixes() {
+        for name in [
+            "loop0", "ram0", "zram0", "dm-0", "sr0", "md0", "md127", "nbd0",
+        ] {
+            assert!(
+                is_virtual_block_device_name(name),
+                "{} should be classified as virtual",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_virtual_block_device_name_keeps_real_disks() {
+        for name in ["sda", "nvme0n1", "mmcblk0", "vda"] {
+            assert!(
+                !is_virtual_block_device_name(name),
+                "{} should be classified as real",
+                name
+            );
+        }
+    }
+
+    /// Real whole disks are returned; loop/ram/zram/dm-/sr/md/nbd entries are filtered out.
+    #[tokio::test]
+    async fn test_scan_real_block_device_names_filters_virtual_devices() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        for name in [
+            "sda", "nvme0n1", "mmcblk0", "loop0", "dm-0", "sr0", "ram0", "zram0", "md0", "md127",
+            "nbd0",
+        ] {
+            fs::create_dir_all(temp_dir.path().join(name)).expect("Failed to create block dir");
+        }
+
+        let mut names = scan_real_block_device_names(temp_dir.path())
+            .await
+            .expect("scan should succeed");
+        names.sort();
+
+        assert_eq!(names, vec!["mmcblk0", "nvme0n1", "sda"]);
+    }
+
+    /// A missing /sys/block returns an empty list rather than an error.
+    #[tokio::test]
+    async fn test_scan_real_block_device_names_missing_directory() {
+        let names =
+            scan_real_block_device_names(std::path::Path::new("/nonexistent/sys-block-test-path"))
+                .await
+                .expect("missing directory should not error");
+
+        assert!(names.is_empty());
     }
 }

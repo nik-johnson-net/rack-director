@@ -16,7 +16,9 @@ rack-agent/src/
 ├── client.rs       # HTTP client for rack-director communication
 ├── bmc.rs          # BMC detection, configuration, and management
 ├── scan.rs         # Hardware scanning (CPU, memory, disks, NICs)
+├── lvm.rs          # Shared LVM/dm cleanup (remove_lvm_on_disks), used by partition.rs and wipe.rs
 ├── partition.rs    # Disk partitioning logic
+├── wipe.rs         # Secure disk erasure (shred, ATA secure erase, nvme format)
 └── daemon.rs       # Daemon mode: poll loop and action dispatch
 ```
 
@@ -54,6 +56,12 @@ rack-agent/src/
 - CPU and memory information gathering
 - Delegates BMC scanning to `bmc.rs` module
 - `list_disk_paths()` — public helper that returns the by-path of every whole disk (used by `partition.rs` for whole-machine pre-wipe)
+- `list_wipe_targets()` — public helper that returns every whole disk as a `WipeTarget` (device node, name, detected `DiskType`), used by `wipe.rs` for the `WipeDisks` action
+- `list_real_block_device_names()` — public helper that lists every non-virtual device name under `/sys/block` (excludes `loop*`/`ram*`/`zram*`/`dm-*`/`sr*`/`md*`/`nbd*`); used by `wipe.rs` as a cross-check against `list_wipe_targets()`'s by-path enumeration, which can silently miss real disks that lack a by-path symlink (e.g. `mmcblk*` on systemd >= 254, systemd issue #28671). `md*`/`dm-*` are excluded because they are virtual aggregates whose member disks are enumerated separately (relevant when a previous OS's mdraid array gets auto-assembled by the agent's own initramfs)
+
+#### `lvm.rs` - LVM/dm Cleanup
+- `remove_lvm_on_disks(disk_paths: &[String])` — best-effort: deactivates and removes LVM volume groups whose PVs reside on the given disks (`vgchange -an` + `vgremove --force`), so residual LVM/dm state doesn't hold a disk busy for a subsequent erase or partition operation. An empty slice means "every VG on the system" (used for whole-machine operations). Every failure (the `pvs` query itself, or an individual `vgchange`/`vgremove`) is logged as a warning and does not stop the cleanup.
+- Shared by `partition.rs` (step 0 of `apply_disk_layout`, scoped to the layout's disks, or system-wide when `wipe_all_disks` is set) and `wipe.rs` (step 0 of `wipe_disks`, always system-wide, since `wipe_disks` always targets every whole disk on the machine)
 
 #### `partition.rs` - Disk Partitioning
 - Multi-stage disk provisioning (optional pre-wipe all, wipe, partition, LVM, ZFS, format, **verify**)
@@ -67,6 +75,7 @@ rack-agent/src/
 - SATA and NVMe partition path generation
 - Post-apply verification via `sfdisk --json` and `vgs --noheadings`
 - Optional whole-machine pre-wipe via `DiskLayout.wipe_all_disks`
+- Step 0 of `apply_disk_layout` calls `lvm::remove_lvm_on_disks()` before any wiping happens
 
 ## Supported Commands
 
@@ -287,7 +296,63 @@ When `true`, the agent erases partition info (`wipefs --all --force` + `sgdisk -
 
 ---
 
-### 4. Daemon
+### 4. WipeDisks
+
+**Purpose:** Securely erases every whole disk on the machine, using the method appropriate to each disk's type
+
+**CLI Usage:**
+```bash
+rack-agent --director-url http://rack-director:3000/cnc wipe-disks
+```
+
+**Kernel Cmdline Usage:**
+```
+rackdirector.url=http://rack-director:3000/cnc rackdirector.action=wipe-disks
+```
+
+**What it does:**
+1. Gets device UUID from SMBIOS
+2. Enumerates every whole disk on the machine (`scan::list_wipe_targets()` — same by-path enumeration and type detection used by `device-scan`/`partition-disks`), then validates that enumeration against reality (see **Fail-on-incomplete-enumeration guard** below)
+3. Deactivates any LVM volume groups on the machine (`lvm::remove_lvm_on_disks(&[])`, system-wide — see **LVM/dm cleanup** below)
+4. Erases every disk **concurrently**, each with the method hardcoded to its detected type (not configurable):
+
+| Disk Type | Method |
+|-----------|--------|
+| HDD | `shred -v -n1 <dev>` — single random-data pass |
+| SATA SSD | ATA Secure Erase via `hdparm`. Reads `hdparm -I <dev>` to check security state, then sets a user password (`hdparm --user-master u --security-set-pass p <dev>`) and erases with `--security-erase-enhanced` if the drive reports enhanced erase support, else `--security-erase` |
+| NVMe | `nvme format <dev> --ses=2 --force` (cryptographic erase) if `nvme id-ctrl <dev>`'s `fna` field has bit 2 (`0x4`) set, else `--ses=1 --force` (user data erase) |
+
+5. Reports success or failure to rack-director
+
+**LVM/dm cleanup:** Before erasing, the agent deactivates and removes every LVM volume group on the machine via the shared `lvm::remove_lvm_on_disks()` helper (`vgchange -an` + `vgremove --force`, best-effort). This exists because `nvme format` reliably refuses with "Device or resource busy" when a namespace has an open handle (mount, LVM, or swap), and `hdparm --security-erase` similarly misbehaves with active dm holders — and per `lvmautoactivation(7)`, transient `lvm2-pvscan@X:Y.service` units spawned by the `69-dm-lvm.rules` udev rule can re-activate a VG on disk rescan even with `lvm2-monitor`/`lvm-activate-boot` masked. Cleanup failures are logged as warnings and do not block the wipe from proceeding — the erase commands themselves will surface a clear busy/failure error if stale LVM state actually blocks them.
+
+**Fail-on-incomplete-enumeration guard:** `wipe_disks` never reports success having wiped fewer disks than actually exist. It fails immediately, before touching any disk, if:
+- `scan::list_wipe_targets()` (by-path enumeration) returns **zero** disks, or
+- a cross-check against `scan::list_real_block_device_names()` (`/sys/block`, excluding `loop*`/`ram*`/`zram*`/`dm-*`/`sr*`/`md*`/`nbd*`) finds a real whole disk that by-path enumeration missed
+
+The second case matters because `/dev/disk/by-path/` symlinks are not guaranteed for every device — e.g. systemd >= 254 does not create them for `mmcblk*` (onboard eMMC), so that disk would otherwise be silently skipped (systemd issue #28671). The error names every missing device. `md*` (software RAID) and `nbd*` (network block devices) are excluded because they are virtual aggregates, not physical disks: their member disks are enumerated separately under `/sys/block`. This matters on decommissioned machines whose previous OS used mdraid — the agent's own initramfs can auto-assemble the array (the same class of udev auto-activation that motivates the LVM cleanup above), which would otherwise make the guard mistake the resulting `md0`/`md127` for an unwiped real disk and abort a healthy wipe.
+
+**Concurrent, all-attempted wiping:** All target disks are wiped concurrently (`tokio::task::JoinSet`) rather than sequentially — they are independent block devices with no shared kernel state between their `shred`/`hdparm`/`nvme` invocations, so this avoids an ~Nx slowdown on a chassis with many bays. A failure on one disk does not stop the others: every disk is attempted, and only after all have finished does the action fail, with an aggregate error naming every disk that failed and why. This matters because each erase pass can take hours — leaving unattempted disks after an early failure would mean a retry restarts work that didn't need to be redone. Log lines from the long-running erase commands are tagged with the device node so they stay attributable when multiple disks' output interleaves.
+
+**SATA SSD fail-hard cases:** If `hdparm -I` reports the drive as **frozen**, or reports the ATA security feature set as **not supported**, the action fails immediately with no fallback (no blkdiscard, no shred). A frozen drive typically requires a power cycle to unfreeze; unsupported security means secure erase is not possible on that drive at all.
+
+**SATA SSD erase-failure cleanup:** If the `--security-erase`/`--security-erase-enhanced` command fails *after* the user password has already been set, the drive would be left **LOCKED** on next power cycle (per kernel.org's ATA Secure Erase documentation) unless the password is disabled again. On erase failure, the agent makes a best-effort `hdparm --user-master u --security-disable p <dev>` call before returning. If the disable also fails, both errors are logged, but the action always fails with the **original erase error** — the disable outcome never masks it and never turns a failure into a success.
+
+**No verification step:** Unlike `partition-disks`, `wipe-disks` does not attempt to verify erasure by reading data back — cryptographic and enhanced erase legitimately leave non-zero data on disk (only the encryption key is destroyed), so a data readback would produce false failures. Success is solely the erase command exiting 0.
+
+**No timeout:** `shred` and ATA secure erase can run for many hours on large or slow disks. The agent runs these commands with no hard timeout and streams their stdout/stderr to the log as progress. (`kill_on_drop` is set on the child process purely as insurance against an orphaned process if the future is ever dropped before completion — it introduces no wall-clock or idle-output timeout.)
+
+**Implementation:** `rack-agent/src/wipe.rs::wipe_disks()`
+
+**System Dependencies:**
+- `hdparm` - ATA Secure Erase (SATA SSDs)
+- `nvme-cli` (`nvme` command) - NVMe format/crypto erase
+- `coreutils` (`shred`) - HDD single-pass overwrite
+- `lvm2` (`pvs`, `vgchange`, `vgremove`) - LVM/dm cleanup before erase
+
+---
+
+### 5. Daemon
 
 **Purpose:** Continuously polls rack-director for actions and executes them without rebooting between actions
 

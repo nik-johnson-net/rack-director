@@ -3,7 +3,7 @@ use log::{error, info, warn};
 
 use common::cnc::{CncClient, PollAction, PollResponse};
 
-use crate::{bmc, console::start_console, partition, scan};
+use crate::{bmc, console::start_console, partition, scan, wipe};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -96,6 +96,13 @@ async fn dispatch_action(
                 LoopControl::SleepThenPoll
             }
         },
+        PollAction::WipeDisks => match wipe::wipe_disks(client, plan_id).await {
+            Ok(_) => LoopControl::PollImmediately,
+            Err(e) => {
+                error!("WipeDisks failed: {e}");
+                LoopControl::SleepThenPoll
+            }
+        },
         PollAction::RebootDevice | PollAction::InstallOs => {
             info!("Action {:?} requires reboot — exiting daemon", action);
             // EXIT WITHOUT calling action_success. This is intentional — do not
@@ -169,22 +176,18 @@ mod tests {
         assert!(matches!(control, LoopControl::Exit));
     }
 
-    /// Test that `dispatch_action` returns `SleepThenPoll` when `DiscoverHardware`
-    /// fails (no SMBIOS tables available in the test environment).
+    /// Test that `dispatch_action` maps a `DiscoverHardware` failure to
+    /// `SleepThenPoll`, preventing a tight busy-loop on error.
     ///
-    /// This prevents a tight busy-loop when the handler fails before calling
-    /// `action_failed` — sleeping allows time for transient issues to resolve.
+    /// In the test environment there are no SMBIOS tables, so `device_scan`
+    /// bails out at UUID resolution (`scan::read_dmi`) before it ever makes an
+    /// HTTP call — this only exercises the error-to-`LoopControl` mapping, not
+    /// whether the failure is reported to rack-director via `action_failed`.
+    /// No mock server is needed: `CncClient::new` doesn't connect on
+    /// construction, and this path never issues a request.
     #[tokio::test]
-    async fn test_dispatch_discover_hardware_sleeps_on_error() {
-        let mut server = mockito::Server::new_async().await;
-        // The scan will fail (no SMBIOS in test env); dispatch_action must return
-        // SleepThenPoll to avoid a tight error loop.
-        let _mock = server
-            .mock("POST", "/cnc/action_failed")
-            .create_async()
-            .await;
-
-        let client = CncClient::new(&server.url());
+    async fn test_dispatch_discover_hardware_maps_early_uuid_failure_to_sleep() {
+        let client = CncClient::new("http://127.0.0.1:0");
         let control = dispatch_action(&client, "", &PollAction::DiscoverHardware, None).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
@@ -202,6 +205,22 @@ mod tests {
 
         let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, "", &PollAction::PartitionDisks, None).await;
+
+        assert!(matches!(control, LoopControl::SleepThenPoll));
+    }
+
+    /// Test that `dispatch_action` maps a `WipeDisks` failure to `SleepThenPoll`.
+    ///
+    /// In the test environment there are no SMBIOS tables, so `wipe_disks` bails
+    /// out at `scan::read_dmi_for_uuid()` before it ever makes an HTTP call —
+    /// this only exercises the error-to-`LoopControl` mapping, not whether the
+    /// failure is reported to rack-director via `action_failed`. No mock server
+    /// is needed: `CncClient::new` doesn't connect on construction, and this
+    /// path never issues a request.
+    #[tokio::test]
+    async fn test_dispatch_wipe_disks_maps_early_uuid_failure_to_sleep() {
+        let client = CncClient::new("http://127.0.0.1:0");
+        let control = dispatch_action(&client, "", &PollAction::WipeDisks, None).await;
 
         assert!(matches!(control, LoopControl::SleepThenPoll));
     }
