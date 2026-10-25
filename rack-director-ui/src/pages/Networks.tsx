@@ -92,7 +92,7 @@ function Networks() {
         <table className="w-full border-collapse">
           <thead>
             <tr className="bg-bg-raised">
-              {(["Name", "Subnet", "Gateway", "DNS", "Autodiscovery", "Pools", ""] as const).map(
+              {(["Name", "Subnet", "Gateway", "Domain", "DNS", "Autodiscovery", "Pools", ""] as const).map(
                 (col, i) => (
                   <th
                     key={i}
@@ -107,7 +107,7 @@ function Networks() {
           <tbody>
             {networks.length === 0 ? (
               <tr>
-                <td colSpan={7}>
+                <td colSpan={8}>
                   <EmptyState
                     icon={Network}
                     title="No networks defined"
@@ -140,6 +140,11 @@ function Networks() {
                     {/* Gateway */}
                     <td className="px-3 py-2 text-xs font-mono text-text-secondary">
                       {network.gateway}
+                    </td>
+
+                    {/* Domain */}
+                    <td className="px-3 py-2 text-xs font-mono text-text-secondary">
+                      {network.domain_name || <span className="text-text-muted">—</span>}
                     </td>
 
                     {/* DNS */}

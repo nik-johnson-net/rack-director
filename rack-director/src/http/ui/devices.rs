@@ -741,6 +741,131 @@ async fn post_device_plan(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// Platform assignment handlers
+
+async fn assign_platform(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<AssignPlatformRequest>,
+) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
+    // Verify platform exists
+    crate::platforms::store::get(&conn, req.platform_id).await?;
+
+    // Verify device exists
+    director.get_device(&uuid).await?;
+
+    director
+        .assign_platform_to_device(&uuid, req.platform_id)
+        .await?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn get_device_platform(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Option<Platform>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
+    // Get platform ID from device
+    let platform_id = director.get_device_platform_id(&uuid).await?;
+
+    // If device has a platform, fetch full platform details
+    if let Some(id) = platform_id {
+        let platform = crate::platforms::store::get(&conn, id).await?;
+        Ok(Json(Some(platform)))
+    } else {
+        Ok(Json(None))
+    }
+}
+
+// Role assignment handlers
+
+async fn assign_role(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+    Json(req): Json<AssignRoleRequest>,
+) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
+    // Verify role exists
+    crate::roles::store::get(&conn, req.role_id).await?;
+
+    // Verify device exists
+    director.get_device(&uuid).await?;
+
+    director.assign_role_to_device(&uuid, req.role_id).await?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn get_device_role(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Option<Role>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let director = Director::new(&conn);
+
+    // Get role ID from device
+    let role_id = director.get_device_role_id(&uuid).await?;
+
+    // If device has a role, fetch full role details
+    if let Some(id) = role_id {
+        let role = crate::roles::store::get(&conn, id).await?;
+        Ok(Json(Some(role)))
+    } else {
+        Ok(Json(None))
+    }
+}
+
+/// `GET /ui/devices/{uuid}/warnings`
+///
+/// List all warnings for the device.
+async fn get_warnings(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<Vec<device_warnings::DeviceWarning>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+
+    let device_id = device_warnings::get_device_id_by_uuid(&conn, &uuid)
+        .await?
+        .ok_or_else(|| HttpError::NotFound(format!("Device {} not found", uuid)))?;
+
+    let warnings = device_warnings::list_warnings(&conn, device_id).await?;
+    Ok(Json(warnings))
+}
+
+/// `DELETE /ui/devices/{uuid}/warnings/{warning_id}`
+///
+/// Dismiss (delete) a single warning by its numeric ID.
+///
+/// Returns `204 No Content` on success, `404` if the device or warning is not found.
+async fn delete_warning(
+    State(state): State<Arc<AppState>>,
+    Path((uuid, warning_id)): Path<(Uuid, i64)>,
+) -> Result<StatusCode, HttpError> {
+    let conn = state.connection_factory.open().await?;
+
+    let device_id = device_warnings::get_device_id_by_uuid(&conn, &uuid)
+        .await?
+        .ok_or_else(|| HttpError::NotFound(format!("Device {} not found", uuid)))?;
+
+    let deleted = device_warnings::delete_warning(&conn, warning_id, device_id).await?;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(HttpError::NotFound(format!(
+            "Warning {} not found on device {}",
+            warning_id, uuid
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
@@ -831,6 +956,7 @@ mod tests {
             86400,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1210,11 +1336,11 @@ mod tests {
 
         let app = routes(state.clone());
 
-        // Try to update with hostname that's too long (254 chars, exceeds 253 limit)
+        // Try to update with hostname that's too long (64 chars, exceeds the 63-char label limit)
         let mut attributes = serde_json::Map::new();
         attributes.insert(
             "hostname".to_string(),
-            serde_json::Value::String("a".repeat(254)),
+            serde_json::Value::String("a".repeat(64)),
         );
 
         let payload = UpdateAttributesRequest { attributes };
@@ -1235,7 +1361,7 @@ mod tests {
             .unwrap();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("hostname"));
-        assert!(body_str.contains("253"));
+        assert!(body_str.contains("63"));
     }
 
     #[tokio::test]
@@ -1373,20 +1499,29 @@ mod tests {
         assert!(body_str.contains("hyphen"));
     }
 
+    /// A dotted (FQDN-shaped) hostname is rejected: the domain comes from the device's network and
+    /// is appended at render time, so storing one would install a doubled domain.
     #[tokio::test]
-    async fn test_update_device_hostname_with_dots() {
+    async fn test_update_device_hostname_with_dots_rejected() {
         let (state, _temp_dir, _migration_conn) =
             setup_test_state(test_connection_factory!()).await;
         let test_uuid = test_uuid(0x36);
 
         // Register device
-        {
+        let registered_hostname = {
             let conn = test_db(&state).await;
-            Director::new(&conn)
+            let director = Director::new(&conn);
+            director
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
-        }
+            director
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
+                .attributes
+                .hostname
+        };
 
         let app = routes(state.clone());
 
@@ -1407,17 +1542,20 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-        // Verify hostname was updated
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("single label"), "body was: {body_str}");
+
+        // Verify the hostname was left untouched
         let device = {
             let conn = test_db(&state).await;
             Director::new(&conn).get_device(&test_uuid).await.unwrap()
         };
-        assert_eq!(
-            device.attributes.hostname,
-            Some("server.example.com".to_string())
-        );
+        assert_eq!(device.attributes.hostname, registered_hostname);
     }
 
     #[tokio::test]
@@ -2183,130 +2321,5 @@ mod tests {
         assert!(validate_mac_address("aaa:bb:cc:dd:ee:ff").is_some());
         // Empty string
         assert!(validate_mac_address("").is_some());
-    }
-}
-
-// Platform assignment handlers
-
-async fn assign_platform(
-    State(state): State<Arc<AppState>>,
-    Path(uuid): Path<Uuid>,
-    Json(req): Json<AssignPlatformRequest>,
-) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
-
-    // Verify platform exists
-    crate::platforms::store::get(&conn, req.platform_id).await?;
-
-    // Verify device exists
-    director.get_device(&uuid).await?;
-
-    director
-        .assign_platform_to_device(&uuid, req.platform_id)
-        .await?;
-
-    Ok(StatusCode::OK)
-}
-
-async fn get_device_platform(
-    State(state): State<Arc<AppState>>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<Option<Platform>>, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
-
-    // Get platform ID from device
-    let platform_id = director.get_device_platform_id(&uuid).await?;
-
-    // If device has a platform, fetch full platform details
-    if let Some(id) = platform_id {
-        let platform = crate::platforms::store::get(&conn, id).await?;
-        Ok(Json(Some(platform)))
-    } else {
-        Ok(Json(None))
-    }
-}
-
-// Role assignment handlers
-
-async fn assign_role(
-    State(state): State<Arc<AppState>>,
-    Path(uuid): Path<Uuid>,
-    Json(req): Json<AssignRoleRequest>,
-) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
-
-    // Verify role exists
-    crate::roles::store::get(&conn, req.role_id).await?;
-
-    // Verify device exists
-    director.get_device(&uuid).await?;
-
-    director.assign_role_to_device(&uuid, req.role_id).await?;
-
-    Ok(StatusCode::OK)
-}
-
-async fn get_device_role(
-    State(state): State<Arc<AppState>>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<Option<Role>>, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
-
-    // Get role ID from device
-    let role_id = director.get_device_role_id(&uuid).await?;
-
-    // If device has a role, fetch full role details
-    if let Some(id) = role_id {
-        let role = crate::roles::store::get(&conn, id).await?;
-        Ok(Json(Some(role)))
-    } else {
-        Ok(Json(None))
-    }
-}
-
-/// `GET /ui/devices/{uuid}/warnings`
-///
-/// List all warnings for the device.
-async fn get_warnings(
-    State(state): State<Arc<AppState>>,
-    Path(uuid): Path<Uuid>,
-) -> Result<Json<Vec<device_warnings::DeviceWarning>>, HttpError> {
-    let conn = state.connection_factory.open().await?;
-
-    let device_id = device_warnings::get_device_id_by_uuid(&conn, &uuid)
-        .await?
-        .ok_or_else(|| HttpError::NotFound(format!("Device {} not found", uuid)))?;
-
-    let warnings = device_warnings::list_warnings(&conn, device_id).await?;
-    Ok(Json(warnings))
-}
-
-/// `DELETE /ui/devices/{uuid}/warnings/{warning_id}`
-///
-/// Dismiss (delete) a single warning by its numeric ID.
-///
-/// Returns `204 No Content` on success, `404` if the device or warning is not found.
-async fn delete_warning(
-    State(state): State<Arc<AppState>>,
-    Path((uuid, warning_id)): Path<(Uuid, i64)>,
-) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-
-    let device_id = device_warnings::get_device_id_by_uuid(&conn, &uuid)
-        .await?
-        .ok_or_else(|| HttpError::NotFound(format!("Device {} not found", uuid)))?;
-
-    let deleted = device_warnings::delete_warning(&conn, warning_id, device_id).await?;
-    if deleted {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(HttpError::NotFound(format!(
-            "Warning {} not found on device {}",
-            warning_id, uuid
-        )))
     }
 }

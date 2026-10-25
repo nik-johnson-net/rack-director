@@ -128,6 +128,7 @@ export type DhcpNetwork = {
   lease_duration: number;
   relay_agent_address?: string;
   enable_autodiscovery: boolean;
+  domain_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -160,6 +161,7 @@ export type CreateDhcpNetworkRequest = {
   lease_duration: number;
   relay_agent_address?: string;
   enable_autodiscovery?: boolean;
+  domain_name?: string | null;
 }
 
 export type UpdateDhcpNetworkRequest = {
@@ -168,8 +170,9 @@ export type UpdateDhcpNetworkRequest = {
   gateway?: string | null;
   dns_servers?: string[];
   lease_duration?: number;
-  relay_agent_address?: string;
+  relay_agent_address?: string | null;
   enable_autodiscovery?: boolean;
+  domain_name?: string | null;
 }
 
 export type CreateDhcpPoolRequest = {
@@ -305,16 +308,15 @@ export type CreateRoleRequest = {
 
 export type UpdateRoleRequest = {
   name?: string;
-  description?: string;
+  description?: string | null;
   osm_module?: string;
   os_name?: string;
   os_release?: string;
   os_arch?: string;
   disk_layout?: DiskLayout;
-  cmdline_args?: string;
-  config_template?: Record<string, unknown>;
-  firmware_mode?: FirmwareMode;
-  clear_firmware_mode?: boolean;
+  cmdline_args?: string | null;
+  config_template?: Record<string, unknown> | null;
+  firmware_mode?: FirmwareMode | null;
 }
 
 export type AssignRoleRequest = {
@@ -863,7 +865,7 @@ export type CreatePlatformRequest = {
 
 export type UpdatePlatformRequest = {
   name?: string;
-  description?: string;
+  description?: string | null;
   attributes?: PlatformAttributes;
 }
 

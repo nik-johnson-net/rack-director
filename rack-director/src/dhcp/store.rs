@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use uuid::Uuid;
 
-use crate::database::{Connection, FromRow};
+use crate::database::{Connection, FromRow, text_or_null};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lease {
@@ -92,9 +92,16 @@ pub struct DhcpNetwork {
     pub lease_duration: u32,
     pub relay_agent_address: Option<String>,
     pub enable_autodiscovery: bool,
+    /// DNS domain for hosts on this network, used to build a device's FQDN
+    /// (`{hostname}.{domain_name}`) at install time. `None` means devices on
+    /// this network get a bare hostname.
+    pub domain_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// Column list matching [`DhcpNetwork::from_row`]; every `dhcp_networks` SELECT must use it.
+const NETWORK_COLUMNS: &str = "id, name, subnet, gateway, dns_servers, lease_duration,      relay_agent_address, enable_autodiscovery, domain_name, created_at, updated_at";
 
 impl FromRow for DhcpNetwork {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
@@ -105,7 +112,11 @@ impl FromRow for DhcpNetwork {
         let created_at_str: String = row.get("created_at")?;
         let updated_at_str: String = row.get("updated_at")?;
 
-        // `gateway` is `Option<String>` — rusqlite maps NULL columns to None automatically.
+        // An empty domain means "no domain"; normalise here so readers never see `Some("")`.
+        let domain_name = row
+            .get::<_, Option<String>>("domain_name")?
+            .filter(|d| !d.is_empty());
+
         Ok(DhcpNetwork {
             id: row.get("id")?,
             name: row.get("name")?,
@@ -115,6 +126,7 @@ impl FromRow for DhcpNetwork {
             lease_duration: row.get("lease_duration")?,
             relay_agent_address: row.get("relay_agent_address")?,
             enable_autodiscovery: row.get("enable_autodiscovery")?,
+            domain_name,
             created_at: parse_datetime(&created_at_str).unwrap(),
             updated_at: parse_datetime(&updated_at_str).unwrap(),
         })
@@ -317,8 +329,7 @@ pub async fn find_lease_by_device_uuid(
 pub async fn get_network(conn: &Connection, id: i64) -> Result<DhcpNetwork> {
     let network = conn
         .query_one(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
-             FROM dhcp_networks WHERE id = ?1",
+            format!("SELECT {NETWORK_COLUMNS} FROM dhcp_networks WHERE id = ?1"),
             (id,),
             DhcpNetwork::from_row,
         )
@@ -336,8 +347,7 @@ pub async fn get_network_by_relay(
 
     let network = conn
         .query_row(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
-             FROM dhcp_networks WHERE relay_agent_address IS ?1 OR (relay_agent_address IS NULL AND ?1 IS NULL)",
+            format!("SELECT {NETWORK_COLUMNS} FROM dhcp_networks WHERE relay_agent_address IS ?1 OR (relay_agent_address IS NULL AND ?1 IS NULL)"),
             (relay_str,),
             DhcpNetwork::from_row,
         )
@@ -351,8 +361,7 @@ pub async fn get_network_by_relay(
 pub async fn get_network_by_name(conn: &Connection, name: &str) -> Result<Option<DhcpNetwork>> {
     let network = conn
         .query_row(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
-             FROM dhcp_networks WHERE name = ?1",
+            format!("SELECT {NETWORK_COLUMNS} FROM dhcp_networks WHERE name = ?1"),
             (name.to_string(),),
             DhcpNetwork::from_row,
         )
@@ -370,8 +379,7 @@ pub async fn get_network_by_relay_string(
     let network = match relay_agent_address {
         None | Some("") => conn
             .query_row(
-                "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
-                 FROM dhcp_networks WHERE relay_agent_address IS NULL OR relay_agent_address = ''",
+                format!("SELECT {NETWORK_COLUMNS} FROM dhcp_networks WHERE relay_agent_address IS NULL OR relay_agent_address = ''"),
                 (),
                 DhcpNetwork::from_row,
             )
@@ -379,8 +387,7 @@ pub async fn get_network_by_relay_string(
             .optional()?,
         Some(addr) => conn
             .query_row(
-                "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
-                 FROM dhcp_networks WHERE relay_agent_address = ?1",
+                format!("SELECT {NETWORK_COLUMNS} FROM dhcp_networks WHERE relay_agent_address = ?1"),
                 (addr.to_string(),),
                 DhcpNetwork::from_row,
             )
@@ -395,8 +402,7 @@ pub async fn get_network_by_relay_string(
 pub async fn list_networks(conn: &Connection) -> Result<Vec<DhcpNetwork>> {
     let networks = conn
         .query(
-            "SELECT id, name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at
-             FROM dhcp_networks ORDER BY name",
+            format!("SELECT {NETWORK_COLUMNS} FROM dhcp_networks ORDER BY name"),
             (),
             DhcpNetwork::from_row,
         )
@@ -410,7 +416,7 @@ pub async fn get_l2_networks(conn: &Connection) -> Result<Vec<DhcpNetwork>> {
     let networks = conn
         .query(
             "SELECT id, name, subnet, gateway, dns_servers, lease_duration, \
-             relay_agent_address, enable_autodiscovery, created_at, updated_at \
+             relay_agent_address, enable_autodiscovery, domain_name, created_at, updated_at \
              FROM dhcp_networks WHERE relay_agent_address IS NULL",
             (),
             DhcpNetwork::from_row,
@@ -433,16 +439,18 @@ pub async fn create_network(
     lease_duration: u32,
     relay_agent_address: Option<&str>,
     enable_autodiscovery: bool,
+    domain_name: Option<&str>,
 ) -> Result<DhcpNetwork> {
     let dns_servers_json = serde_json::to_string(dns_servers)?;
     let now = Utc::now().to_rfc3339();
     let relay = relay_agent_address.map(|s| s.to_string());
     let gw = gateway.map(|s| s.to_string());
+    let domain = domain_name.map(|s| s.to_string());
 
     conn.execute(
-        "INSERT INTO dhcp_networks (name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        (name.to_string(), subnet.to_string(), gw, dns_servers_json, lease_duration, relay, enable_autodiscovery, now.clone(), now),
+        "INSERT INTO dhcp_networks (name, subnet, gateway, dns_servers, lease_duration, relay_agent_address, enable_autodiscovery, domain_name, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        (name.to_string(), subnet.to_string(), gw, dns_servers_json, lease_duration, relay, enable_autodiscovery, domain, now.clone(), now),
     )
     .await?;
 
@@ -450,79 +458,89 @@ pub async fn create_network(
     get_network(conn, id).await
 }
 
-/// Update a network.
+/// Parameters for updating a network. `None` leaves a column unchanged.
 ///
-/// All field updates are wrapped in a single transaction so that a partial
-/// failure cannot leave the network in an inconsistent state.
-#[allow(clippy::too_many_arguments)]
+/// Nullable columns (`gateway`, `relay_agent_address`, `domain_name`) are doubly wrapped:
+/// `Some(None)` sets the column to `NULL`, `Some(Some(v))` writes `v`.
+#[derive(Default)]
+pub struct UpdateNetworkParams<'a> {
+    pub name: Option<&'a str>,
+    pub subnet: Option<&'a str>,
+    pub gateway: Option<Option<&'a str>>,
+    pub dns_servers: Option<&'a [String]>,
+    pub lease_duration: Option<u32>,
+    pub relay_agent_address: Option<Option<&'a str>>,
+    pub enable_autodiscovery: Option<bool>,
+    pub domain_name: Option<Option<&'a str>>,
+}
+
+/// Collect the `SET` clauses and bound values for the columns being changed.
+fn build_network_updates(
+    params: &UpdateNetworkParams<'_>,
+) -> Result<(Vec<&'static str>, Vec<rusqlite::types::Value>)> {
+    use rusqlite::types::Value;
+
+    let mut updates = Vec::new();
+    let mut values: Vec<Value> = Vec::new();
+
+    if let Some(name) = params.name {
+        updates.push("name = ?");
+        values.push(Value::Text(name.to_string()));
+    }
+    if let Some(subnet) = params.subnet {
+        updates.push("subnet = ?");
+        values.push(Value::Text(subnet.to_string()));
+    }
+    if let Some(gateway) = params.gateway {
+        updates.push("gateway = ?");
+        values.push(text_or_null(gateway));
+    }
+    if let Some(dns_servers) = params.dns_servers {
+        updates.push("dns_servers = ?");
+        values.push(Value::Text(serde_json::to_string(dns_servers)?));
+    }
+    if let Some(lease_duration) = params.lease_duration {
+        updates.push("lease_duration = ?");
+        values.push(Value::Integer(lease_duration.into()));
+    }
+    if let Some(relay) = params.relay_agent_address {
+        updates.push("relay_agent_address = ?");
+        values.push(text_or_null(relay));
+    }
+    if let Some(enable_autodiscovery) = params.enable_autodiscovery {
+        updates.push("enable_autodiscovery = ?");
+        values.push(Value::Integer(enable_autodiscovery.into()));
+    }
+    if let Some(domain_name) = params.domain_name {
+        updates.push("domain_name = ?");
+        values.push(text_or_null(domain_name));
+    }
+
+    Ok((updates, values))
+}
+
+/// Update a network in a single `UPDATE` statement, so a partial failure cannot leave it
+/// inconsistent. `updated_at` is bumped whenever at least one column changes.
 pub async fn update_network(
-    conn: &mut Connection,
+    conn: &Connection,
     id: i64,
-    name: Option<&str>,
-    subnet: Option<&str>,
-    gateway: Option<&str>,
-    dns_servers: Option<&[String]>,
-    lease_duration: Option<u32>,
-    relay_agent_address: Option<Option<&str>>,
-    enable_autodiscovery: Option<bool>,
+    params: UpdateNetworkParams<'_>,
 ) -> Result<DhcpNetwork> {
-    let now = Utc::now().to_rfc3339();
+    let (mut updates, mut values) = build_network_updates(&params)?;
 
-    let tx = conn.transaction().await?;
+    if !updates.is_empty() {
+        updates.push("updated_at = ?");
+        values.push(rusqlite::types::Value::Text(Utc::now().to_rfc3339()));
+        values.push(rusqlite::types::Value::Integer(id));
 
-    if let Some(name) = name {
-        tx.execute(
-            "UPDATE dhcp_networks SET name = ?1, updated_at = ?2 WHERE id = ?3",
-            (name.to_string(), now.clone(), id),
-        )
-        .await?;
-    }
-    if let Some(subnet) = subnet {
-        tx.execute(
-            "UPDATE dhcp_networks SET subnet = ?1, updated_at = ?2 WHERE id = ?3",
-            (subnet.to_string(), now.clone(), id),
-        )
-        .await?;
-    }
-    if let Some(gateway) = gateway {
-        tx.execute(
-            "UPDATE dhcp_networks SET gateway = ?1, updated_at = ?2 WHERE id = ?3",
-            (gateway.to_string(), now.clone(), id),
-        )
-        .await?;
-    }
-    if let Some(dns_servers) = dns_servers {
-        let dns_servers_json = serde_json::to_string(dns_servers)?;
-        tx.execute(
-            "UPDATE dhcp_networks SET dns_servers = ?1, updated_at = ?2 WHERE id = ?3",
-            (dns_servers_json, now.clone(), id),
-        )
-        .await?;
-    }
-    if let Some(lease_duration) = lease_duration {
-        tx.execute(
-            "UPDATE dhcp_networks SET lease_duration = ?1, updated_at = ?2 WHERE id = ?3",
-            (lease_duration, now.clone(), id),
-        )
-        .await?;
-    }
-    if let Some(relay_agent_address) = relay_agent_address {
-        let relay = relay_agent_address.map(|s| s.to_string());
-        tx.execute(
-            "UPDATE dhcp_networks SET relay_agent_address = ?1, updated_at = ?2 WHERE id = ?3",
-            (relay, now.clone(), id),
-        )
-        .await?;
-    }
-    if let Some(enable_autodiscovery) = enable_autodiscovery {
-        tx.execute(
-            "UPDATE dhcp_networks SET enable_autodiscovery = ?1, updated_at = ?2 WHERE id = ?3",
-            (enable_autodiscovery, now, id),
-        )
-        .await?;
+        let query = format!(
+            "UPDATE dhcp_networks SET {} WHERE id = ?",
+            updates.join(", ")
+        );
+        conn.execute(query, rusqlite::params_from_iter(values))
+            .await?;
     }
 
-    tx.commit().await?;
     get_network(conn, id).await
 }
 
@@ -799,7 +817,7 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{database::DatabaseConnectionFactory, test_database_path};
+    use crate::{database::DatabaseConnectionFactory, test_connection_factory, test_database_path};
 
     use super::*;
 
@@ -816,6 +834,7 @@ mod tests {
             86400,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -850,6 +869,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -886,6 +906,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1141,6 +1162,7 @@ mod tests {
             86400,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1191,5 +1213,168 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    // ========== domain_name Tests ==========
+
+    #[tokio::test]
+    async fn test_create_network_without_domain() {
+        let (db, network_id) = setup_db_with_network(test_database_path!()).await;
+
+        let network = get_network(&db, network_id).await.unwrap();
+        assert_eq!(network.domain_name, None);
+    }
+
+    #[tokio::test]
+    async fn test_create_network_with_domain() {
+        let factory = test_connection_factory!();
+        let db = crate::database::run_migrations(&factory).await.unwrap();
+
+        let network = create_network(
+            &db,
+            "Domain Network",
+            "10.0.1.0/24",
+            Some("10.0.1.1"),
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+            Some("test.local"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(network.domain_name, Some("test.local".to_string()));
+
+        let reloaded = get_network(&db, network.id).await.unwrap();
+        assert_eq!(reloaded.domain_name, Some("test.local".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_network_domain() {
+        let (db, network_id) = setup_db_with_network(test_database_path!()).await;
+
+        // Set a domain on a network that previously had none
+        let network = update_network(
+            &db,
+            network_id,
+            UpdateNetworkParams {
+                domain_name: Some(Some("first.local")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(network.domain_name, Some("first.local".to_string()));
+
+        // Update to a different domain
+        let network = update_network(
+            &db,
+            network_id,
+            UpdateNetworkParams {
+                domain_name: Some(Some("second.local")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(network.domain_name, Some("second.local".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_network_from_row_normalises_empty_domain_to_none() {
+        let (db, network_id) = setup_db_with_network(test_database_path!()).await;
+
+        db.execute(
+            "UPDATE dhcp_networks SET domain_name = '' WHERE id = ?1",
+            (network_id,),
+        )
+        .await
+        .unwrap();
+
+        let network = get_network(&db, network_id).await.unwrap();
+        assert_eq!(network.domain_name, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_network_domain_clear_to_null() {
+        let factory = test_connection_factory!();
+        let db = crate::database::run_migrations(&factory).await.unwrap();
+
+        let network = create_network(
+            &db,
+            "Domain Network",
+            "10.0.1.0/24",
+            Some("10.0.1.1"),
+            &["8.8.8.8".to_string()],
+            86400,
+            None,
+            false,
+            Some("test.local"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(network.domain_name, Some("test.local".to_string()));
+
+        // Explicitly clear the domain back to NULL
+        let updated = update_network(
+            &db,
+            network.id,
+            UpdateNetworkParams {
+                domain_name: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.domain_name, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_network_gateway_clear_to_null() {
+        let (db, network_id) = setup_db_with_network(test_database_path!()).await;
+
+        let updated = update_network(
+            &db,
+            network_id,
+            UpdateNetworkParams {
+                gateway: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.gateway, None);
+        assert_eq!(get_network(&db, network_id).await.unwrap().gateway, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_network_gateway_set_and_keep() {
+        let (db, network_id) = setup_db_with_network(test_database_path!()).await;
+
+        let updated = update_network(
+            &db,
+            network_id,
+            UpdateNetworkParams {
+                gateway: Some(Some("10.0.0.254")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.gateway, Some("10.0.0.254".to_string()));
+
+        // A `None` gateway argument must leave the column untouched.
+        let updated = update_network(
+            &db,
+            network_id,
+            UpdateNetworkParams {
+                name: Some("Renamed"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.gateway, Some("10.0.0.254".to_string()));
     }
 }

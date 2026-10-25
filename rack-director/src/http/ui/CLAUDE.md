@@ -164,9 +164,53 @@ async fn create_foo(...) -> Result<..., HttpError> {
 | `validate_ip_in_subnet(ip, subnet)` | IP within a subnet range |
 | `validate_ipv4_list(ips, field_name, min_count)` | List of valid IPs with minimum count |
 | `validate_u32_range(value, min, max, field_name)` | Numeric range check |
-| `validate_hostname(hostname)` | RFC 1123 hostname (alphanum, hyphens, dots; no leading/trailing hyphens) |
+| `validate_hostname(hostname)` | RFC 1123 **single label** — alphanum + hyphens, 1-63 chars, no leading/trailing hyphen. **Dots are rejected**: a device hostname is bare and the domain comes from its network (see `src/http/cnc/CLAUDE.md`) |
+| `validate_domain_name(domain)` | RFC 1123 DNS domain (dot-separated labels, alphanum + hyphens, 1-63 chars/label, no leading/trailing hyphen, ≤253 total) |
+| `validate_not_blank(Option<&str>, field_name)` | Rejects an empty/whitespace-only string on a nullable field; `None` is accepted. For a `Patch<String>` pass `patch.value().map(String::as_str)` so only the `Set` case is checked |
 
 Network-specific validators (`validate_create_network_request`, `validate_update_network_request`) live in `validation.rs` and include async duplicate-checking against the database.
+
+## Partial Updates: the tri-state `Patch<T>`
+
+Update DTO fields backed by **nullable** database columns use `crate::patch::Patch<T>` instead of
+`Option<T>`. `Option<T>` cannot express a partial update over a nullable column — serde maps both an
+absent key and an explicit `null` to `None`, so "leave unchanged" and "set to NULL" are
+indistinguishable and the column can never be cleared over the wire.
+
+### Wire semantics
+
+| Request JSON        | Deserializes to | Effect on the column | HTTP result |
+|---------------------|-----------------|----------------------|-------------|
+| key absent          | `Patch::Keep`   | unchanged            | 200 |
+| `"field": null`     | `Patch::Clear`  | set to SQL `NULL`    | 200 |
+| `"field": ""`       | `Patch::Set("")`| —                    | **400** — `null` is the only way to clear |
+| `"field": <value>`  | `Patch::Set(v)` | set to `<value>`     | 200 |
+
+The same blank-string rejection applies on the **create** path (plain `Option<T>` there — there is no
+"keep" state on create) so create and update agree.
+
+### Rules
+
+- **`#[serde(default)]` is mandatory for every `Patch<T>` field** — put `#[derive(Default)]` +
+  struct-level `#[serde(default)]` on DTOs whose fields are all `Option`/`Patch` (as the update DTOs
+  are), otherwise annotate each field. Omitting it does not fail loudly:
+  serde's missing-field deserializer supports `deserialize_option`, so an absent key silently becomes
+  `Patch::Clear` and every partial request wipes the column. Each DTO has a test asserting an absent
+  key yields `Keep` — that test is the guard; keep it.
+- Only fields backed by genuinely NULLable columns become `Patch<T>`. Non-nullable fields stay
+  `Option<T>` (e.g. `UpdatePoolRequest`, whose columns are all `NOT NULL`).
+- Store functions take `Option<Option<_>>` for these columns (via `UpdateNetworkParams` /
+  `UpdateRoleParams`): `None` = keep, `Some(None)` = NULL,
+  `Some(Some(v))` = set. Convert with `Patch::as_update()` / `as_deref_update()` /
+  `copied_update()`.
+- `Patch::value()` returns `Some` only for `Set`, which is what validators should check.
+
+DTOs using `Patch`: `UpdateNetworkRequest` (`gateway`, `relay_agent_address`, `domain_name`),
+`UpdateRoleRequest` (`description`, `cmdline_args`, `config_template`, `firmware_mode`),
+`UpdatePlatformRequest` (`description`, `firmware_mode`).
+
+`UpdateRoleRequest` previously carried a `clear_firmware_mode: bool` escape hatch; it is **removed** —
+send `"firmware_mode": null` instead.
 
 ## Error Handling
 

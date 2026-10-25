@@ -61,6 +61,16 @@ Devices are classified as `bios` or `uefi` based on whether `/sys/firmware/efi` 
 
 Install script templates can use `{{ device.boot_mode }}`, `{{ device.is_uefi }}`, `{{ device.is_bios }}`.
 
+## Device FQDN
+A DHCP network may carry an optional `domain_name`. When set, a device's install script is rendered with
+`{{ device.fqdn }}` — `{hostname}.{domain}` of the primary NIC's network — falling back to the bare
+hostname when no domain is configured.
+
+A device hostname is always a **single bare DNS label**; the domain comes solely from the network. This
+is enforced at both write paths (`validate_hostname` rejects dots; `/cnc/update_attributes` strips any
+agent-supplied hostname) rather than compensated for at render time. See
+`rack-director/src/http/cnc/CLAUDE.md` for the rule and the known limitation for legacy dotted hostnames.
+
 ## Disk Layouts
 Disk partition layouts are defined at the Role level and applied during the `partition_disks` action. Supports:
 - Multiple devices with flexible sizing (fixed size, percentage, or "rest")

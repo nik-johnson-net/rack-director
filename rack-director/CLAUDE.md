@@ -8,6 +8,7 @@ Rack Director is the server component, written in rust. Database functionality i
 `src/http`: All HTTP handlers. Divided into `api` for `/api/` routes (currently unused), `cnc` for `/cnc/` routes (devices use this for automation), and `ui` for `/ui/` routes (serves `rack-director-ui`).
 `src/lifecycle`: `Lifecycle` and transition code - provisiong states of `Devices` and how they transition from one to the next.
 `src/osm`: Operating System Modules — archive parsing, validation, database storage, upload pipeline (streaming upload, validation, extraction, atomic DB replacement), and HTTP API for OSM packages.
+`src/patch.rs`: `Patch<T>` — the tri-state (keep / clear / set) field type used by update request DTOs so nullable columns can be cleared over the wire. See "Partial Updates" in `src/http/ui/CLAUDE.md`.
 `src/plans`: `Plan` code - concrete `Actions` to move a `Device` from one `Lifecycle` state to another.
 `src/roles`: `Role` code - configuration for a group of `Devices`. Roles reference OS via composite OSM fields (`osm_module`, `os_name`, `os_release`, `os_arch`).
 `src/storage`:  Interfaces for the storage layer. Used to store uploaded images for `Operating Systems`.
@@ -136,9 +137,9 @@ A table called plans is used to store a list of actions, their parameters, and t
 
 ## Overview
 
-Rack Director uses SQLite with 24 migrations. Schema is versioned and migrations are applied sequentially on startup.
+Rack Director uses SQLite with 25 migrations. Schema is versioned and migrations are applied sequentially on startup.
 
-**Current Version:** 24 (as of 2026-06)
+**Current Version:** 25 (as of 2026-07)
 
 **Migration Location:** `src/database/migrations/*.sql`
 
@@ -243,16 +244,17 @@ DHCP network configurations (multi-network support with relay agents).
 | `id` | INTEGER | Primary key |
 | `name` | TEXT | Network name (unique) |
 | `subnet` | TEXT | Subnet CIDR (e.g., "10.0.0.0/24") |
-| `gateway` | TEXT | Default gateway IP — **nullable**; a network may have no gateway (no default route assigned to its NICs) |
+| `gateway` | TEXT | Default gateway IP — **nullable**; a network may have no gateway (no default route assigned to its NICs). Cleared via `PUT` with `"gateway": null` |
 | `dns_servers` | TEXT | JSON array of DNS server IPs — may be empty (no DNS assigned) |
 | `lease_duration` | INTEGER | Lease duration in seconds |
 | `relay_agent_address` | TEXT | Relay agent IP (for remote networks) |
+| `domain_name` | TEXT | Optional DNS domain — **nullable**; when set, devices on this network install with FQDN `{hostname}.{domain_name}`. Cleared via `PUT` with `"domain_name": null` |
 | `created_at` | DATETIME | Creation time |
 | `updated_at` | DATETIME | Last update time |
 
 **Indexes:** `relay_agent_address`
 
-**Migration:** v4, v8 (multi-network support), v24 (`gateway` made nullable)
+**Migration:** v4, v8 (multi-network support), v24 (`gateway` made nullable), v25 (`domain_name` added)
 
 ### dhcp_pools
 
@@ -357,6 +359,16 @@ pending_devices
 ```
 
 ## Recent Schema Changes
+
+### Migration v25 (2026-07)
+- Added nullable `dhcp_networks.domain_name` column via a plain `ALTER TABLE ... ADD COLUMN` (no table
+  rebuild, so no `PRAGMA foreign_keys` guard needed).
+- When set, a device's install script is rendered with a `{{ device.fqdn }}` variable —
+  `{hostname}.{domain_name}` of the primary NIC's network — falling back to the bare hostname when the
+  network has no domain. `{{ device.domain_name }}` and per-NIC `{{ this.domain_name }}` are also exposed
+  to templates. See `src/http/cnc/CLAUDE.md`.
+- The domain is also advertised as DHCP option 15 (Domain Name) in OFFER/ACK when configured.
+- No uniqueness constraint — multiple networks may share the same domain.
 
 ### Migration v24 (2026-06)
 - Made `dhcp_networks.gateway` **nullable** (table rebuilt) so a network can be defined with no default

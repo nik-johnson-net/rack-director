@@ -1,4 +1,5 @@
 use super::super::{AppState, error::Error as HttpError};
+use super::validation::{ValidationErrors, validate_not_blank};
 use crate::roles::*;
 use axum::{
     Json, Router,
@@ -6,6 +7,7 @@ use axum::{
     http::StatusCode,
     routing::{delete, get, post, put},
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub fn routes(state: Arc<AppState>) -> Router {
@@ -19,11 +21,46 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Reject explicitly-supplied blank values for the role's nullable text columns.
+///
+/// `null` is the only way to clear them; see `crate::patch`.
+fn validate_update_role(req: &UpdateRoleRequest) -> Result<(), HashMap<String, String>> {
+    let mut errors = ValidationErrors::new();
+    errors.add_if_err(
+        "description",
+        validate_not_blank(req.description.value().map(String::as_str), "Description"),
+    );
+    errors.add_if_err(
+        "cmdline_args",
+        validate_not_blank(req.cmdline_args.value().map(String::as_str), "Cmdline args"),
+    );
+    errors.into_result()
+}
+
+/// Reject blank values on create so the create and update paths agree: a blank string is a
+/// client error, and `null`/omission means "not set".
+fn validate_create_role(req: &CreateRoleRequest) -> Result<(), HashMap<String, String>> {
+    let mut errors = ValidationErrors::new();
+    errors.add_if_err(
+        "description",
+        validate_not_blank(req.description.as_deref(), "Description"),
+    );
+    errors.add_if_err(
+        "cmdline_args",
+        validate_not_blank(req.cmdline_args.as_deref(), "Cmdline args"),
+    );
+    errors.into_result()
+}
+
 // Create a new role
 async fn create_role(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<Role>), HttpError> {
+    if let Err(errors) = validate_create_role(&req) {
+        return Err(HttpError::ValidationError(errors));
+    }
+
     // Validate the disk layout before persisting.
     if let Err(errors) =
         crate::disk_layout::validate_disk_layout(&req.disk_layout, req.firmware_mode)
@@ -86,10 +123,16 @@ async fn update_role(
     Path(id): Path<i64>,
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<Role>, HttpError> {
+    if let Err(errors) = validate_update_role(&req) {
+        return Err(HttpError::ValidationError(errors));
+    }
+
     // Validate the new disk layout before applying any changes.
     if let Some(ref disk_layout) = req.disk_layout
-        && let Err(errors) =
-            crate::disk_layout::validate_disk_layout(disk_layout, req.firmware_mode)
+        && let Err(errors) = crate::disk_layout::validate_disk_layout(
+            disk_layout,
+            req.firmware_mode.value().copied(),
+        )
     {
         return Err(HttpError::ValidationError(errors));
     }
@@ -126,16 +169,15 @@ async fn update_role(
         id,
         crate::roles::store::UpdateRoleParams {
             name: req.name.as_deref(),
-            description: req.description.as_deref(),
+            description: req.description.as_deref_update(),
             osm_module: req.osm_module.as_deref(),
             os_name: req.os_name.as_deref(),
             os_release: req.os_release.as_deref(),
             os_arch: req.os_arch.as_deref(),
             disk_layout: req.disk_layout.as_ref(),
-            cmdline_args: req.cmdline_args.as_deref(),
-            config_template: req.config_template.as_ref(),
-            firmware_mode: req.firmware_mode,
-            clear_firmware_mode: req.clear_firmware_mode,
+            cmdline_args: req.cmdline_args.as_deref_update(),
+            config_template: req.config_template.as_update(),
+            firmware_mode: req.firmware_mode.copied_update(),
         },
     )
     .await?;
@@ -198,6 +240,17 @@ async fn delete_role(
     let conn = state.connection_factory.open().await?;
     crate::roles::store::delete(&conn, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// List all devices with a specific role
+async fn list_role_devices(
+    State(state): State<Arc<AppState>>,
+    Path(role_id): Path<i64>,
+) -> Result<Json<Vec<String>>, HttpError> {
+    let conn = state.connection_factory.open().await?;
+    let devices = crate::director::store::list_devices_with_role(&conn, role_id).await?;
+    let device_strs: Vec<String> = devices.iter().map(|u| u.to_string()).collect();
+    Ok(Json(device_strs))
 }
 
 #[cfg(test)]
@@ -467,6 +520,100 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Tests for blank-value rejection on nullable role fields
+    // ---------------------------------------------------------------------------
+
+    fn update_request() -> UpdateRoleRequest {
+        UpdateRoleRequest {
+            name: None,
+            description: crate::patch::Patch::Keep,
+            osm_module: None,
+            os_name: None,
+            os_release: None,
+            os_arch: None,
+            disk_layout: None,
+            cmdline_args: crate::patch::Patch::Keep,
+            config_template: crate::patch::Patch::Keep,
+            firmware_mode: crate::patch::Patch::Keep,
+        }
+    }
+
+    #[test]
+    fn test_validate_update_role_rejects_blank_description() {
+        let req = UpdateRoleRequest {
+            description: crate::patch::Patch::Set("   ".to_string()),
+            ..update_request()
+        };
+
+        let errors = validate_update_role(&req).unwrap_err();
+        assert!(
+            errors
+                .get("description")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_update_role_rejects_blank_cmdline_args() {
+        let req = UpdateRoleRequest {
+            cmdline_args: crate::patch::Patch::Set(String::new()),
+            ..update_request()
+        };
+
+        let errors = validate_update_role(&req).unwrap_err();
+        assert!(
+            errors
+                .get("cmdline_args")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    /// `Clear` and `Keep` carry no string, so neither can be blank.
+    #[test]
+    fn test_validate_update_role_accepts_clear_and_keep() {
+        assert!(validate_update_role(&update_request()).is_ok());
+
+        let req = UpdateRoleRequest {
+            description: crate::patch::Patch::Clear,
+            cmdline_args: crate::patch::Patch::Clear,
+            ..update_request()
+        };
+        assert!(validate_update_role(&req).is_ok());
+    }
+
+    fn create_request(description: Option<&str>, cmdline_args: Option<&str>) -> CreateRoleRequest {
+        CreateRoleRequest {
+            name: "test-role".to_string(),
+            description: description.map(str::to_string),
+            osm_module: "Default".to_string(),
+            os_name: "Ubuntu".to_string(),
+            os_release: "24.04".to_string(),
+            os_arch: "x86-64".to_string(),
+            disk_layout: label_layout(),
+            cmdline_args: cmdline_args.map(str::to_string),
+            config_template: None,
+            firmware_mode: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_create_role_rejects_blank_strings() {
+        let errors = validate_create_role(&create_request(Some(""), None)).unwrap_err();
+        assert!(errors.contains_key("description"));
+
+        let errors = validate_create_role(&create_request(None, Some("  "))).unwrap_err();
+        assert!(errors.contains_key("cmdline_args"));
+    }
+
+    #[test]
+    fn test_validate_create_role_accepts_absent_strings() {
+        assert!(validate_create_role(&create_request(None, None)).is_ok());
+        assert!(validate_create_role(&create_request(Some("d"), Some("quiet"))).is_ok());
+    }
+
     /// When two devices share the same platform, the platform is validated only once.
     /// This test also verifies that duplicate platform IDs don't cause spurious errors.
     #[tokio::test]
@@ -497,15 +644,4 @@ mod tests {
         let result = check_platform_compatibility(&conn, role_id, &label_layout()).await;
         assert!(result.is_ok());
     }
-}
-
-// List all devices with a specific role
-async fn list_role_devices(
-    State(state): State<Arc<AppState>>,
-    Path(role_id): Path<i64>,
-) -> Result<Json<Vec<String>>, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let devices = crate::director::store::list_devices_with_role(&conn, role_id).await?;
-    let device_strs: Vec<String> = devices.iter().map(|u| u.to_string()).collect();
-    Ok(Json(device_strs))
 }

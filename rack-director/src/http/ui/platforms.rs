@@ -33,6 +33,10 @@ fn validate_create_platform(req: &CreatePlatformRequest) -> Result<(), HashMap<S
     errors.add_if_err("name", validate_required(&req.name, "Name"));
     errors.add_if_err("name", validate_string_length(&req.name, 255, "Name"));
 
+    errors.add_if_err(
+        "description",
+        validate_not_blank(req.description.as_deref(), "Description"),
+    );
     if let Some(desc) = &req.description {
         errors.add_if_err(
             "description",
@@ -55,7 +59,11 @@ fn validate_update_platform(req: &UpdatePlatformRequest) -> Result<(), HashMap<S
         errors.add_if_err("name", validate_string_length(name, 255, "Name"));
     }
 
-    if let Some(desc) = &req.description {
+    errors.add_if_err(
+        "description",
+        validate_not_blank(req.description.value().map(String::as_str), "Description"),
+    );
+    if let Some(desc) = req.description.value() {
         errors.add_if_err(
             "description",
             validate_string_length(desc, 1000, "Description"),
@@ -211,9 +219,9 @@ async fn update_platform(
         &conn,
         id,
         req.name.as_deref(),
-        req.description.as_deref(),
+        req.description.as_deref_update(),
         req.attributes.as_ref(),
-        req.firmware_mode,
+        req.firmware_mode.copied_update(),
     )
     .await?;
 
@@ -571,5 +579,89 @@ mod tests {
         // Should return an empty list (not an error)
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
+    }
+
+    use crate::patch::Patch;
+
+    fn sample_attributes() -> PlatformAttributes {
+        PlatformAttributes {
+            disks: vec![PlatformDisk {
+                size_gb: 480,
+                disk_type: DiskType::Ssd,
+                label: Some("ROOT".to_string()),
+            }],
+            nics: vec![PlatformNic {
+                logical: "eno1".to_string(),
+                speed_mbps: Some(1000),
+                label: Some("NIC1".to_string()),
+            }],
+            cpus: vec![PlatformCpu {
+                brand: "intel".to_string(),
+                model: "E3-1240 v3".to_string(),
+                cores: 4,
+            }],
+            memory_gib: 32,
+        }
+    }
+
+    #[test]
+    fn test_validate_update_platform_rejects_blank_description() {
+        let req = UpdatePlatformRequest {
+            name: None,
+            description: Patch::Set("   ".to_string()),
+            attributes: None,
+            firmware_mode: Patch::Keep,
+        };
+
+        let errors = validate_update_platform(&req).unwrap_err();
+        assert!(
+            errors
+                .get("description")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_update_platform_accepts_clear_and_keep() {
+        for description in [Patch::Clear, Patch::Keep] {
+            let req = UpdatePlatformRequest {
+                name: None,
+                description,
+                attributes: None,
+                firmware_mode: Patch::Keep,
+            };
+            assert!(validate_update_platform(&req).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_create_platform_rejects_blank_description() {
+        let req = CreatePlatformRequest {
+            name: "P".to_string(),
+            description: Some(String::new()),
+            attributes: sample_attributes(),
+            firmware_mode: None,
+        };
+
+        let errors = validate_create_platform(&req).unwrap_err();
+        assert!(
+            errors
+                .get("description")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_create_platform_accepts_absent_description() {
+        let req = CreatePlatformRequest {
+            name: "P".to_string(),
+            description: None,
+            attributes: sample_attributes(),
+            firmware_mode: None,
+        };
+
+        assert!(validate_create_platform(&req).is_ok());
     }
 }

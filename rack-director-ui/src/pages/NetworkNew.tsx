@@ -12,6 +12,7 @@ export default function NetworkNew() {
   const [name, setName] = useState("");
   const [subnet, setSubnet] = useState("");
   const [gateway, setGateway] = useState("");
+  const [domainName, setDomainName] = useState("");
   const [dnsServers, setDnsServers] = useState("");
   const [leaseDuration, setLeaseDuration] = useState("");
   const [relayAgent, setRelayAgent] = useState("");
@@ -34,10 +35,11 @@ export default function NetworkNew() {
       const network = await createNetwork({
         name,
         subnet,
-        gateway: gateway.trim() || null,
+        gateway: gateway.trim() || undefined,
+        domain_name: domainName.trim() || undefined,
         dns_servers: dnsArray,
         lease_duration: parseInt(leaseDuration),
-        relay_agent_address: relayAgent || undefined,
+        relay_agent_address: relayAgent.trim() || undefined,
         enable_autodiscovery: enableAutodiscovery,
       });
 
@@ -138,6 +140,29 @@ export default function NetworkNew() {
                 className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
               />
               <FormFieldError error={getError("gateway")} />
+            </div>
+
+            {/* Domain Name */}
+            <div>
+              <label
+                htmlFor="domainName"
+                className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+              >
+                Domain Name
+              </label>
+              <input
+                id="domainName"
+                type="text"
+                value={domainName}
+                onChange={(e) => { setDomainName(e.target.value); clearFieldError("domain_name"); }}
+                placeholder="e.g., test.local (optional)"
+                aria-invalid={!!getError("domain_name")}
+                className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Devices on this network install with the hostname <span className="text-text-secondary">{"{hostname}.{domain}"}</span>.
+              </p>
+              <FormFieldError error={getError("domain_name")} />
             </div>
 
             {/* Lease Duration */}

@@ -279,6 +279,7 @@ async fn build_network_contexts(
         },
         netmask: primary.netmask.clone(),
         prefix_length: primary.prefix_length,
+        domain_name: primary.domain_name.clone(),
     };
 
     Ok((network_info, nic_contexts))
@@ -344,6 +345,7 @@ async fn build_nic_context(
         gateway: network.gateway.clone(),
         dns_servers: network.dns_servers.join(","),
         is_primary,
+        domain_name: network.domain_name.clone(),
     }))
 }
 
@@ -444,6 +446,7 @@ mod tests {
             86400,
             None,
             false,
+            Some("test.local"),
         )
         .await
         .unwrap();
@@ -527,12 +530,16 @@ mod tests {
         assert_eq!(network_info.gateway, Some("10.0.0.1".to_string()));
         assert_eq!(network_info.netmask, "255.255.255.0");
         assert_eq!(network_info.prefix_length, 24);
+        // Domain propagates from the primary NIC's network into NetworkInfo
+        assert_eq!(network_info.domain_name, Some("test.local".to_string()));
 
         // Single NIC context is marked primary
         assert_eq!(nics.len(), 1);
         assert!(nics[0].is_primary);
         assert_eq!(nics[0].mac_address, mac);
         assert_eq!(nics[0].gateway, Some("10.0.0.1".to_string()));
+        // Domain also propagates into the per-NIC context
+        assert_eq!(nics[0].domain_name, Some("test.local".to_string()));
     }
 
     /// Verifies that primary-NIC selection matches the lease MAC case-insensitively:

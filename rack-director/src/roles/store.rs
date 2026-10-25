@@ -2,23 +2,24 @@ use super::{DiskLayout, Role};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 
-use crate::database::{Connection, FromRow};
+use crate::database::{Connection, FromRow, text_or_null};
 
-/// Parameters for updating a role. All fields are optional; only `Some` values are applied.
+/// Parameters for updating a role. `None` leaves a column unchanged.
+///
+/// Nullable columns are doubly wrapped: `Some(None)` sets the column to `NULL`,
+/// `Some(Some(v))` writes `v`.
+#[derive(Default)]
 pub struct UpdateRoleParams<'a> {
     pub name: Option<&'a str>,
-    pub description: Option<&'a str>,
+    pub description: Option<Option<&'a str>>,
     pub osm_module: Option<&'a str>,
     pub os_name: Option<&'a str>,
     pub os_release: Option<&'a str>,
     pub os_arch: Option<&'a str>,
     pub disk_layout: Option<&'a DiskLayout>,
-    pub cmdline_args: Option<&'a str>,
-    pub config_template: Option<&'a serde_json::Value>,
-    pub firmware_mode: Option<common::FirmwareMode>,
-    /// When true, sets firmware_mode to NULL regardless of the firmware_mode field.
-    /// Takes precedence over firmware_mode when both are provided.
-    pub clear_firmware_mode: bool,
+    pub cmdline_args: Option<Option<&'a str>>,
+    pub config_template: Option<Option<&'a serde_json::Value>>,
+    pub firmware_mode: Option<Option<common::FirmwareMode>>,
 }
 
 /// Create a new role.
@@ -110,10 +111,12 @@ pub async fn list(conn: &Connection) -> Result<Vec<Role>> {
     Ok(roles)
 }
 
-/// Update a role.
-pub async fn update(conn: &Connection, id: i64, params: UpdateRoleParams<'_>) -> Result<Role> {
-    let now = Utc::now();
-
+/// Collect the `SET` clauses and bound values for the columns being changed.
+///
+/// Returns `(clauses, values)` with one `?` placeholder per value, in matching order.
+fn build_role_updates(
+    params: &UpdateRoleParams<'_>,
+) -> Result<(Vec<&'static str>, Vec<rusqlite::types::Value>)> {
     let mut updates = Vec::new();
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
 
@@ -123,7 +126,7 @@ pub async fn update(conn: &Connection, id: i64, params: UpdateRoleParams<'_>) ->
     }
     if let Some(description) = params.description {
         updates.push("description = ?");
-        values.push(rusqlite::types::Value::Text(description.to_string()));
+        values.push(text_or_null(description));
     }
     if let Some(osm_module) = params.osm_module {
         updates.push("osm_module = ?");
@@ -148,19 +151,26 @@ pub async fn update(conn: &Connection, id: i64, params: UpdateRoleParams<'_>) ->
     }
     if let Some(cmdline_args) = params.cmdline_args {
         updates.push("cmdline_args = ?");
-        values.push(rusqlite::types::Value::Text(cmdline_args.to_string()));
+        values.push(text_or_null(cmdline_args));
     }
     if let Some(config_template) = params.config_template {
         updates.push("config_template = ?");
-        let json = serde_json::to_string(config_template)?;
-        values.push(rusqlite::types::Value::Text(json));
+        let json = config_template.map(serde_json::to_string).transpose()?;
+        values.push(text_or_null(json.as_deref()));
     }
-    if params.clear_firmware_mode {
-        updates.push("firmware_mode = NULL");
-    } else if let Some(mode) = params.firmware_mode {
+    if let Some(firmware_mode) = params.firmware_mode {
         updates.push("firmware_mode = ?");
-        values.push(rusqlite::types::Value::Text(mode.as_db_str().to_string()));
+        values.push(text_or_null(firmware_mode.map(|m| m.as_db_str())));
     }
+
+    Ok((updates, values))
+}
+
+/// Update a role.
+pub async fn update(conn: &Connection, id: i64, params: UpdateRoleParams<'_>) -> Result<Role> {
+    let now = Utc::now();
+
+    let (mut updates, mut values) = build_role_updates(&params)?;
 
     if updates.is_empty() {
         return get(conn, id).await;
@@ -359,16 +369,8 @@ mod tests {
             role.id.unwrap(),
             UpdateRoleParams {
                 name: Some("updated-name"),
-                description: Some("New description"),
-                osm_module: None,
-                os_name: None,
-                os_release: None,
-                os_arch: None,
-                disk_layout: None,
-                cmdline_args: None,
-                config_template: None,
-                firmware_mode: None,
-                clear_firmware_mode: false,
+                description: Some(Some("New description")),
+                ..Default::default()
             },
         )
         .await
@@ -407,17 +409,11 @@ mod tests {
             &db,
             role.id.unwrap(),
             UpdateRoleParams {
-                name: None,
-                description: None,
                 osm_module: Some("Custom"),
                 os_name: Some("Debian"),
                 os_release: Some("12"),
                 os_arch: Some("arm64"),
-                disk_layout: None,
-                cmdline_args: None,
-                config_template: None,
-                firmware_mode: None,
-                clear_firmware_mode: false,
+                ..Default::default()
             },
         )
         .await
@@ -584,17 +580,8 @@ mod tests {
             &db,
             role.id.unwrap(),
             UpdateRoleParams {
-                name: None,
-                description: None,
-                osm_module: None,
-                os_name: None,
-                os_release: None,
-                os_arch: None,
-                disk_layout: None,
-                cmdline_args: None,
-                config_template: None,
-                firmware_mode: Some(common::FirmwareMode::Uefi),
-                clear_firmware_mode: false,
+                firmware_mode: Some(Some(common::FirmwareMode::Uefi)),
+                ..Default::default()
             },
         )
         .await
@@ -606,106 +593,105 @@ mod tests {
         assert_eq!(retrieved.firmware_mode, Some(common::FirmwareMode::Uefi));
     }
 
-    #[tokio::test]
-    async fn test_clear_firmware_mode_sets_null() {
-        let db = setup_db(test_connection_factory!()).await;
-
-        // Create a role that starts with a firmware_mode set.
-        let role = create(
-            &db,
+    /// Create a role that has every nullable column populated, so update tests can observe
+    /// both "cleared" and "left alone".
+    async fn create_populated_role(conn: &Connection) -> i64 {
+        create(
+            conn,
             "role",
-            None,
+            Some("A description"),
             "Default",
             "Ubuntu",
             "24.04",
             "x86-64",
             &empty_disk_layout(),
-            None,
-            None,
+            Some("console=ttyS0"),
+            Some(&serde_json::json!({"k": "v"})),
             Some(common::FirmwareMode::Uefi),
         )
         .await
-        .unwrap();
-
-        assert_eq!(role.firmware_mode, Some(common::FirmwareMode::Uefi));
-
-        // clear_firmware_mode should set firmware_mode to NULL.
-        let updated = update(
-            &db,
-            role.id.unwrap(),
-            UpdateRoleParams {
-                name: None,
-                description: None,
-                osm_module: None,
-                os_name: None,
-                os_release: None,
-                os_arch: None,
-                disk_layout: None,
-                cmdline_args: None,
-                config_template: None,
-                firmware_mode: None,
-                clear_firmware_mode: true,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            updated.firmware_mode.is_none(),
-            "firmware_mode should be cleared to None"
-        );
-
-        let retrieved = get(&db, role.id.unwrap()).await.unwrap();
-        assert!(
-            retrieved.firmware_mode.is_none(),
-            "firmware_mode should be None after clear"
-        );
+        .unwrap()
+        .id
+        .unwrap()
     }
 
     #[tokio::test]
-    async fn test_clear_firmware_mode_takes_precedence_over_firmware_mode_field() {
+    async fn test_update_role_clears_nullable_columns() {
         let db = setup_db(test_connection_factory!()).await;
+        let role_id = create_populated_role(&db).await;
 
-        let role = create(
-            &db,
-            "role",
-            None,
-            "Default",
-            "Ubuntu",
-            "24.04",
-            "x86-64",
-            &empty_disk_layout(),
-            None,
-            None,
-            Some(common::FirmwareMode::Uefi),
-        )
-        .await
-        .unwrap();
-
-        // When clear_firmware_mode is true, firmware_mode field is ignored.
         let updated = update(
             &db,
-            role.id.unwrap(),
+            role_id,
             UpdateRoleParams {
-                name: None,
-                description: None,
-                osm_module: None,
-                os_name: None,
-                os_release: None,
-                os_arch: None,
-                disk_layout: None,
-                cmdline_args: None,
-                config_template: None,
-                firmware_mode: Some(common::FirmwareMode::Bios),
-                clear_firmware_mode: true,
+                description: Some(None),
+                cmdline_args: Some(None),
+                config_template: Some(None),
+                firmware_mode: Some(None),
+                ..Default::default()
             },
         )
         .await
         .unwrap();
 
-        assert!(
-            updated.firmware_mode.is_none(),
-            "clear_firmware_mode=true must override the firmware_mode field"
-        );
+        assert_eq!(updated.description, None);
+        assert_eq!(updated.cmdline_args, None);
+        assert_eq!(updated.config_template, None);
+        assert_eq!(updated.firmware_mode, None);
+
+        let retrieved = get(&db, role_id).await.unwrap();
+        assert_eq!(retrieved.description, None);
+        assert_eq!(retrieved.cmdline_args, None);
+        assert_eq!(retrieved.config_template, None);
+        assert_eq!(retrieved.firmware_mode, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_role_leaves_nullable_columns_alone() {
+        let db = setup_db(test_connection_factory!()).await;
+        let role_id = create_populated_role(&db).await;
+
+        let updated = update(
+            &db,
+            role_id,
+            UpdateRoleParams {
+                name: Some("renamed"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.name, "renamed");
+        assert_eq!(updated.description, Some("A description".to_string()));
+        assert_eq!(updated.cmdline_args, Some("console=ttyS0".to_string()));
+        assert_eq!(updated.config_template, Some(serde_json::json!({"k": "v"})));
+        assert_eq!(updated.firmware_mode, Some(common::FirmwareMode::Uefi));
+    }
+
+    #[tokio::test]
+    async fn test_update_role_sets_nullable_columns() {
+        let db = setup_db(test_connection_factory!()).await;
+        let role_id = create_populated_role(&db).await;
+
+        let new_config = serde_json::json!({"other": 1});
+        let updated = update(
+            &db,
+            role_id,
+            UpdateRoleParams {
+                description: Some(Some("New description")),
+                cmdline_args: Some(Some("quiet")),
+                config_template: Some(Some(&new_config)),
+                firmware_mode: Some(Some(common::FirmwareMode::Bios)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.description, Some("New description".to_string()));
+        assert_eq!(updated.cmdline_args, Some("quiet".to_string()));
+        assert_eq!(updated.config_template, Some(new_config));
+        assert_eq!(updated.firmware_mode, Some(common::FirmwareMode::Bios));
     }
 }

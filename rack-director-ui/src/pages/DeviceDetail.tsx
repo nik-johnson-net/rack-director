@@ -396,6 +396,15 @@ function DeviceDetail() {
   const hostname = device.attributes?.hostname || device.uuid;
   const lifecycle = status?.current_lifecycle ?? device.lifecycle ?? "new";
   const nics = device.attributes?.network_interfaces ?? [];
+  const primaryNetworkId = nics
+    .map((nic) => nic.assigned_network_id ?? nic.network_id)
+    .find((id) => id != null);
+  const primaryDomain = networks.find((n) => n.id === primaryNetworkId)?.domain_name;
+  // Mirror the install-script renderer: it builds the FQDN from the device's own
+  // hostname attribute, falling back to "unknown" — not from the UUID that this
+  // page displays as a title fallback.
+  const shortHostname = device.attributes?.hostname || "unknown";
+  const fqdn = primaryDomain ? `${shortHostname}.${primaryDomain}` : shortHostname;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const disksAttr: any[] = device.attributes?.disks ?? [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -431,6 +440,7 @@ function DeviceDetail() {
               />
             }
           />
+          <KVRow label="FQDN" value={<span className="text-xs font-mono">{fqdn}</span>} />
           <KVRow label="Architecture" value={<span className="text-xs">{device.architecture}</span>} />
           <KVRow
             label="Boot Mode"

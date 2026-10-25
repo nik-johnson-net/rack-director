@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::database::FromRow;
+use crate::patch::Patch;
 
 /// A Role defines how a device should be provisioned
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,11 +87,16 @@ pub struct CreateRoleRequest {
     pub firmware_mode: Option<common::FirmwareMode>,
 }
 
-/// Request to update a role
-#[derive(Debug, Deserialize)]
+/// Request to update a role.
+///
+/// Fields backed by nullable columns use [`Patch`], which distinguishes an absent key (keep)
+/// from an explicit `null` (clear). The struct-level `#[serde(default)]` is mandatory — see
+/// the `crate::patch` module docs.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
-    pub description: Option<String>,
+    pub description: Patch<String>,
     /// OSM module name (e.g., "Default")
     pub osm_module: Option<String>,
     /// OS name within the module (e.g., "Ubuntu")
@@ -100,17 +106,53 @@ pub struct UpdateRoleRequest {
     /// Architecture (e.g., "x86-64")
     pub os_arch: Option<String>,
     pub disk_layout: Option<DiskLayout>,
-    pub cmdline_args: Option<String>,
-    pub config_template: Option<serde_json::Value>,
-    pub firmware_mode: Option<common::FirmwareMode>,
-    /// When true, clears firmware_mode to NULL regardless of the firmware_mode field.
-    /// Use this to remove a firmware constraint from a role.
-    #[serde(default)]
-    pub clear_firmware_mode: bool,
+    pub cmdline_args: Patch<String>,
+    pub config_template: Patch<serde_json::Value>,
+    pub firmware_mode: Patch<common::FirmwareMode>,
 }
 
 /// Request to assign a role to a device
 #[derive(Debug, Deserialize)]
 pub struct AssignRoleRequest {
     pub role_id: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_update(json: &str) -> UpdateRoleRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn test_update_role_request_absent_patch_fields_are_keep() {
+        let req = parse_update(r#"{"name": "web"}"#);
+        assert_eq!(req.description, Patch::Keep);
+        assert_eq!(req.cmdline_args, Patch::Keep);
+        assert_eq!(req.config_template, Patch::Keep);
+        assert_eq!(req.firmware_mode, Patch::Keep);
+    }
+
+    #[test]
+    fn test_update_role_request_null_patch_fields_are_clear() {
+        let req = parse_update(
+            r#"{"description": null, "cmdline_args": null, "config_template": null, "firmware_mode": null}"#,
+        );
+        assert_eq!(req.description, Patch::Clear);
+        assert_eq!(req.cmdline_args, Patch::Clear);
+        assert_eq!(req.config_template, Patch::Clear);
+        assert_eq!(req.firmware_mode, Patch::Clear);
+    }
+
+    #[test]
+    fn test_update_role_request_valued_patch_fields_are_set() {
+        let req = parse_update(
+            r#"{"description": "d", "cmdline_args": "quiet", "config_template": {"k": 1}, "firmware_mode": "uefi"}"#,
+        );
+        assert_eq!(req.description, Patch::Set("d".to_string()));
+        assert_eq!(req.cmdline_args, Patch::Set("quiet".to_string()));
+        assert_eq!(req.config_template, Patch::Set(serde_json::json!({"k": 1})));
+        assert_eq!(req.firmware_mode, Patch::Set(common::FirmwareMode::Uefi));
+    }
 }

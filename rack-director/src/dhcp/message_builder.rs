@@ -34,10 +34,11 @@ pub fn create_base_reply(req: &Message, siaddr: &Ipv4Addr) -> Message {
 /// - Option 1: Subnet Mask (calculated from network subnet CIDR)
 /// - Option 3: Router (gateway address)
 /// - Option 6: DNS Servers (if configured)
+/// - Option 15: Domain Name (if configured)
 ///
 /// # Arguments
 /// * `msg` - The DHCP message to modify
-/// * `network` - The network configuration containing subnet, gateway, and DNS settings
+/// * `network` - The network configuration containing subnet, gateway, DNS, and domain settings
 ///
 /// # Returns
 /// * `Ok(())` - Options added successfully
@@ -61,6 +62,12 @@ pub fn add_network_options(msg: &mut Message, network: &DhcpNetwork) -> Result<(
     if !dns_servers.is_empty() {
         msg.opts_mut()
             .insert(v4::DhcpOption::DomainNameServer(dns_servers));
+    }
+
+    // Only advertise a domain when the network has one configured.
+    if let Some(ref domain) = network.domain_name {
+        msg.opts_mut()
+            .insert(v4::DhcpOption::DomainName(domain.clone()));
     }
 
     Ok(())
@@ -129,6 +136,7 @@ mod tests {
             lease_duration: 3600,
             relay_agent_address: None,
             enable_autodiscovery: false,
+            domain_name: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -195,6 +203,7 @@ mod tests {
             lease_duration: 3600,
             relay_agent_address: None,
             enable_autodiscovery: false,
+            domain_name: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -224,6 +233,7 @@ mod tests {
             lease_duration: 3600,
             relay_agent_address: None,
             enable_autodiscovery: false,
+            domain_name: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -257,6 +267,71 @@ mod tests {
             dns.is_none(),
             "DNS option should be absent when dns_servers is empty"
         );
+    }
+
+    #[test]
+    fn test_add_network_options_with_domain() {
+        use chrono::Utc;
+
+        let network = DhcpNetwork {
+            id: 1,
+            name: "test-network".to_string(),
+            subnet: "10.0.0.0/24".to_string(),
+            gateway: Some("10.0.0.1".to_string()),
+            dns_servers: vec![],
+            lease_duration: 3600,
+            relay_agent_address: None,
+            enable_autodiscovery: false,
+            domain_name: Some("test.local".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mut msg = Message::default();
+        add_network_options(&mut msg, &network).unwrap();
+
+        let domain = msg.opts().iter().find_map(|(_, opt)| {
+            if let v4::DhcpOption::DomainName(d) = opt {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(domain, Some("test.local".to_string()));
+    }
+
+    #[test]
+    fn test_add_network_options_no_domain() {
+        use chrono::Utc;
+
+        {
+            let domain_name = None;
+            let network = DhcpNetwork {
+                id: 1,
+                name: "test-network".to_string(),
+                subnet: "10.0.0.0/24".to_string(),
+                gateway: Some("10.0.0.1".to_string()),
+                dns_servers: vec![],
+                lease_duration: 3600,
+                relay_agent_address: None,
+                enable_autodiscovery: false,
+                domain_name,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            let mut msg = Message::default();
+            add_network_options(&mut msg, &network).unwrap();
+
+            let domain = msg
+                .opts()
+                .iter()
+                .find(|(_, opt)| matches!(opt, v4::DhcpOption::DomainName(_)));
+            assert!(
+                domain.is_none(),
+                "DomainName option should be absent when domain_name is None"
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@ use super::{Platform, PlatformAttributes};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 
-use crate::database::{Connection, FromRow};
+use crate::database::{Connection, FromRow, text_or_null};
 
 /// Typed error returned by [`update_disk_label`].
 ///
@@ -118,13 +118,16 @@ pub async fn list(conn: &Connection) -> Result<Vec<Platform>> {
 }
 
 /// Update a platform.
+///
+/// Nullable columns (`description`, `firmware_mode`) take `Option<Option<_>>`: `None` leaves
+/// the column unchanged, `Some(None)` sets it to `NULL`, and `Some(Some(v))` writes `v`.
 pub async fn update(
     conn: &Connection,
     id: i64,
     name: Option<&str>,
-    description: Option<&str>,
+    description: Option<Option<&str>>,
     attributes: Option<&PlatformAttributes>,
-    firmware_mode: Option<common::FirmwareMode>,
+    firmware_mode: Option<Option<common::FirmwareMode>>,
 ) -> Result<Platform> {
     let now = Utc::now();
 
@@ -137,7 +140,7 @@ pub async fn update(
     }
     if let Some(description) = description {
         updates.push("description = ?");
-        values.push(rusqlite::types::Value::Text(description.to_string()));
+        values.push(text_or_null(description));
     }
     if let Some(attributes) = attributes {
         updates.push("attributes = ?");
@@ -146,7 +149,7 @@ pub async fn update(
     }
     if let Some(mode) = firmware_mode {
         updates.push("firmware_mode = ?");
-        values.push(rusqlite::types::Value::Text(mode.as_db_str().to_string()));
+        values.push(text_or_null(mode.map(|m| m.as_db_str())));
     }
 
     if updates.is_empty() {
@@ -372,7 +375,7 @@ mod tests {
             &db,
             platform.id.unwrap(),
             Some("Updated Name"),
-            Some("New description"),
+            Some(Some("New description")),
             None,
             None,
         )
@@ -381,6 +384,64 @@ mod tests {
 
         assert_eq!(updated.name, "Updated Name");
         assert_eq!(updated.description, Some("New description".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_platform_clears_nullable_columns() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(
+            &db,
+            "Populated",
+            Some("A description"),
+            &attrs,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        let updated = update(
+            &db,
+            platform.id.unwrap(),
+            None,
+            Some(None),
+            None,
+            Some(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.description, None);
+        assert_eq!(updated.firmware_mode, None);
+
+        let retrieved = get(&db, platform.id.unwrap()).await.unwrap();
+        assert_eq!(retrieved.description, None);
+        assert_eq!(retrieved.firmware_mode, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_platform_leaves_nullable_columns_alone() {
+        let db = setup_db(test_database_path!()).await;
+
+        let attrs = sample_platform_attributes();
+        let platform = create(
+            &db,
+            "Populated",
+            Some("A description"),
+            &attrs,
+            Some(common::FirmwareMode::Uefi),
+        )
+        .await
+        .unwrap();
+
+        let updated = update(&db, platform.id.unwrap(), Some("Renamed"), None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.description, Some("A description".to_string()));
+        assert_eq!(updated.firmware_mode, Some(common::FirmwareMode::Uefi));
     }
 
     #[tokio::test]
@@ -686,7 +747,7 @@ mod tests {
             None,
             None,
             None,
-            Some(common::FirmwareMode::Uefi),
+            Some(Some(common::FirmwareMode::Uefi)),
         )
         .await
         .unwrap();

@@ -118,6 +118,7 @@ mod tests {
             lease_duration: 3600,
             relay_agent_address: None,
             enable_autodiscovery: false,
+            domain_name: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

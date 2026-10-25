@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::database::FromRow;
+use crate::patch::Patch;
 
 /// A Platform defines a common hardware configuration for similar physical devices.
 /// Platforms provide labels (ROOT, DATA1, NIC1) that Roles can reference in disk layouts.
@@ -119,13 +120,18 @@ pub struct CreatePlatformRequest {
     pub firmware_mode: Option<common::FirmwareMode>,
 }
 
-/// Request to update an existing platform
-#[derive(Debug, Deserialize)]
+/// Request to update an existing platform.
+///
+/// Fields backed by nullable columns use [`Patch`], which distinguishes an absent key (keep)
+/// from an explicit `null` (clear). The struct-level `#[serde(default)]` is mandatory — see
+/// the `crate::patch` module docs.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct UpdatePlatformRequest {
     pub name: Option<String>,
-    pub description: Option<String>,
+    pub description: Patch<String>,
     pub attributes: Option<PlatformAttributes>,
-    pub firmware_mode: Option<common::FirmwareMode>,
+    pub firmware_mode: Patch<common::FirmwareMode>,
 }
 
 /// Request to assign a platform to a device
@@ -194,5 +200,30 @@ mod tests {
         assert_eq!(attrs.disks[0].size_gb, 480);
         assert_eq!(attrs.disks[0].disk_type, DiskType::Ssd);
         assert_eq!(attrs.disks[0].label, Some("ROOT".to_string()));
+    }
+
+    fn parse_update(json: &str) -> UpdatePlatformRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn test_update_platform_request_absent_patch_fields_are_keep() {
+        let req = parse_update(r#"{"name": "p"}"#);
+        assert_eq!(req.description, Patch::Keep);
+        assert_eq!(req.firmware_mode, Patch::Keep);
+    }
+
+    #[test]
+    fn test_update_platform_request_null_patch_fields_are_clear() {
+        let req = parse_update(r#"{"description": null, "firmware_mode": null}"#);
+        assert_eq!(req.description, Patch::Clear);
+        assert_eq!(req.firmware_mode, Patch::Clear);
+    }
+
+    #[test]
+    fn test_update_platform_request_valued_patch_fields_are_set() {
+        let req = parse_update(r#"{"description": "d", "firmware_mode": "bios"}"#);
+        assert_eq!(req.description, Patch::Set("d".to_string()));
+        assert_eq!(req.firmware_mode, Patch::Set(common::FirmwareMode::Bios));
     }
 }
