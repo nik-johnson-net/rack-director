@@ -14,6 +14,9 @@ pub struct NetworkInfo {
     pub dns_servers: Vec<String>,
     pub netmask: String,
     pub prefix_length: u8,
+    /// DNS domain of the primary NIC's network, used to build `device.fqdn`.
+    /// `None` when the network has no domain configured.
+    pub domain_name: Option<String>,
 }
 
 /// Per-NIC network configuration context for install-script templates.
@@ -30,6 +33,7 @@ pub struct NetworkInfo {
 /// - `{{ this.gateway }}` — network gateway; absent when the network has no gateway — guard with `{{#if this.gateway}}`
 /// - `{{ this.dns_servers }}` — comma-separated DNS servers; empty when none — guard with `{{#if this.dns_servers}}`
 /// - `{{ this.is_primary }}` — `true` for the primary NIC (DHCP-lease NIC or first configured)
+/// - `{{ this.domain_name }}` — this NIC's network domain; absent when the network has no domain — guard with `{{#if this.domain_name}}`
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NicNetworkContext {
     pub interface_name: String,
@@ -43,6 +47,8 @@ pub struct NicNetworkContext {
     pub dns_servers: String,
     /// `true` for the primary NIC (the DHCP-lease NIC if any, else the first configured NIC).
     pub is_primary: bool,
+    /// DNS domain of this NIC's network. `None` when the network has no domain configured.
+    pub domain_name: Option<String>,
 }
 
 /// Device attributes for template rendering
@@ -180,6 +186,11 @@ pub fn build_disk_layout_context(
 ///
 /// For the legacy `device.gateway` field, an empty string is emitted when the
 /// primary NIC's network has no gateway (so existing templates don't print "null").
+///
+/// `device.fqdn` is `{hostname}.{domain}` when the primary NIC's network has a domain
+/// configured, else it falls back to the bare hostname. `device.domain_name` emits an
+/// empty string when the primary network has no domain, following the same
+/// empty-string-when-absent convention as `device.gateway`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_install_script_osm(
     template: &str,
@@ -223,10 +234,21 @@ pub fn render_install_script_osm(
     let legacy_gateway = network.gateway.clone().unwrap_or_default();
     let dns_csv = network.dns_servers.join(",");
 
+    // `device.fqdn` combines the short hostname with the primary NIC's network domain.
+    // Falls back to the bare hostname when the network has no domain configured.
+    let short_hostname = device.hostname.as_deref().unwrap_or("unknown");
+    let domain = network.domain_name.as_deref();
+    let fqdn = match domain {
+        Some(d) => format!("{short_hostname}.{d}"),
+        None => short_hostname.to_string(),
+    };
+
     let context = json!({
         "device": {
             "uuid": device.uuid.to_string(),
-            "hostname": device.hostname.as_deref().unwrap_or("unknown"),
+            "hostname": short_hostname,
+            "fqdn": fqdn,
+            "domain_name": domain.unwrap_or(""),
             "mac_address": network.mac_address,
             "ip_address": network.ip_address,
             "gateway": legacy_gateway,
@@ -300,6 +322,7 @@ mod tests {
             dns_servers: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             netmask: "255.255.255.0".to_string(),
             prefix_length: 24,
+            domain_name: None,
         }
     }
 
@@ -319,6 +342,7 @@ mod tests {
             gateway: gateway.map(|s| s.to_string()),
             dns_servers: dns.to_string(),
             is_primary: primary,
+            domain_name: None,
         }
     }
 
@@ -689,9 +713,86 @@ mod tests {
         assert_eq!(result, "gateway=");
     }
 
+    /// Verifies `device.fqdn` combines the short hostname with the primary NIC's network
+    /// domain, and that `device.domain_name` reflects the same domain.
+    #[test]
+    fn test_render_fqdn_with_domain() {
+        let template =
+            "fqdn={{ device.fqdn }} domain={{ device.domain_name }} hostname={{ device.hostname }}";
+        let mut network = make_network();
+        network.domain_name = Some("test.local".to_string());
+        let result = render_install_script_osm(
+            template,
+            &make_device(),
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Linux",
+            "1.0",
+            &network,
+            &[],
+            &empty_disk_layout(),
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            "fqdn=server01.test.local domain=test.local hostname=server01"
+        );
+        // A hostname is a single label, so the domain appears exactly once in the FQDN.
+        let fqdn = result.split(' ').next().unwrap();
+        assert_eq!(fqdn.matches("test.local").count(), 1);
+    }
+
+    /// Verifies `device.fqdn` falls back to the bare hostname, and `device.domain_name`
+    /// renders as an empty string, when the primary NIC's network has no domain.
+    #[test]
+    fn test_render_fqdn_without_domain() {
+        let template = "fqdn={{ device.fqdn }} domain={{ device.domain_name }}";
+        let result = render_install_script_osm(
+            template,
+            &make_device(),
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Linux",
+            "1.0",
+            &make_network(),
+            &[],
+            &empty_disk_layout(),
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+        assert_eq!(result, "fqdn=server01 domain=");
+    }
+
+    /// Verifies `device.fqdn` falls back to "unknown" (matching `device.hostname`'s own
+    /// fallback) when the device has no hostname and the network has no domain.
+    #[test]
+    fn test_render_fqdn_no_hostname_falls_back_to_unknown() {
+        let template = "fqdn={{ device.fqdn }}";
+        let mut device = make_device();
+        device.hostname = None;
+        let result = render_install_script_osm(
+            template,
+            &device,
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Linux",
+            "1.0",
+            &make_network(),
+            &[],
+            &empty_disk_layout(),
+            "http://127.0.0.1:3000",
+        )
+        .unwrap();
+        assert_eq!(result, "fqdn=unknown");
+    }
+
     /// Verifies that `device.network_interfaces` is accessible in templates and that
-    /// per-NIC gateway/DNS fields render correctly, including the case where a NIC
-    /// has no gateway (the `{{#if this.gateway}}` guard prevents output).
+    /// per-NIC gateway/DNS/domain fields render correctly, including the cases where a
+    /// NIC has no gateway or no domain (guarded with `{{#if}}`).
     #[test]
     fn test_render_network_interfaces_loop() {
         let template = concat!(
@@ -699,6 +800,7 @@ mod tests {
             "{{this.mac_address}}:{{this.ip_address}}",
             "{{#if this.gateway}}:gw={{this.gateway}}{{/if}}",
             "{{#if this.dns_servers}}:dns={{this.dns_servers}}{{/if}}",
+            "{{#if this.domain_name}}:domain={{this.domain_name}}{{/if}}",
             "{{#if this.is_primary}}:PRIMARY{{/if}}",
             "\n",
             "{{/each}}"
@@ -713,7 +815,7 @@ mod tests {
                 "8.8.8.8",
                 true,
             ),
-            // Secondary NIC — different gateway
+            // Secondary NIC — different gateway, has a domain
             NicNetworkContext {
                 interface_name: "eth1".to_string(),
                 mac_address: "aa:bb:cc:dd:ee:02".to_string(),
@@ -723,8 +825,9 @@ mod tests {
                 gateway: Some("192.168.1.1".to_string()),
                 dns_servers: String::new(),
                 is_primary: false,
+                domain_name: Some("secondary.local".to_string()),
             },
-            // Third NIC — no gateway, no DNS
+            // Third NIC — no gateway, no DNS, no domain
             make_nic("aa:bb:cc:dd:ee:03", "172.16.0.10", None, "", false),
         ];
 
@@ -744,23 +847,29 @@ mod tests {
         .unwrap();
 
         let lines: Vec<&str> = result.lines().collect();
-        // Primary NIC has gateway and is_primary marker
+        // Primary NIC has gateway and is_primary marker, no domain
         assert!(
             lines[0].contains("aa:bb:cc:dd:ee:01:10.0.0.100:gw=10.0.0.1:dns=8.8.8.8:PRIMARY"),
             "Primary NIC line unexpected: {:?}",
             lines[0]
         );
-        // Secondary NIC has its own gateway, no DNS, no PRIMARY marker
+        assert!(!lines[0].contains("domain="), "Primary NIC has no domain");
+        // Secondary NIC has its own gateway, no DNS, its own domain, no PRIMARY marker
         assert!(
             lines[1].contains("aa:bb:cc:dd:ee:02:192.168.1.50:gw=192.168.1.1"),
             "Secondary NIC line unexpected: {:?}",
             lines[1]
         );
         assert!(
+            lines[1].contains("domain=secondary.local"),
+            "Secondary NIC must emit its own domain: {:?}",
+            lines[1]
+        );
+        assert!(
             !lines[1].contains("PRIMARY"),
             "Secondary NIC must not have PRIMARY marker"
         );
-        // Third NIC — no gateway, no DNS emitted
+        // Third NIC — no gateway, no DNS, no domain emitted
         assert!(
             lines[2].contains("aa:bb:cc:dd:ee:03:172.16.0.10"),
             "Third NIC line unexpected: {:?}",
@@ -768,6 +877,10 @@ mod tests {
         );
         assert!(!lines[2].contains("gw="), "Third NIC must not emit gateway");
         assert!(!lines[2].contains("dns="), "Third NIC must not emit dns");
+        assert!(
+            !lines[2].contains("domain="),
+            "Third NIC must not emit domain"
+        );
     }
 
     /// Verifies that the legacy single-value fields resolve to the primary NIC even
@@ -902,6 +1015,8 @@ mod tests {
             "8.8.8.8",
             true,
         );
+        let mut network = make_network();
+        network.domain_name = Some("test.local".to_string());
         let result = render_install_script_osm(
             &template,
             &device,
@@ -910,7 +1025,7 @@ mod tests {
             &config_template,
             "CentOS",
             "10",
-            &make_network(),
+            &network,
             &[primary_nic],
             &disk_layout,
             "http://127.0.0.1:3000",
@@ -953,6 +1068,14 @@ mod tests {
         assert!(
             result.contains("bootloader --boot-drive="),
             "expected 'bootloader --boot-drive=' in rendered output"
+        );
+
+        // The network directive's hostname must carry the FQDN (hostname + network domain),
+        // not the bare hostname.
+        assert!(
+            result.contains("--hostname=server01.test.local"),
+            "expected '--hostname=server01.test.local' in rendered output, got: {}",
+            result
         );
     }
 }

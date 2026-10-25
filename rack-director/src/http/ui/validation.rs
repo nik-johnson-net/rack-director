@@ -1,3 +1,4 @@
+use crate::patch::Patch;
 use common::Ipv4Subnet;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -14,6 +15,17 @@ pub fn validate_required(value: &str, field_name: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Reject an explicitly-supplied blank value for a nullable field.
+///
+/// `None` (absent) is accepted. `null` is the only way to clear a nullable column; an empty (or
+/// whitespace-only) string is a client error rather than a clear request. For a [`Patch`]
+/// field pass `patch.value().map(String::as_str)` so only `Set` values are checked.
+pub fn validate_not_blank(value: Option<&str>, field_name: &str) -> Option<String> {
+    value
+        .filter(|v| v.trim().is_empty())
+        .map(|_| format!("{} cannot be empty; send null to clear.", field_name))
 }
 
 /// Validate string length constraints
@@ -92,10 +104,15 @@ pub fn validate_u32_range(value: u32, min: u32, max: u32, field_name: &str) -> O
     }
 }
 
-/// Validate hostname according to RFC 1123
+/// Validate a device hostname as a **single** DNS label (RFC 1123).
+///
+/// Dots are rejected: the domain belongs to the device's network, and install-script rendering
+/// appends it unconditionally (`{hostname}.{domain}`), so a dotted hostname would install with a
+/// doubled domain. Enforcing bareness here keeps that concatenation correct by construction.
+///
 /// - Required field (non-empty)
-/// - Max length 253 characters
-/// - Valid characters: alphanumeric, hyphens, dots
+/// - Max length 63 characters (RFC 1123 label limit)
+/// - Valid characters: ASCII alphanumerics and hyphens
 /// - No leading or trailing hyphens
 pub fn validate_hostname(hostname: &str) -> Result<(), HashMap<String, String>> {
     let mut errors = ValidationErrors::new();
@@ -103,35 +120,72 @@ pub fn validate_hostname(hostname: &str) -> Result<(), HashMap<String, String>> 
     // Hostname must not be empty
     errors.add_if_err("hostname", validate_required(hostname, "Hostname"));
 
-    // Hostname max length (RFC 1123: 253 chars total)
-    errors.add_if_err(
-        "hostname",
-        validate_string_length(hostname, 253, "Hostname"),
-    );
+    // A single label is capped at 63 characters (RFC 1123), not the 253-char FQDN limit
+    errors.add_if_err("hostname", validate_string_length(hostname, 63, "Hostname"));
 
-    // Hostname format: alphanumeric and hyphens/dots, no leading/trailing hyphens
     if !hostname.is_empty() {
-        let valid = hostname
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
-
-        if !valid {
+        if hostname.contains('.') {
             errors.add_error(
                 "hostname",
-                "Hostname must contain only letters, numbers, hyphens, and dots".to_string(),
+                "Hostname must be a single label; the domain comes from the network".to_string(),
             );
         } else {
-            // Check for leading/trailing hyphens
-            if hostname.starts_with('-') || hostname.ends_with('-') {
-                errors.add_error(
-                    "hostname",
-                    "Hostname cannot start or end with a hyphen".to_string(),
-                );
-            }
+            errors.add_if_err(
+                "hostname",
+                validate_dns_label(hostname, "Hostname", "Hostname"),
+            );
         }
     }
 
     errors.into_result()
+}
+
+/// Validate a DNS domain name (RFC 1123): dot-separated labels of ASCII alphanumerics and
+/// hyphens, each 1-63 chars, no leading/trailing hyphen, no empty labels, <=253 chars total.
+///
+/// An empty string is the caller's concern — treat it as "no domain" before calling this.
+pub fn validate_domain_name(domain: &str) -> Option<String> {
+    if let Some(err) = validate_string_length(domain, 253, "Domain name") {
+        return Some(err);
+    }
+
+    for label in domain.split('.') {
+        if label.is_empty() {
+            return Some("Domain name cannot contain an empty label".to_string());
+        }
+        if label.len() > 63 {
+            return Some(format!(
+                "Domain name label '{}' must be 63 characters or fewer",
+                label
+            ));
+        }
+        let label_subject = format!("Domain name label '{}'", label);
+        if let Some(err) = validate_dns_label(label, "Domain name labels", &label_subject) {
+            return Some(err);
+        }
+    }
+
+    None
+}
+
+/// RFC 1123 label content rules shared by hostnames and domain labels: ASCII alphanumerics and
+/// hyphens only, no leading/trailing hyphen. Length and emptiness are the caller's concern.
+///
+/// `chars_subject` and `edge_subject` are the nouns used in the respective error messages.
+fn validate_dns_label(label: &str, chars_subject: &str, edge_subject: &str) -> Option<String> {
+    if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        Some(format!(
+            "{} must contain only letters, numbers, and hyphens",
+            chars_subject
+        ))
+    } else if label.starts_with('-') || label.ends_with('-') {
+        Some(format!(
+            "{} cannot start or end with a hyphen",
+            edge_subject
+        ))
+    } else {
+        None
+    }
 }
 
 // ============================================================================
@@ -180,6 +234,128 @@ use crate::{database::Connection, dhcp};
 
 use super::networks::{CreateNetworkRequest, UpdateNetworkRequest};
 
+/// Record a blank-value error for `field` when `value` is present but blank.
+///
+/// Returns `true` when the value is acceptable (absent, or present and non-blank), so callers
+/// can skip format checks that would otherwise pile a second error onto the same field.
+fn accept_non_blank(
+    errors: &mut ValidationErrors,
+    field: &str,
+    value: Option<&str>,
+    field_name: &str,
+) -> bool {
+    let error = validate_not_blank(value, field_name);
+    let accepted = error.is_none();
+    errors.add_if_err(field, error);
+    accepted
+}
+
+/// Validate a network name and check it is not already taken by a *different* network.
+async fn validate_network_name(
+    conn: &Connection,
+    name: &str,
+    exclude_network_id: Option<i64>,
+    errors: &mut ValidationErrors,
+) {
+    errors.add_if_err("name", validate_required(name, "Network name"));
+    errors.add_if_err("name", validate_string_length(name, 255, "Network name"));
+
+    match dhcp::store::get_network_by_name(conn, name).await {
+        Ok(Some(existing)) if Some(existing.id) != exclude_network_id => {
+            errors.add_error(
+                "name",
+                "A network with this name already exists".to_string(),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("Failed to check for duplicate network name: {}", e);
+        }
+    }
+}
+
+/// Add an error when `relay` is already claimed by a network other than `exclude_network_id`.
+///
+/// A `None` relay means the network is local L2; only one such network may exist.
+async fn check_relay_uniqueness(
+    conn: &Connection,
+    relay: Option<&str>,
+    exclude_network_id: Option<i64>,
+    errors: &mut ValidationErrors,
+) {
+    let existing = match dhcp::store::get_network_by_relay_string(conn, relay).await {
+        Ok(Some(network)) => network,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!("Failed to check for duplicate relay agent address: {}", e);
+            return;
+        }
+    };
+
+    if Some(existing.id) == exclude_network_id {
+        return;
+    }
+
+    let message = if relay.is_none() {
+        "A network without a relay agent already exists. Only one local L2 network is allowed."
+    } else {
+        "A network with this relay agent address already exists"
+    };
+    errors.add_error("relay_agent_address", message.to_string());
+}
+
+/// Validate a lease duration in seconds.
+fn validate_lease_duration(lease_duration: u32) -> Option<String> {
+    const ONE_YEAR_SECONDS: u32 = 31536000;
+    validate_u32_range(lease_duration, 1, ONE_YEAR_SECONDS, "Lease duration")
+}
+
+/// Validate the gateway (when there is one) against the parsed subnet, recording errors for
+/// both `subnet` and `gateway` as appropriate.
+fn validate_subnet_and_gateway(
+    subnet_str: &str,
+    gateway: Option<&str>,
+    errors: &mut ValidationErrors,
+) {
+    match validate_cidr_subnet(subnet_str) {
+        Err(err) => errors.add_if_err("subnet", Some(err)),
+        Ok(subnet) => {
+            if let Some(gw) = gateway {
+                errors.add_if_err("gateway", validate_ipv4_address(gw));
+                errors.add_if_err("gateway", validate_ip_in_subnet(gw, &subnet));
+            }
+        }
+    }
+}
+
+/// Validate an optional domain name: not blank, and a well-formed RFC 1123 domain.
+///
+/// No duplicate check -- multiple networks may legitimately share one domain.
+fn validate_domain(errors: &mut ValidationErrors, domain: Option<&str>) {
+    if accept_non_blank(errors, "domain_name", domain, "Domain name")
+        && let Some(domain) = domain
+    {
+        errors.add_if_err("domain_name", validate_domain_name(domain));
+    }
+}
+
+/// Validate an optional relay agent address: not blank, a valid IPv4 address, and not already
+/// claimed by a network other than `exclude_network_id`. `None` means local L2.
+async fn validate_relay(
+    conn: &Connection,
+    relay: Option<&str>,
+    exclude_network_id: Option<i64>,
+    errors: &mut ValidationErrors,
+) {
+    if !accept_non_blank(errors, "relay_agent_address", relay, "Relay agent address") {
+        return;
+    }
+    if let Some(relay) = relay {
+        errors.add_if_err("relay_agent_address", validate_ipv4_address(relay));
+    }
+    check_relay_uniqueness(conn, relay, exclude_network_id, errors).await;
+}
+
 /// Validate create network request using the generic validators
 pub async fn validate_create_network_request(
     conn: &Connection,
@@ -187,93 +363,39 @@ pub async fn validate_create_network_request(
 ) -> Result<(), HashMap<String, String>> {
     let mut errors = ValidationErrors::new();
 
-    // Validate name using generic validators
-    errors.add_if_err("name", validate_required(&req.name, "Network name"));
-    errors.add_if_err(
-        "name",
-        validate_string_length(&req.name, 255, "Network name"),
+    validate_network_name(conn, &req.name, None, &mut errors).await;
+
+    // An explicit empty gateway is a client error; omit the field (or send null) for no gateway.
+    let gateway = req.gateway.as_deref();
+    let gateway_ok = accept_non_blank(&mut errors, "gateway", gateway, "Gateway");
+    validate_subnet_and_gateway(
+        &req.subnet,
+        if gateway_ok { gateway } else { None },
+        &mut errors,
     );
 
-    // Check for duplicate network name
-    match dhcp::store::get_network_by_name(conn, &req.name).await {
-        Ok(Some(_)) => {
-            errors.add_error(
-                "name",
-                "A network with this name already exists".to_string(),
-            );
-        }
-        Ok(None) => {}
-        Err(e) => {
-            log::warn!("Failed to check for duplicate network name: {}", e);
-        }
-    }
-
-    // Validate subnet and (optional) gateway together
-    match validate_cidr_subnet(&req.subnet) {
-        Err(err) => {
-            errors.add_if_err("subnet", Some(err));
-        }
-        Ok(subnet) => {
-            // Only validate gateway when it is provided
-            if let Some(ref gw) = req.gateway {
-                errors.add_if_err("gateway", validate_ipv4_address(gw));
-                errors.add_if_err("gateway", validate_ip_in_subnet(gw, &subnet));
-            }
-        }
-    }
-
-    // Validate DNS servers using generic list validator (min 0 — empty list is allowed)
+    // Empty DNS list is allowed -- it means "advertise no DNS servers".
     errors.add_if_err(
         "dns_servers",
         validate_ipv4_list(&req.dns_servers, "DNS server", 0),
     );
-
-    // Validate lease duration using generic range validator
-    const ONE_YEAR_SECONDS: u32 = 31536000;
     errors.add_if_err(
         "lease_duration",
-        validate_u32_range(req.lease_duration, 1, ONE_YEAR_SECONDS, "Lease duration"),
+        validate_lease_duration(req.lease_duration),
     );
 
-    // Validate relay agent if present
-    if let Some(ref relay) = req.relay_agent_address {
-        // Validate format if not empty
-        if !relay.is_empty() {
-            errors.add_if_err("relay_agent_address", validate_ipv4_address(relay));
-        }
-    }
-
-    // Check for duplicate relay agent address
-    let relay_for_check = req
-        .relay_agent_address
-        .as_ref()
-        .and_then(|r| if r.is_empty() { None } else { Some(r.as_str()) });
-
-    match dhcp::store::get_network_by_relay_string(conn, relay_for_check).await {
-        Ok(Some(_)) => {
-            if relay_for_check.is_none() {
-                errors.add_error(
-                    "relay_agent_address",
-                    "A network without a relay agent already exists. Only one local L2 network is allowed.".to_string(),
-                );
-            } else {
-                errors.add_error(
-                    "relay_agent_address",
-                    "A network with this relay agent address already exists".to_string(),
-                );
-            }
-        }
-        Ok(None) => {}
-        Err(e) => {
-            log::warn!("Failed to check for duplicate relay agent address: {}", e);
-        }
-    }
+    validate_domain(&mut errors, req.domain_name.as_deref());
+    validate_relay(conn, req.relay_agent_address.as_deref(), None, &mut errors).await;
 
     errors.into_result()
 }
 
-/// Validate update network request using the generic validators
-/// Excludes the network being updated from duplicate checks
+/// Validate update network request using the generic validators.
+///
+/// Excludes the network being updated from duplicate checks. `Patch` fields distinguish
+/// "leave unchanged" from "clear": clearing the gateway removes it from subnet validation,
+/// and clearing the relay agent turns the network into a local L2 network for the purposes
+/// of the uniqueness check.
 pub async fn validate_update_network_request(
     conn: &Connection,
     network_id: i64,
@@ -281,63 +403,29 @@ pub async fn validate_update_network_request(
 ) -> Result<(), HashMap<String, String>> {
     let mut errors = ValidationErrors::new();
 
-    // Validate name if provided
     if let Some(ref name) = req.name {
-        errors.add_if_err("name", validate_required(name, "Network name"));
-        errors.add_if_err("name", validate_string_length(name, 255, "Network name"));
-
-        // Check for duplicate network name (excluding current network)
-        match dhcp::store::get_network_by_name(conn, name).await {
-            Ok(Some(existing_network)) => {
-                if existing_network.id != network_id {
-                    errors.add_error(
-                        "name",
-                        "A network with this name already exists".to_string(),
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                log::warn!("Failed to check for duplicate network name: {}", e);
-            }
-        }
+        validate_network_name(conn, name, Some(network_id), &mut errors).await;
     }
 
-    // Validate subnet and (optional) gateway together if either is provided
-    if req.subnet.is_some() || req.gateway.is_some() {
-        // Get the current network to fill in missing values
-        let current_network = match dhcp::store::get_network(conn, network_id).await {
-            Ok(net) => net,
-            Err(e) => {
-                log::warn!("Failed to fetch current network for validation: {}", e);
-                return errors.into_result();
-            }
-        };
+    // A blank gateway is rejected here and then dropped from the co-validation so it cannot
+    // pile a second error onto the same field; an accompanying subnet change is still checked.
+    let gateway_value = req.gateway.value().map(String::as_str);
+    let gateway_ok = accept_non_blank(&mut errors, "gateway", gateway_value, "Gateway");
+    let gateway = match &req.gateway {
+        Patch::Keep => None,
+        Patch::Set(gw) if gateway_ok => Some(Some(gw.as_str())),
+        Patch::Clear | Patch::Set(_) => Some(None),
+    };
+    validate_updated_subnet_and_gateway(
+        conn,
+        network_id,
+        req.subnet.as_deref(),
+        gateway,
+        &mut errors,
+    )
+    .await;
 
-        let subnet_str = req.subnet.as_deref().unwrap_or(&current_network.subnet);
-
-        // Determine the effective gateway: request value, then existing value, then None.
-        // When a new subnet is given we still validate the effective gateway against it.
-        let effective_gateway: Option<&str> = req
-            .gateway
-            .as_deref()
-            .or(current_network.gateway.as_deref());
-
-        match validate_cidr_subnet(subnet_str) {
-            Err(err) => {
-                errors.add_if_err("subnet", Some(err));
-            }
-            Ok(subnet) => {
-                // Only validate the gateway when one is present (new or existing)
-                if let Some(gw) = effective_gateway {
-                    errors.add_if_err("gateway", validate_ipv4_address(gw));
-                    errors.add_if_err("gateway", validate_ip_in_subnet(gw, &subnet));
-                }
-            }
-        }
-    }
-
-    // Validate DNS servers if provided (min 0 — empty list is allowed)
+    // Empty DNS list is allowed -- it means "advertise no DNS servers".
     if let Some(ref dns_servers) = req.dns_servers {
         errors.add_if_err(
             "dns_servers",
@@ -345,53 +433,56 @@ pub async fn validate_update_network_request(
         );
     }
 
-    // Validate lease duration if provided
     if let Some(lease_duration) = req.lease_duration {
-        const ONE_YEAR_SECONDS: u32 = 31536000;
-        errors.add_if_err(
-            "lease_duration",
-            validate_u32_range(lease_duration, 1, ONE_YEAR_SECONDS, "Lease duration"),
-        );
+        errors.add_if_err("lease_duration", validate_lease_duration(lease_duration));
     }
 
-    // Validate relay agent if provided
-    if let Some(relay) = &req.relay_agent_address {
-        // Validate format if not empty
-        if !relay.is_empty() {
-            errors.add_if_err("relay_agent_address", validate_ipv4_address(relay));
-        }
+    validate_domain(&mut errors, req.domain_name.value().map(String::as_str));
 
-        // Check for duplicate relay agent address (excluding current network)
-        let relay_for_check = if relay.is_empty() {
-            None
-        } else {
-            Some(relay.as_str())
-        };
-
-        match dhcp::store::get_network_by_relay_string(conn, relay_for_check).await {
-            Ok(Some(existing_network)) => {
-                if existing_network.id != network_id {
-                    if relay_for_check.is_none() {
-                        errors.add_error(
-                            "relay_agent_address",
-                            "A network without a relay agent already exists. Only one local L2 network is allowed.".to_string(),
-                        );
-                    } else {
-                        errors.add_error(
-                            "relay_agent_address",
-                            "A network with this relay agent address already exists".to_string(),
-                        );
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                log::warn!("Failed to check for duplicate relay agent address: {}", e);
-            }
-        }
+    // `Keep` skips the check entirely; `Clear` is checked as a local L2 network.
+    if !req.relay_agent_address.is_keep() {
+        let relay = req.relay_agent_address.value().map(String::as_str);
+        validate_relay(conn, relay, Some(network_id), &mut errors).await;
     }
 
     errors.into_result()
+}
+
+/// Validate the resulting subnet/gateway pair for an update, filling unchanged values in from
+/// the stored network.
+///
+/// `subnet` is the new subnet, if changed. `gateway` is `None` to keep the stored gateway,
+/// `Some(None)` when there is no gateway to check (cleared, or already rejected as blank), and
+/// `Some(Some(g))` to check `g`. The stored network is only loaded when needed.
+async fn validate_updated_subnet_and_gateway(
+    conn: &Connection,
+    network_id: i64,
+    subnet: Option<&str>,
+    gateway: Option<Option<&str>>,
+    errors: &mut ValidationErrors,
+) {
+    if subnet.is_none() && !matches!(gateway, Some(Some(_))) {
+        return;
+    }
+
+    let stored = if subnet.is_none() || gateway.is_none() {
+        match dhcp::store::get_network(conn, network_id).await {
+            Ok(net) => Some(net),
+            Err(e) => {
+                log::warn!("Failed to fetch current network for validation: {}", e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let subnet = subnet.or_else(|| stored.as_ref().map(|n| n.subnet.as_str()));
+    let gateway = gateway.unwrap_or_else(|| stored.as_ref().and_then(|n| n.gateway.as_deref()));
+
+    if let Some(subnet) = subnet {
+        validate_subnet_and_gateway(subnet, gateway, errors);
+    }
 }
 
 // ============================================================================
@@ -406,11 +497,9 @@ mod tests {
     use std::sync::Arc;
 
     async fn create_test_store(factory: Arc<dyn ConnectionFactory>) -> Connection {
-        // Run migrations; drop the returned connection (file-backed DB persists)
-        let conn = crate::database::run_migrations(factory.as_ref())
+        crate::database::run_migrations(factory.as_ref())
             .await
-            .unwrap();
-        conn
+            .unwrap()
     }
 
     // Test generic validators
@@ -489,6 +578,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         assert!(validate_create_network_request(&conn, &req).await.is_ok());
@@ -506,6 +596,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         assert!(validate_create_network_request(&conn, &req).await.is_ok());
@@ -522,6 +613,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -544,6 +636,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -557,6 +650,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.3".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -580,6 +674,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -593,6 +688,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -621,6 +717,7 @@ mod tests {
             86400,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -634,6 +731,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: None,
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -659,6 +757,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -678,6 +777,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -698,6 +798,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         assert!(validate_create_network_request(&conn, &req).await.is_ok());
@@ -714,6 +815,7 @@ mod tests {
             lease_duration: 0,
             relay_agent_address: Some("10.0.0.2".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -733,6 +835,7 @@ mod tests {
             lease_duration: 86400,
             relay_agent_address: Some("invalid".to_string()),
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -752,6 +855,7 @@ mod tests {
             lease_duration: 0,
             relay_agent_address: None,
             enable_autodiscovery: false,
+            domain_name: None,
         };
 
         let result = validate_create_network_request(&conn, &req).await;
@@ -779,6 +883,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -786,11 +891,12 @@ mod tests {
         let req = UpdateNetworkRequest {
             name: Some("Updated Network".to_string()),
             subnet: None,
-            gateway: None,
+            gateway: Patch::Keep,
             dns_servers: None,
             lease_duration: Some(7200),
-            relay_agent_address: None,
+            relay_agent_address: Patch::Keep,
             enable_autodiscovery: None,
+            domain_name: Patch::Keep,
         };
 
         assert!(
@@ -814,6 +920,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -827,6 +934,7 @@ mod tests {
             86400,
             Some("10.0.0.3"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -835,11 +943,12 @@ mod tests {
         let req = UpdateNetworkRequest {
             name: Some("Network 2".to_string()),
             subnet: None,
-            gateway: None,
+            gateway: Patch::Keep,
             dns_servers: None,
             lease_duration: None,
-            relay_agent_address: None,
+            relay_agent_address: Patch::Keep,
             enable_autodiscovery: None,
+            domain_name: Patch::Keep,
         };
 
         let result = validate_update_network_request(&conn, network1.id, &req).await;
@@ -866,6 +975,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -874,11 +984,12 @@ mod tests {
         let req = UpdateNetworkRequest {
             name: Some("Test Network".to_string()),
             subnet: None,
-            gateway: None,
+            gateway: Patch::Keep,
             dns_servers: None,
             lease_duration: None,
-            relay_agent_address: None,
+            relay_agent_address: Patch::Keep,
             enable_autodiscovery: None,
+            domain_name: Patch::Keep,
         };
 
         assert!(
@@ -902,6 +1013,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -915,6 +1027,7 @@ mod tests {
             86400,
             Some("10.0.0.3"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -923,11 +1036,12 @@ mod tests {
         let req = UpdateNetworkRequest {
             name: None,
             subnet: None,
-            gateway: None,
+            gateway: Patch::Keep,
             dns_servers: None,
             lease_duration: None,
-            relay_agent_address: Some("10.0.0.3".to_string()),
+            relay_agent_address: Patch::Set("10.0.0.3".to_string()),
             enable_autodiscovery: None,
+            domain_name: Patch::Keep,
         };
 
         let result = validate_update_network_request(&conn, network1.id, &req).await;
@@ -950,6 +1064,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -958,11 +1073,12 @@ mod tests {
         let req = UpdateNetworkRequest {
             name: None,
             subnet: None,
-            gateway: None,
+            gateway: Patch::Keep,
             dns_servers: None,
             lease_duration: None,
-            relay_agent_address: Some("10.0.0.2".to_string()),
+            relay_agent_address: Patch::Set("10.0.0.2".to_string()),
             enable_autodiscovery: None,
+            domain_name: Patch::Keep,
         };
 
         assert!(
@@ -986,6 +1102,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -994,11 +1111,12 @@ mod tests {
         let req = UpdateNetworkRequest {
             name: None,
             subnet: Some("10.0.0.0/24".to_string()),
-            gateway: None, // Will use existing gateway 192.168.1.1
+            gateway: Patch::Keep, // Will use existing gateway 192.168.1.1
             dns_servers: None,
             lease_duration: None,
-            relay_agent_address: None,
+            relay_agent_address: Patch::Keep,
             enable_autodiscovery: None,
+            domain_name: Patch::Keep,
         };
 
         let result = validate_update_network_request(&conn, network.id, &req).await;
@@ -1021,6 +1139,7 @@ mod tests {
             86400,
             Some("10.0.0.2"),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1029,11 +1148,12 @@ mod tests {
         let req = UpdateNetworkRequest {
             name: None,
             subnet: None,
-            gateway: None,
+            gateway: Patch::Keep,
             dns_servers: Some(vec!["invalid".to_string()]),
             lease_duration: None,
-            relay_agent_address: None,
+            relay_agent_address: Patch::Keep,
             enable_autodiscovery: None,
+            domain_name: Patch::Keep,
         };
 
         let result = validate_update_network_request(&conn, network.id, &req).await;
@@ -1047,11 +1167,9 @@ mod tests {
     #[test]
     fn test_validate_hostname_valid() {
         assert!(validate_hostname("server-01").is_ok());
-        assert!(validate_hostname("web.server").is_ok());
-        assert!(validate_hostname("app-server-01.example.com").is_ok());
         assert!(validate_hostname("s").is_ok());
         assert!(validate_hostname("server123").is_ok());
-        assert!(validate_hostname("my-server.local").is_ok());
+        assert!(validate_hostname("my-server").is_ok());
     }
 
     #[test]
@@ -1065,8 +1183,8 @@ mod tests {
 
     #[test]
     fn test_validate_hostname_too_long() {
-        // Create a hostname that's 254 characters (exceeds 253 limit)
-        let long_hostname = "a".repeat(254);
+        // 64 characters exceeds the RFC 1123 single-label limit of 63
+        let long_hostname = "a".repeat(64);
         let result = validate_hostname(&long_hostname);
         assert!(result.is_err());
         let errors = result.unwrap_err();
@@ -1075,14 +1193,14 @@ mod tests {
             errors
                 .get("hostname")
                 .unwrap()
-                .contains("less than 253 characters")
+                .contains("less than 63 characters")
         );
     }
 
     #[test]
     fn test_validate_hostname_max_length_valid() {
-        // Exactly 253 characters should be valid
-        let max_hostname = "a".repeat(253);
+        // Exactly 63 characters should be valid
+        let max_hostname = "a".repeat(63);
         assert!(validate_hostname(&max_hostname).is_ok());
     }
 
@@ -1096,7 +1214,7 @@ mod tests {
             errors
                 .get("hostname")
                 .unwrap()
-                .contains("only letters, numbers, hyphens, and dots")
+                .contains("only letters, numbers, and hyphens")
         );
 
         // Test other invalid characters
@@ -1149,10 +1267,30 @@ mod tests {
         assert!(validate_hostname("app-server-01").is_ok());
     }
 
+    /// A hostname must be a bare label — the domain is supplied by the device's network, so a
+    /// dotted hostname would render a doubled domain in `{{ device.fqdn }}`.
     #[test]
-    fn test_validate_hostname_dots_allowed() {
-        assert!(validate_hostname("server.example.com").is_ok());
-        assert!(validate_hostname("web.local").is_ok());
+    fn test_validate_hostname_dots_rejected() {
+        for dotted in [
+            "web.server",
+            "app-server-01.example.com",
+            "my-server.local",
+            ".server",
+            "server.",
+            ".",
+        ] {
+            let errors = validate_hostname(dotted).expect_err(&format!(
+                "{dotted} should be rejected as not a single label"
+            ));
+            assert!(
+                errors
+                    .get("hostname")
+                    .unwrap()
+                    .contains("must be a single label"),
+                "unexpected message for {dotted}: {:?}",
+                errors.get("hostname")
+            );
+        }
     }
 
     #[test]
@@ -1170,5 +1308,353 @@ mod tests {
         let errors = result.unwrap_err();
         // Should have at least the "required" error
         assert!(errors.contains_key("hostname"));
+    }
+
+    // ========== Domain Name Validation Tests ==========
+
+    #[test]
+    fn test_validate_domain_name_valid() {
+        assert!(validate_domain_name("test.local").is_none());
+        assert!(validate_domain_name("a.b.example.com").is_none());
+        assert!(validate_domain_name("local").is_none());
+        assert!(validate_domain_name("my-domain.example.com").is_none());
+    }
+
+    #[test]
+    fn test_validate_domain_name_leading_trailing_dot() {
+        assert!(validate_domain_name(".example.com").is_some());
+        assert!(validate_domain_name("example.com.").is_some());
+    }
+
+    #[test]
+    fn test_validate_domain_name_empty_label() {
+        assert!(validate_domain_name("a..b").is_some());
+    }
+
+    #[test]
+    fn test_validate_domain_name_leading_trailing_hyphen() {
+        assert!(validate_domain_name("-bad.local").is_some());
+        assert!(validate_domain_name("bad-.local").is_some());
+        assert!(validate_domain_name("test.-bad.local").is_some());
+    }
+
+    #[test]
+    fn test_validate_domain_name_label_too_long() {
+        let long_label = "a".repeat(64);
+        let domain = format!("{}.local", long_label);
+        assert!(validate_domain_name(&domain).is_some());
+
+        // Exactly 63 characters is valid
+        let max_label = "a".repeat(63);
+        let domain = format!("{}.local", max_label);
+        assert!(validate_domain_name(&domain).is_none());
+    }
+
+    #[test]
+    fn test_validate_domain_name_too_long_total() {
+        // Build a domain over 253 characters using valid labels
+        let label = "a".repeat(50);
+        let domain = vec![label; 6].join(".");
+        assert!(domain.len() > 253);
+        assert!(validate_domain_name(&domain).is_some());
+    }
+
+    #[test]
+    fn test_validate_domain_name_invalid_characters() {
+        assert!(validate_domain_name("bad_domain.local").is_some());
+        assert!(validate_domain_name("bad domain.local").is_some());
+        assert!(validate_domain_name("bad@domain.local").is_some());
+        assert!(validate_domain_name("dömain.local").is_some());
+    }
+
+    // ========== Blank-value Rejection ==========
+
+    #[test]
+    fn test_validate_not_blank() {
+        assert!(validate_not_blank(None, "Field").is_none());
+        assert!(validate_not_blank(Some("value"), "Field").is_none());
+        assert!(validate_not_blank(Some(""), "Field").is_some());
+        assert!(validate_not_blank(Some("   "), "Field").is_some());
+        assert!(
+            validate_not_blank(Some(""), "Gateway")
+                .unwrap()
+                .contains("send null to clear")
+        );
+    }
+
+    /// Build an update request whose patch fields default to `Keep`.
+    fn blank_update_request() -> UpdateNetworkRequest {
+        UpdateNetworkRequest::default()
+    }
+
+    async fn create_default_network(conn: &Connection) -> i64 {
+        dhcp::store::create_network(
+            conn,
+            "Test Network",
+            "192.168.1.0/24",
+            Some("192.168.1.1"),
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+            Some("test.local"),
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn test_validate_update_network_request_empty_gateway_rejected() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        let req = UpdateNetworkRequest {
+            gateway: Patch::Set(String::new()),
+            ..blank_update_request()
+        };
+
+        let errors = validate_update_network_request(&conn, id, &req)
+            .await
+            .unwrap_err();
+        assert!(errors.get("gateway").unwrap().contains("cannot be empty"));
+    }
+
+    /// A blank gateway must not mask an invalid subnet supplied in the same request.
+    #[tokio::test]
+    async fn test_validate_update_network_request_empty_gateway_still_checks_subnet() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        let req = UpdateNetworkRequest {
+            subnet: Some("not-a-subnet".to_string()),
+            gateway: Patch::Set(String::new()),
+            ..blank_update_request()
+        };
+
+        let errors = validate_update_network_request(&conn, id, &req)
+            .await
+            .unwrap_err();
+        assert!(errors.contains_key("subnet"));
+        assert!(errors.get("gateway").unwrap().contains("cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_update_network_request_empty_relay_rejected() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        let req = UpdateNetworkRequest {
+            relay_agent_address: Patch::Set(String::new()),
+            ..blank_update_request()
+        };
+
+        let errors = validate_update_network_request(&conn, id, &req)
+            .await
+            .unwrap_err();
+        assert!(
+            errors
+                .get("relay_agent_address")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_update_network_request_empty_domain_rejected() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        let req = UpdateNetworkRequest {
+            domain_name: Patch::Set(String::new()),
+            ..blank_update_request()
+        };
+
+        let errors = validate_update_network_request(&conn, id, &req)
+            .await
+            .unwrap_err();
+        assert!(
+            errors
+                .get("domain_name")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    // ========== Clear Semantics ==========
+
+    /// Clearing the gateway removes it from subnet co-validation — a network with no gateway
+    /// is legal even when the subnet is simultaneously changed.
+    #[tokio::test]
+    async fn test_validate_update_network_request_clearing_gateway_skips_subnet_check() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        let req = UpdateNetworkRequest {
+            subnet: Some("10.0.0.0/24".to_string()),
+            gateway: Patch::Clear,
+            ..blank_update_request()
+        };
+
+        // The stored gateway 192.168.1.1 is outside 10.0.0.0/24, but it is being cleared.
+        assert!(
+            validate_update_network_request(&conn, id, &req)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Clearing the relay agent turns the network into a local L2 network, so it collides with
+    /// an existing relay-less network.
+    #[tokio::test]
+    async fn test_validate_update_network_request_clearing_relay_hits_local_l2_rule() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        dhcp::store::create_network(
+            &conn,
+            "Local Network",
+            "10.0.0.0/24",
+            Some("10.0.0.1"),
+            &[],
+            86400,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let req = UpdateNetworkRequest {
+            relay_agent_address: Patch::Clear,
+            ..blank_update_request()
+        };
+
+        let errors = validate_update_network_request(&conn, id, &req)
+            .await
+            .unwrap_err();
+        assert!(
+            errors
+                .get("relay_agent_address")
+                .unwrap()
+                .contains("Only one local L2 network is allowed")
+        );
+    }
+
+    /// Clearing the relay agent is allowed when no other relay-less network exists.
+    #[tokio::test]
+    async fn test_validate_update_network_request_clearing_relay_allowed_when_unique() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        let req = UpdateNetworkRequest {
+            relay_agent_address: Patch::Clear,
+            ..blank_update_request()
+        };
+
+        assert!(
+            validate_update_network_request(&conn, id, &req)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Keeping the relay agent must not run the duplicate check at all.
+    #[tokio::test]
+    async fn test_validate_update_network_request_keeping_relay_skips_check() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let id = create_default_network(&conn).await;
+
+        dhcp::store::create_network(
+            &conn,
+            "Local Network",
+            "10.0.0.0/24",
+            Some("10.0.0.1"),
+            &[],
+            86400,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            validate_update_network_request(&conn, id, &blank_update_request())
+                .await
+                .is_ok()
+        );
+    }
+
+    // ========== Create-path Blank Rejection ==========
+
+    fn create_request_with(
+        gateway: Option<&str>,
+        relay: Option<&str>,
+        domain: Option<&str>,
+    ) -> CreateNetworkRequest {
+        CreateNetworkRequest {
+            name: "Test".to_string(),
+            subnet: "192.168.1.0/24".to_string(),
+            gateway: gateway.map(str::to_string),
+            dns_servers: vec![],
+            lease_duration: 86400,
+            relay_agent_address: relay.map(str::to_string),
+            enable_autodiscovery: false,
+            domain_name: domain.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_create_network_request_empty_gateway_rejected() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let req = create_request_with(Some(""), Some("10.0.0.2"), None);
+
+        let errors = validate_create_network_request(&conn, &req)
+            .await
+            .unwrap_err();
+        assert!(errors.get("gateway").unwrap().contains("cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_create_network_request_empty_relay_rejected() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let req = create_request_with(Some("192.168.1.1"), Some(""), None);
+
+        let errors = validate_create_network_request(&conn, &req)
+            .await
+            .unwrap_err();
+        assert!(
+            errors
+                .get("relay_agent_address")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    /// The consistency bug being fixed: `domain_name: ""` used to be persisted as `''` on
+    /// create while the update path silently mapped it to NULL.
+    #[tokio::test]
+    async fn test_validate_create_network_request_empty_domain_rejected() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let req = create_request_with(Some("192.168.1.1"), Some("10.0.0.2"), Some(""));
+
+        let errors = validate_create_network_request(&conn, &req)
+            .await
+            .unwrap_err();
+        assert!(
+            errors
+                .get("domain_name")
+                .unwrap()
+                .contains("cannot be empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_create_network_request_absent_optionals_ok() {
+        let conn = create_test_store(Arc::new(test_connection_factory!())).await;
+        let req = create_request_with(None, Some("10.0.0.2"), None);
+
+        assert!(validate_create_network_request(&conn, &req).await.is_ok());
     }
 }

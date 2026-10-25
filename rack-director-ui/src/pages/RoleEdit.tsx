@@ -139,15 +139,14 @@ function RoleEdit() {
     try {
       const updated = await updateRole(roleId, {
         name,
-        description: description || undefined,
+        description: description.trim() || null,
         osm_module: osmModule,
         os_name: osName,
         os_release: osRelease,
         os_arch: osArch,
         disk_layout: diskLayout,
-        firmware_mode: firmwareMode || undefined,
-        clear_firmware_mode: firmwareMode === undefined ? true : undefined,
-        config_template: parsedConfig,
+        firmware_mode: firmwareMode ?? null,
+        config_template: parsedConfig ?? null,
       });
 
       setData({ ...data, ...updated });

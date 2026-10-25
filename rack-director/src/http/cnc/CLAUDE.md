@@ -11,7 +11,9 @@ Install scripts are Handlebars templates served to the OS installer via `GET /cn
 | Variable | Description |
 |---|---|
 | `{{ device.uuid }}` | Device UUID |
-| `{{ device.hostname }}` | Device hostname |
+| `{{ device.hostname }}` | Device hostname — a single bare DNS label, never includes the domain (see [Hostnames are bare labels](#hostnames-are-bare-labels)) |
+| `{{ device.fqdn }}` | `{hostname}.{domain}` when the primary NIC's network has a domain configured, else falls back to the bare hostname (or `unknown` if the device has no hostname) |
+| `{{ device.domain_name }}` | DNS domain of the primary NIC's network; empty string when the network has no domain |
 | `{{ device.mac_address }}` | Primary NIC MAC address |
 | `{{ device.ip_address }}` | Primary NIC IP address |
 | `{{ device.gateway }}` | Primary NIC gateway (empty string when its network has no gateway) |
@@ -22,6 +24,26 @@ Install scripts are Handlebars templates served to the OS installer via `GET /cn
 The single `device.*` network fields above describe the **primary** NIC — the one with a DHCP lease, or
 (when no lease exists) the first NIC that has been assigned a network and IP. They are retained for
 backward compatibility. For multi-NIC configuration use `{{ device.network_interfaces }}` below.
+
+#### Hostnames are bare labels
+
+`{{ device.hostname }}` is always a **single DNS label** — `web`, never `web.corp`. The domain comes
+**solely** from the device's primary NIC network (`dhcp_networks.domain_name`), and `{{ device.fqdn }}`
+is rendered by appending it: `{hostname}.{domain}`. There is no de-duplication at render time, and
+none should be added — the invariant is enforced at the two write paths instead:
+
+- `PATCH /ui/devices/{uuid}/attributes` runs `validate_hostname`, which rejects any hostname
+  containing a dot (max 63 chars, alphanumerics and hyphens only).
+- `POST /cnc/update_attributes` **strips** `hostname` from the agent's payload entirely. The agent
+  never owns the hostname; `Director::register_device` assigns `node-{last-12-of-uuid}` at
+  registration.
+
+**Known limitation — pre-existing dotted hostnames.** Devices whose hostname was saved before this
+rule was enforced may still contain dots, and those render a doubled domain
+(`web.corp` + `example.com` → `web.corp.example.com`). There is no migration or normalization for
+them. An operator clears it by renaming the device on its detail page in the UI (or via
+`PATCH /ui/devices/{uuid}/attributes`) to a bare label; any attempt to re-save the old dotted value
+returns 400 with `Hostname must be a single label; the domain comes from the network`.
 
 #### `{{ device.network_interfaces }}` — per-NIC network configuration
 
@@ -46,6 +68,7 @@ This lets a NIC be configured with a static IP **even on a segment with no DHCP*
 | `{{ this.gateway }}` | This NIC's network gateway, or **absent** when the network has no gateway — guard with `{{#if this.gateway}}` |
 | `{{ this.dns_servers }}` | Comma-separated DNS servers, **empty** when the network has none — guard with `{{#if this.dns_servers}}` |
 | `{{ this.is_primary }}` | `true` for the primary NIC (see above) |
+| `{{ this.domain_name }}` | This NIC's network domain, or **absent** when the network has no domain — guard with `{{#if this.domain_name}}` |
 
 A network may be defined with **no gateway and/or no DNS**, in which case those attributes are not set on
 NICs attached to it (no default route / no nameserver). Always guard `gateway`/`dns_servers` with
@@ -100,7 +123,7 @@ Iterate with `{{#each logical_volumes}}`. Each item has:
 ```kickstart
 # Network — one directive per assigned NIC (gateway/DNS omitted when the network has none)
 {{#each device.network_interfaces}}
-network --bootproto=static --device={{this.mac_address}} --ip={{this.ip_address}} --netmask={{this.netmask}} {{#if this.gateway}}--gateway={{this.gateway}} {{/if}}{{#if this.dns_servers}}--nameserver={{this.dns_servers}} {{/if}}--activate{{#if this.is_primary}} --hostname={{../device.hostname}}{{/if}}
+network --bootproto=static --device={{this.mac_address}} --ip={{this.ip_address}} --netmask={{this.netmask}} {{#if this.gateway}}--gateway={{this.gateway}} {{/if}}{{#if this.dns_servers}}--nameserver={{this.dns_servers}} {{/if}}--activate{{#if this.is_primary}} --hostname={{../device.fqdn}}{{/if}}
 {{/each}}
 
 # Partitions (pre-existing, created by partition_disks action)
@@ -127,7 +150,7 @@ logvol {{this.mount_point}} --vgname={{this.vg_name}} --name={{this.lv_name}} --
 autoinstall:
   version: 1
   identity:
-    hostname: {{ device.hostname }}
+    hostname: {{ device.fqdn }}
   network:
     network:
       version: 2
@@ -151,7 +174,7 @@ autoinstall:
 ### Example: Debian Preseed
 
 ```
-d-i netcfg/get_hostname string {{ device.hostname }}
+d-i netcfg/get_hostname string {{ device.fqdn }}
 d-i netcfg/get_ipaddress string {{ device.ip_address }}
 d-i netcfg/get_netmask string {{ device.netmask }}
 d-i netcfg/get_gateway string {{ device.gateway }}

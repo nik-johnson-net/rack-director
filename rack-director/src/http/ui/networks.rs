@@ -1,7 +1,9 @@
 use super::super::{AppState, error::Error as HttpError};
 use super::validation::{validate_create_network_request, validate_update_network_request};
+use crate::dhcp::store::UpdateNetworkParams;
 use crate::dhcp::{self, DhcpNetwork, DhcpPool, Lease, StaticReservation};
 use crate::director::Device;
+use crate::patch::Patch;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -61,17 +63,28 @@ pub struct CreateNetworkRequest {
     pub relay_agent_address: Option<String>,
     #[serde(default)]
     pub enable_autodiscovery: bool,
+    /// Optional DNS domain for hosts on this network (e.g. `test.local`), used to build
+    /// devices' FQDN at install time.
+    #[serde(default)]
+    pub domain_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Partial update for a network.
+///
+/// Fields backed by nullable columns use [`Patch`], which distinguishes an absent key (keep)
+/// from an explicit `null` (clear). The struct-level `#[serde(default)]` is mandatory — see
+/// the `crate::patch` module docs.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct UpdateNetworkRequest {
     pub name: Option<String>,
     pub subnet: Option<String>,
-    pub gateway: Option<String>,
+    pub gateway: Patch<String>,
     pub dns_servers: Option<Vec<String>>,
     pub lease_duration: Option<u32>,
-    pub relay_agent_address: Option<String>,
+    pub relay_agent_address: Patch<String>,
     pub enable_autodiscovery: Option<bool>,
+    pub domain_name: Patch<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +159,7 @@ async fn create_network(
         req.lease_duration,
         req.relay_agent_address.as_deref(),
         req.enable_autodiscovery,
+        req.domain_name.as_deref(),
     )
     .await?;
 
@@ -169,27 +183,24 @@ async fn update_network(
     log::debug!("update network request: {:?}", req);
 
     // Open a connection for raw store calls; DhcpStore uses the factory for its own connections
-    let mut conn = state.connection_factory.open().await?;
+    let conn = state.connection_factory.open().await?;
 
     // Validate request
     if let Err(errors) = validate_update_network_request(&conn, id, &req).await {
         return Err(HttpError::ValidationError(errors));
     }
 
-    let network = crate::dhcp::store::update_network(
-        &mut conn,
-        id,
-        req.name.as_deref(),
-        req.subnet.as_deref(),
-        req.gateway.as_deref(),
-        req.dns_servers.as_deref(),
-        req.lease_duration,
-        req.relay_agent_address
-            .as_deref()
-            .map(|opt| if opt.is_empty() { None } else { Some(opt) }),
-        req.enable_autodiscovery,
-    )
-    .await?;
+    let params = UpdateNetworkParams {
+        name: req.name.as_deref(),
+        subnet: req.subnet.as_deref(),
+        gateway: req.gateway.as_deref_update(),
+        dns_servers: req.dns_servers.as_deref(),
+        lease_duration: req.lease_duration,
+        relay_agent_address: req.relay_agent_address.as_deref_update(),
+        enable_autodiscovery: req.enable_autodiscovery,
+        domain_name: req.domain_name.as_deref_update(),
+    };
+    let network = crate::dhcp::store::update_network(&conn, id, params).await?;
 
     Ok(Json(network))
 }
@@ -440,8 +451,13 @@ fn find_device_uuid_by_mac(devices: &[Device], mac: &str) -> Option<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::{self, DatabaseConnectionFactory};
     use crate::director::Architecture;
+    use crate::test_connection_factory;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use common::device_attributes::{BmcInfo, DeviceAttributes, NetworkInterface};
+    use tower::util::ServiceExt;
 
     fn create_test_device(
         uuid: Uuid,
@@ -665,5 +681,151 @@ mod tests {
         let devices = vec![];
         let result = find_device_uuid_by_mac(&devices, "aa:bb:cc:dd:ee:01");
         assert_eq!(result, None);
+    }
+
+    // ========== UpdateNetworkRequest tri-state deserialization ==========
+
+    fn parse_update(json: &str) -> UpdateNetworkRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn test_update_request_absent_patch_fields_are_keep() {
+        let req = parse_update(r#"{"name": "n"}"#);
+        assert_eq!(req.gateway, Patch::Keep);
+        assert_eq!(req.relay_agent_address, Patch::Keep);
+        assert_eq!(req.domain_name, Patch::Keep);
+    }
+
+    #[test]
+    fn test_update_request_null_patch_fields_are_clear() {
+        let req =
+            parse_update(r#"{"gateway": null, "relay_agent_address": null, "domain_name": null}"#);
+        assert_eq!(req.gateway, Patch::Clear);
+        assert_eq!(req.relay_agent_address, Patch::Clear);
+        assert_eq!(req.domain_name, Patch::Clear);
+    }
+
+    #[test]
+    fn test_update_request_valued_patch_fields_are_set() {
+        let req = parse_update(
+            r#"{"gateway": "10.0.0.1", "relay_agent_address": "10.0.0.2", "domain_name": "test.local"}"#,
+        );
+        assert_eq!(req.gateway, Patch::Set("10.0.0.1".to_string()));
+        assert_eq!(req.relay_agent_address, Patch::Set("10.0.0.2".to_string()));
+        assert_eq!(req.domain_name, Patch::Set("test.local".to_string()));
+    }
+
+    // ========== Update handler end-to-end ==========
+
+    /// The migration connection must outlive the test: dropping it destroys the in-memory DB.
+    async fn setup_test_state(
+        factory: DatabaseConnectionFactory,
+    ) -> (Arc<AppState>, database::Connection) {
+        let conn_factory: Arc<dyn crate::database::ConnectionFactory> = Arc::new(factory);
+        let migration_conn = database::run_migrations(conn_factory.as_ref())
+            .await
+            .unwrap();
+        let state = crate::http::test_helpers::build_test_state(conn_factory);
+        (state, migration_conn)
+    }
+
+    /// Create a network with a gateway, relay agent and domain already set.
+    async fn create_populated_network(state: &AppState) -> i64 {
+        let conn = state.connection_factory.open().await.unwrap();
+        dhcp::store::create_network(
+            &conn,
+            "Test Network",
+            "192.168.1.0/24",
+            Some("192.168.1.1"),
+            &["8.8.8.8".to_string()],
+            86400,
+            Some("10.0.0.2"),
+            false,
+            Some("test.local"),
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn put_network(state: Arc<AppState>, id: i64, body: &str) -> (StatusCode, String) {
+        let response = routes(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/ui/dhcp/networks/{}", id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// Regression test for the originally-reported bug: `domain_name` could not be cleared
+    /// because serde mapped both an absent key and `null` to `None`.
+    #[tokio::test]
+    async fn test_update_network_clears_domain_name() {
+        let (state, _migration_conn) = setup_test_state(test_connection_factory!()).await;
+        let id = create_populated_network(&state).await;
+
+        let (status, _) = put_network(state.clone(), id, r#"{"domain_name": null}"#).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = state.connection_factory.open().await.unwrap();
+        let network = dhcp::store::get_network(&conn, id).await.unwrap();
+        assert_eq!(network.domain_name, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_network_clears_gateway() {
+        let (state, _migration_conn) = setup_test_state(test_connection_factory!()).await;
+        let id = create_populated_network(&state).await;
+
+        let (status, _) = put_network(state.clone(), id, r#"{"gateway": null}"#).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = state.connection_factory.open().await.unwrap();
+        let network = dhcp::store::get_network(&conn, id).await.unwrap();
+        assert_eq!(network.gateway, None);
+    }
+
+    /// An update that omits the patch fields must leave every nullable column untouched.
+    #[tokio::test]
+    async fn test_update_network_omitted_fields_are_preserved() {
+        let (state, _migration_conn) = setup_test_state(test_connection_factory!()).await;
+        let id = create_populated_network(&state).await;
+
+        let (status, _) = put_network(state.clone(), id, r#"{"lease_duration": 7200}"#).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = state.connection_factory.open().await.unwrap();
+        let network = dhcp::store::get_network(&conn, id).await.unwrap();
+        assert_eq!(network.lease_duration, 7200);
+        assert_eq!(network.gateway, Some("192.168.1.1".to_string()));
+        assert_eq!(network.relay_agent_address, Some("10.0.0.2".to_string()));
+        assert_eq!(network.domain_name, Some("test.local".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_network_rejects_empty_domain_name() {
+        let (state, _migration_conn) = setup_test_state(test_connection_factory!()).await;
+        let id = create_populated_network(&state).await;
+
+        let (status, body) = put_network(state.clone(), id, r#"{"domain_name": ""}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("domain_name"), "body was: {}", body);
+
+        // The stored value must be untouched by a rejected request.
+        let conn = state.connection_factory.open().await.unwrap();
+        let network = dhcp::store::get_network(&conn, id).await.unwrap();
+        assert_eq!(network.domain_name, Some("test.local".to_string()));
     }
 }

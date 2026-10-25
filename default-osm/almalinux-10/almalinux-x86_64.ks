@@ -18,7 +18,7 @@ clearpart --none
 
 # Network — one directive per assigned NIC.
 # Gateway and nameserver are omitted when the network has none configured.
-{{#each device.network_interfaces}}network --bootproto=static --device={{this.mac_address}} --ip={{this.ip_address}} --netmask={{this.netmask}}{{#if this.gateway}} --gateway={{this.gateway}}{{/if}}{{#if this.dns_servers}} --nameserver={{this.dns_servers}}{{/if}}{{#if this.is_primary}} --hostname={{../device.hostname}}{{/if}} --activate
+{{#each device.network_interfaces}}network --bootproto=static --device={{this.mac_address}} --ip={{this.ip_address}} --netmask={{this.netmask}}{{#if this.gateway}} --gateway={{this.gateway}}{{/if}}{{#if this.dns_servers}} --nameserver={{this.dns_servers}}{{/if}}{{#if this.is_primary}} --hostname={{../device.fqdn}}{{/if}} --activate
 {{/each}}
 
 # Every partition on the target disk, declared with --onpart --noformat.

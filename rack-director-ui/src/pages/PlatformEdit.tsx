@@ -137,7 +137,7 @@ function PlatformEdit() {
     try {
       await updatePlatform(platform.id!, {
         name,
-        description: description || undefined,
+        description: description.trim() || null,
         attributes: { disks, nics, cpus, memory_gib: memoryGib },
       });
       navigate("/platforms");

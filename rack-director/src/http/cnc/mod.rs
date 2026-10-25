@@ -279,9 +279,17 @@ async fn update_attributes(
     };
 
     // Remove null values — null from the agent means "not provided", not "clear this field".
-    // Without this, optional fields like `hostname` (set by register_device) would be
-    // overwritten with null when the agent submits a hardware scan that omits them.
+    // Without this, optional fields would be overwritten with null when the agent submits a
+    // hardware scan that omits them.
     attributes_json.retain(|_, v| !v.is_null());
+
+    // rack-director is the sole owner of `hostname`: `Director::register_device` assigns
+    // `node-{uuid-suffix}` at registration and `PATCH /ui/devices/{uuid}/attributes` is the only
+    // way to change it, where `validate_hostname` enforces a single bare DNS label. Install
+    // scripts build `{{ device.fqdn }}` as `{hostname}.{network domain}`, so an agent-supplied
+    // dotted hostname arriving here would silently produce a doubled domain. Drop it outright
+    // rather than trusting the agent.
+    attributes_json.remove("hostname");
 
     let conn = match state.connection_factory.open().await {
         Ok(conn) => conn,
@@ -717,6 +725,7 @@ mod tests {
             86400,
             None,
             autodiscovery,
+            None,
         )
         .await
         .unwrap();
@@ -1330,6 +1339,85 @@ mod tests {
         assert_ne!(password1, password2);
         assert_ne!(password2, password3);
         assert_ne!(password1, password3);
+    }
+
+    /// The agent is not an owner of `hostname`: rack-director assigns it at registration and only
+    /// the validated `/ui` patch endpoint may change it. An agent-submitted hostname must be
+    /// dropped, while the rest of the same payload merges normally and previously-stored
+    /// attributes omitted by the agent survive.
+    #[tokio::test]
+    async fn test_update_attributes_ignores_agent_supplied_hostname() {
+        let (state, _temp_dir) = setup_test_state().await;
+        let test_uuid = test_uuid(0x71);
+
+        let registered_hostname = {
+            let conn = test_db(&state).await;
+            let director = Director::new(&conn);
+            director
+                .register_device(&test_uuid, crate::director::Architecture::X86_64)
+                .await
+                .unwrap();
+
+            // Seed an attribute the agent's payload will omit, to prove null-stripping still works
+            let mut seed = serde_json::Map::new();
+            seed.insert("manufacturer".to_string(), serde_json::json!("Dell Inc."));
+            director.update_attributes(&test_uuid, seed).await.unwrap();
+
+            director
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
+                .attributes
+                .hostname
+                .unwrap()
+        };
+        assert!(
+            !registered_hostname.contains('.'),
+            "registration must assign a bare hostname, got {registered_hostname}"
+        );
+
+        let payload = UpdateAttributesQuery {
+            uuid: test_uuid,
+            attributes: DeviceAttributes {
+                hostname: Some("evil.example.com".to_string()),
+                product_name: Some("PowerEdge R640".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/cnc/update_attributes")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let attributes = {
+            let conn = test_db(&state).await;
+            Director::new(&conn)
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
+                .attributes
+        };
+
+        assert_eq!(attributes.hostname, Some(registered_hostname));
+        assert_eq!(
+            attributes.product_name,
+            Some("PowerEdge R640".to_string()),
+            "other attributes in the same payload must still merge"
+        );
+        assert_eq!(
+            attributes.manufacturer,
+            Some("Dell Inc.".to_string()),
+            "attributes omitted by the agent must not be cleared"
+        );
     }
 
     #[tokio::test]

@@ -680,6 +680,7 @@ mod tests {
             86400,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -791,6 +792,7 @@ mod tests {
             86400,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -850,6 +852,7 @@ mod tests {
             lease_duration: 1,
             relay_agent_address: None,
             enable_autodiscovery: true,
+            domain_name: None,
             created_at: DateTime::default(),
             updated_at: DateTime::default(),
         };

@@ -45,6 +45,7 @@ function NetworkDetail() {
   const [name, setName] = useState(network.name);
   const [subnet, setSubnet] = useState(network.subnet);
   const [gateway, setGateway] = useState(network.gateway ?? "");
+  const [domainName, setDomainName] = useState(network.domain_name ?? "");
   const [dnsServers, setDnsServers] = useState(network.dns_servers.join(", "));
   const [leaseDuration, setLeaseDuration] = useState(network.lease_duration.toString());
   const [relayAgent, setRelayAgent] = useState(network.relay_agent_address || "");
@@ -71,9 +72,10 @@ function NetworkDetail() {
         name,
         subnet,
         gateway: gateway.trim() || null,
+        domain_name: domainName.trim() || null,
         dns_servers: dnsArray,
         lease_duration: parseInt(leaseDuration),
-        relay_agent_address: relayAgent,
+        relay_agent_address: relayAgent.trim() || null,
         enable_autodiscovery: enableAutodiscovery,
       });
 
@@ -223,6 +225,29 @@ function NetworkDetail() {
                   className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
                 />
                 <FormFieldError error={getError("gateway")} />
+              </div>
+
+              {/* Domain Name */}
+              <div>
+                <label
+                  htmlFor="domainName"
+                  className="block text-xs font-semibold text-text-secondary uppercase tracking-[0.5px] mb-1"
+                >
+                  Domain Name
+                </label>
+                <input
+                  id="domainName"
+                  type="text"
+                  value={domainName}
+                  onChange={(e) => { setDomainName(e.target.value); clearFieldError("domain_name"); }}
+                  placeholder="e.g., test.local (optional)"
+                  aria-invalid={!!getError("domain_name")}
+                  className="w-full bg-bg-base border border-border text-xs text-text-primary px-3 py-2 rounded-sm focus:outline-none focus:border-accent focus:shadow-[0_0_0_1px_var(--color-accent)] placeholder:text-text-muted"
+                />
+                <p className="text-xs text-text-muted mt-1">
+                  Devices on this network install with the hostname <span className="text-text-secondary">{"{hostname}.{domain}"}</span>.
+                </p>
+                <FormFieldError error={getError("domain_name")} />
               </div>
 
               {/* Lease Duration */}

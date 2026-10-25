@@ -48,8 +48,8 @@ impl ConnectionFactory for DatabaseConnectionFactory {
 #[macro_export]
 macro_rules! test_connection_factory {
     () => {
-        crate::database::DatabaseConnectionFactory::new(std::path::PathBuf::from(
-            crate::test_database_path!(),
+        $crate::database::DatabaseConnectionFactory::new(std::path::PathBuf::from(
+            $crate::test_database_path!(),
         ))
     };
 }
@@ -64,7 +64,18 @@ pub trait FromRow: Sized {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>;
 }
 
-const LATEST_VERSION: usize = 24;
+/// Bind a nullable text column: `Some(v)` writes `v`, `None` writes SQL `NULL`.
+///
+/// Stores building dynamic `UPDATE` statements use this so that clearing a nullable column
+/// is expressible through the same `?` placeholder as setting it.
+pub fn text_or_null(value: Option<&str>) -> rusqlite::types::Value {
+    match value {
+        Some(v) => rusqlite::types::Value::Text(v.to_string()),
+        None => rusqlite::types::Value::Null,
+    }
+}
+
+const LATEST_VERSION: usize = 25;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -90,6 +101,7 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/22.sql"),
     include_str!("migrations/23.sql"),
     include_str!("migrations/24.sql"),
+    include_str!("migrations/25.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -122,6 +134,7 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
     None,                                                                          // Migration 22
     None,                                                                          // Migration 23
     None,                                                                          // Migration 24
+    None,                                                                          // Migration 25
 ];
 
 /// Pre-migration hooks run Rust code BEFORE the SQL for each migration version.
@@ -152,6 +165,7 @@ const PRE_MIGRATION_HOOKS: [Option<PreMigrationHook>; LATEST_VERSION] = [
     None,                                                                     // Migration 22
     None,                                                                     // Migration 23
     None,                                                                     // Migration 24
+    None,                                                                     // Migration 25
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.
