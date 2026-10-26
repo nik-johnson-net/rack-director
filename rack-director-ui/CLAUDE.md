@@ -16,7 +16,7 @@ Before making ANY UI changes, read `DESIGN.md`. It covers:
 - Component specifications (sidebar, buttons, tables, cards, forms, badges, etc.)
 - Page layouts for every route
 
-All UI changes should use the **ui-developer** subagent.
+Reuse components in `src/components/ui/`, use theme tokens (never hardcoded colors), and run `npm run build` to verify changes.
 
 ## Technology Stack
 - **Framework**: React 19 + TypeScript + Vite
