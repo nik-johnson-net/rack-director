@@ -91,9 +91,9 @@ Note: You should prefer information from docs and sources.
 
 # Code Style
 
-- Public functions should have exhaustive tests - both success and failure modes.
+- Test public functions that contain real logic (branching, parsing, validation, error handling), covering both success and real failure modes. Skip trivial getters/constructors/delegation; extend existing tests before adding new ones.
 - Code should be modular with minimal public functions and classes.
-- Add documentation for public functions.
+- Document public functions where behavior isn't obvious from the signature; keep doc comments brief and explain "why", not "what".
 - Follow Single Responsibility Principle. Modules should provide one API, and implementation of that API should be broken out into submodules.
 - Functions more than 50 lines of code should be broken up into multiple functions.
 
@@ -126,7 +126,9 @@ cargo run -p rack-director-osm -- validate <file.osm>
 # Coding Process
 
 - ALWAYS ask clarifying questions if the prompt is ambiguous or contains an incorrect assumption.
-- ALWAYS use the rust-implementer subagent for writing rust code.
+- Verify Rust changes with the cargo-check then cargo-test skills; code should compile without warnings.
+- For changes to provisioning/boot flow, use the e2e-test-runner agent to validate end-to-end.
+- API changes: never remove or rename existing response fields (additive only); update clients in rack-agent / rack-director-ui and the relevant docs.
 - For ambiguous tasks, use Plan mode to explore codebase and understand context first.
 - Brainstorm 2-3 solutions and present options via AskUserQuestion. Pick best solution only if clearly superior, otherwise let user choose.
 - Code Review yourself
