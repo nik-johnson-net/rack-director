@@ -11,7 +11,16 @@ pub async fn download_file(url: &str, dest: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let response = reqwest::get(url)
+    // Some mirrors (e.g. mirror.stream.centos.org) answer 403 to requests with no
+    // User-Agent, which reqwest does not set by default.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("rack-director-osm/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let response = client
+        .get(url)
+        .send()
         .await
         .with_context(|| format!("failed to GET {url}"))?;
 
@@ -53,6 +62,30 @@ mod tests {
 
         mock.assert_async().await;
         assert_eq!(fs::read(&dest).unwrap(), b"kernel-content");
+    }
+
+    #[tokio::test]
+    async fn test_download_file_sends_user_agent() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/vmlinuz")
+            .match_header(
+                "user-agent",
+                mockito::Matcher::Regex("^rack-director-osm/".into()),
+            )
+            .with_status(200)
+            .with_body(b"kernel-content")
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("vmlinuz");
+
+        download_file(&format!("{}/vmlinuz", server.url()), &dest)
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
     }
 
     #[tokio::test]

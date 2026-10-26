@@ -1,14 +1,20 @@
 FROM redhat/ubi10 AS web-builder
-RUN mkdir /output && mkdir -p /root/.nvm && mkdir -p /build
-RUN --mount=type=cache,target=/root/.nvm <<EOT
+RUN mkdir /output && mkdir -p /build
+# nvm/node must live in an image layer: cache mounts are not persisted in layers,
+# so a cached layer would otherwise point at an empty mount.
+ENV NVM_DIR=/root/.nvm
+RUN <<EOT
+  set -ex
+  mkdir -p $NVM_DIR
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-  source /root/.nvm/nvm.sh
+  source $NVM_DIR/nvm.sh
   nvm install --lts
+  nvm alias default 'lts/*'
 EOT
 COPY rack-director-ui /build
-RUN --mount=type=cache,target=/build/rack-director-ui/node_modules --mount=type=cache,target=/root/.nvm <<EOT
+RUN --mount=type=cache,target=/root/.npm <<EOT
   set -ex
-  source /root/.nvm/nvm.sh
+  source $NVM_DIR/nvm.sh
   cd /build
   npm install
   npx vite build
@@ -18,10 +24,12 @@ EOT
 
 FROM redhat/ubi10 AS bin-builder
 RUN dnf -y install glibc-devel gcc openssl-devel zstd
-RUN mkdir -p /build/target && mkdir -p /root/.cargo
-RUN --mount=type=cache,target=/root/.cargo curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+RUN mkdir -p /build/target
+# The toolchain must live in an image layer (cache mounts are not persisted in
+# layers); only the downloaded crate sources are cached below.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 COPY --exclude=default-osm --exclude=rack-director-ui . /build
-RUN  --mount=type=cache,target=/build/target --mount=type=cache,target=/root/.cargo <<EOT
+RUN --mount=type=cache,target=/build/target --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/root/.cargo/git <<EOT
   set -ex
   source $HOME/.cargo/env
   cd build
@@ -109,7 +117,7 @@ FROM redhat/ubi10 AS default-osm-builder
 RUN dnf -y install zstd
 COPY default-osm/ /build/
 COPY --from=bin-builder /output/rack-director-osm /bin/rack-director-osm
-RUN  --mount=type=cache,target=/build/target --mount=type=cache,target=/root/.cargo <<EOT
+RUN <<EOT
   set -ex
   cd /build
   /bin/rack-director-osm build
