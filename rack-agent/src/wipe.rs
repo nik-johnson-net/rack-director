@@ -8,6 +8,10 @@ use common::device_attributes::DiskType;
 
 use crate::scan::{self, WipeTarget};
 
+mod sanitize;
+
+use sanitize::SanitizeStatus;
+
 /// Securely erase every whole disk on the machine.
 ///
 /// This action:
@@ -18,7 +22,7 @@ use crate::scan::{self, WipeTarget};
 /// 3. Deactivates any LVM volume groups on the machine so they can't hold a
 ///    disk busy during erase
 /// 4. Erases each disk concurrently using the method appropriate to its type
-///    (HDD: `shred`, SATA SSD: ATA secure erase, NVMe: `nvme format`)
+///    (HDD: `shred`, SATA SSD: ATA SANITIZE or secure erase, NVMe: `nvme format`)
 /// 5. Reports success or failure to rack-director
 ///
 /// `plan_id` is forwarded to success/failure reports so rack-director can
@@ -196,6 +200,40 @@ async fn wipe_hdd(dev: &str) -> Result<()> {
     run_command_no_timeout(dev, &program, &args).await
 }
 
+/// Erase a SATA SSD, preferring ATA SANITIZE over ATA Secure Erase.
+///
+/// SANITIZE is used whenever the drive supports it and isn't sanitize-frozen:
+/// it has its own freeze lock (so it usually still works on drives firmware
+/// security-froze at POST) and needs no password. Otherwise falls back to
+/// ATA Secure Erase.
+async fn wipe_ssd(dev: &str) -> Result<()> {
+    let info = run_command_capture("hdparm", &["-I", dev]).await?;
+
+    let ops = sanitize::plan_ops(&info);
+    let sanitize_frozen = if ops.is_empty() {
+        false
+    } else {
+        match sanitize::query_status(dev).await {
+            Ok(SanitizeStatus::Frozen) => true,
+            Ok(_) => false,
+            // A failed previous SANITIZE makes the status command abort; a
+            // new SANITIZE command is still accepted in that state.
+            Err(e) => {
+                warn!(
+                    "[{}] sanitize status query failed, sanitizing anyway: {}",
+                    dev, e
+                );
+                false
+            }
+        }
+    };
+    if !ops.is_empty() && !sanitize_frozen {
+        return sanitize::run(dev, &ops).await;
+    }
+
+    security_erase(dev, &info, sanitize_frozen).await
+}
+
 /// Erase a SATA SSD via ATA Secure Erase.
 ///
 /// Fails hard (no fallback) if the drive is frozen or does not support the
@@ -206,12 +244,16 @@ async fn wipe_hdd(dev: &str) -> Result<()> {
 /// the drive would be left LOCKED on next power cycle (per kernel.org's ATA
 /// Secure Erase documentation) unless the password is disabled again — see
 /// `disable_security_password_best_effort`.
-async fn wipe_ssd(dev: &str) -> Result<()> {
-    let info = run_command_capture("hdparm", &["-I", dev]).await?;
-
-    if hdparm_is_frozen(&info) {
+async fn security_erase(dev: &str, info: &str, sanitize_frozen: bool) -> Result<()> {
+    if hdparm_is_frozen(info) {
+        let sanitize_note = if sanitize_frozen {
+            "SANITIZE is also frozen"
+        } else {
+            "SANITIZE is not supported"
+        };
         return Err(anyhow!(
-            "disk is security-frozen; refusing to erase (a power cycle is required to unfreeze it)"
+            "disk is security-frozen and {}; refusing to erase (a power cycle is required to unfreeze it)",
+            sanitize_note
         ));
     }
     if !hdparm_security_supported(&info) {

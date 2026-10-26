@@ -18,7 +18,8 @@ rack-agent/src/
 ├── scan.rs         # Hardware scanning (CPU, memory, disks, NICs)
 ├── lvm.rs          # Shared LVM/dm cleanup (remove_lvm_on_disks), used by partition.rs and wipe.rs
 ├── partition.rs    # Disk partitioning logic
-├── wipe.rs         # Secure disk erasure (shred, ATA secure erase, nvme format)
+├── wipe.rs         # Secure disk erasure (shred, ATA SANITIZE/secure erase, nvme format)
+│   └── wipe/sanitize.rs # ATA SANITIZE (crypto scramble + block erase) for SATA SSDs
 └── daemon.rs       # Daemon mode: poll loop and action dispatch
 ```
 
@@ -319,7 +320,7 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=wipe-disks
 | Disk Type | Method |
 |-----------|--------|
 | HDD | `shred -v -n1 <dev>` — single random-data pass |
-| SATA SSD | ATA Secure Erase via `hdparm`. Reads `hdparm -I <dev>` to check security state, then sets a user password (`hdparm --user-master u --security-set-pass p <dev>`) and erases with `--security-erase-enhanced` if the drive reports enhanced erase support, else `--security-erase` |
+| SATA SSD | **Preferred: ATA SANITIZE** (`wipe/sanitize.rs`) when `hdparm -I` lists `SANITIZE feature set` and `hdparm --sanitize-status` is not `SD1 Sanitize Frozen`: runs `--sanitize-crypto-scramble` (if supported), then `--sanitize-block-erase` (else `--sanitize-overwrite hex:00000000`), each with `--yes-i-know-what-i-am-doing`, polling `--sanitize-status` every 10s until idle with `Last Sanitize Operation Completed Without Error`. **Fallback: ATA Secure Erase** via `hdparm`. Reads `hdparm -I <dev>` to check security state, then sets a user password (`hdparm --user-master u --security-set-pass p <dev>`) and erases with `--security-erase-enhanced` if the drive reports enhanced erase support, else `--security-erase` |
 | NVMe | `nvme format <dev> --ses=2 --force` (cryptographic erase) if `nvme id-ctrl <dev>`'s `fna` field has bit 2 (`0x4`) set, else `--ses=1 --force` (user data erase) |
 
 5. Reports success or failure to rack-director
@@ -334,7 +335,9 @@ The second case matters because `/dev/disk/by-path/` symlinks are not guaranteed
 
 **Concurrent, all-attempted wiping:** All target disks are wiped concurrently (`tokio::task::JoinSet`) rather than sequentially — they are independent block devices with no shared kernel state between their `shred`/`hdparm`/`nvme` invocations, so this avoids an ~Nx slowdown on a chassis with many bays. A failure on one disk does not stop the others: every disk is attempted, and only after all have finished does the action fail, with an aggregate error naming every disk that failed and why. This matters because each erase pass can take hours — leaving unattempted disks after an early failure would mean a retry restarts work that didn't need to be redone. Log lines from the long-running erase commands are tagged with the device node so they stay attributable when multiple disks' output interleaves.
 
-**SATA SSD fail-hard cases:** If `hdparm -I` reports the drive as **frozen**, or reports the ATA security feature set as **not supported**, the action fails immediately with no fallback (no blkdiscard, no shred). A frozen drive typically requires a power cycle to unfreeze; unsupported security means secure erase is not possible on that drive at all.
+**Why SANITIZE first:** Server firmware (e.g. AMI BIOS on Supermicro) commonly issues `SECURITY FREEZE LOCK` at POST, so ATA Secure Erase is refused on every boot, and a reboot/BMC power cycle doesn't help (POST freezes again). SANITIZE has its own, separate freeze lock that firmware often doesn't set — e.g. a Samsung 883 DCT reports Security `frozen` but sanitize `SD0 Sanitize Idle`. SANITIZE also needs no password, so a failed erase can't leave the drive LOCKED. Operations run in the background on the drive and survive resets; if one is already in progress (interrupted earlier attempt) it is waited out before new ops are issued. A failing `--sanitize-status` before starting (drive aborts status after a failed prior sanitize) is logged and sanitize proceeds; during polling it is a failure.
+
+**SATA SSD fail-hard cases:** If SANITIZE is unsupported or sanitize-frozen **and** `hdparm -I` reports security **frozen**, or the ATA security feature set as **not supported**, the action fails with no further fallback (no blkdiscard, no shred). The error says whether SANITIZE was frozen or unsupported. Remaining remote option for doubly-frozen drives is a vendor BIOS setting (e.g. via Redfish) — not implemented.
 
 **SATA SSD erase-failure cleanup:** If the `--security-erase`/`--security-erase-enhanced` command fails *after* the user password has already been set, the drive would be left **LOCKED** on next power cycle (per kernel.org's ATA Secure Erase documentation) unless the password is disabled again. On erase failure, the agent makes a best-effort `hdparm --user-master u --security-disable p <dev>` call before returning. If the disable also fails, both errors are logged, but the action always fails with the **original erase error** — the disable outcome never masks it and never turns a failure into a success.
 
@@ -345,7 +348,7 @@ The second case matters because `/dev/disk/by-path/` symlinks are not guaranteed
 **Implementation:** `rack-agent/src/wipe.rs::wipe_disks()`
 
 **System Dependencies:**
-- `hdparm` - ATA Secure Erase (SATA SSDs)
+- `hdparm` (>= 9.52 for `--sanitize-*`) - ATA SANITIZE / Secure Erase (SATA SSDs)
 - `nvme-cli` (`nvme` command) - NVMe format/crypto erase
 - `coreutils` (`shred`) - HDD single-pass overwrite
 - `lvm2` (`pvs`, `vgchange`, `vgremove`) - LVM/dm cleanup before erase

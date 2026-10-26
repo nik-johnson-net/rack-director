@@ -229,7 +229,7 @@ cmdline: <merged-cmdline>
 - Enumerates every whole disk on the machine
 - Branches erase strategy per disk type:
   - **HDD:** `shred -v -n1` (single-pass overwrite)
-  - **SATA SSD:** ATA Secure Erase (enhanced erase preferred when the drive supports it)
+  - **SATA SSD:** ATA SANITIZE (crypto scramble, then block erase) when supported and not sanitize-frozen; otherwise ATA Secure Erase (enhanced erase preferred when the drive supports it)
   - **NVMe:** `nvme format` with crypto erase preferred (falls back to user-data erase if unsupported)
 - Reports success/failure to rack-director
 
