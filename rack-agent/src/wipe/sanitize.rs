@@ -46,7 +46,9 @@ impl SanitizeOp {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SanitizeStatus {
     /// Idle; `last_succeeded` reflects the "Completed Without Error" flag.
-    Idle { last_succeeded: bool },
+    Idle {
+        last_succeeded: bool,
+    },
     Frozen,
     InProgress,
 }
@@ -143,8 +145,12 @@ async fn wait_for_completion(dev: &str, op: SanitizeOp) -> Result<()> {
             .map_err(|e| anyhow!("SANITIZE {:?} failed: {}", op, e))?;
         match status {
             SanitizeStatus::InProgress => continue,
-            SanitizeStatus::Idle { last_succeeded: true } => return Ok(()),
-            SanitizeStatus::Idle { last_succeeded: false } => {
+            SanitizeStatus::Idle {
+                last_succeeded: true,
+            } => return Ok(()),
+            SanitizeStatus::Idle {
+                last_succeeded: false,
+            } => {
                 return Err(anyhow!(
                     "SANITIZE {:?} finished without reporting success",
                     op
@@ -204,7 +210,9 @@ mod tests {
         let out = "\n/dev/sda:\nIssuing SANITIZE_STATUS command\nSanitize status:\n    State:    SD0 Sanitize Idle\n";
         assert_eq!(
             parse_status(out).unwrap(),
-            SanitizeStatus::Idle { last_succeeded: false }
+            SanitizeStatus::Idle {
+                last_succeeded: false
+            }
         );
     }
 
@@ -213,7 +221,9 @@ mod tests {
         let out = "Sanitize status:\n    State:    SD0 Sanitize Idle\n    Last Sanitize Operation Completed Without Error\n";
         assert_eq!(
             parse_status(out).unwrap(),
-            SanitizeStatus::Idle { last_succeeded: true }
+            SanitizeStatus::Idle {
+                last_succeeded: true
+            }
         );
     }
 

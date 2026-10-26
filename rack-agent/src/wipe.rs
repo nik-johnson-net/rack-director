@@ -219,7 +219,10 @@ async fn wipe_ssd(dev: &str) -> Result<()> {
             // A failed previous SANITIZE makes the status command abort; a
             // new SANITIZE command is still accepted in that state.
             Err(e) => {
-                warn!("[{}] sanitize status query failed, sanitizing anyway: {}", dev, e);
+                warn!(
+                    "[{}] sanitize status query failed, sanitizing anyway: {}",
+                    dev, e
+                );
                 false
             }
         }
