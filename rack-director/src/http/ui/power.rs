@@ -59,7 +59,7 @@ async fn get_device_power(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<PowerStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let conn = state.connection_factory.open().await.map_err(|e| {
+    let mut conn = state.connection_factory.open().await.map_err(|e| {
         log::warn!("get_device_power: failed to open DB connection: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -69,7 +69,7 @@ async fn get_device_power(
         )
     })?;
 
-    let director = Director::with_power_config(&conn, state.power_config);
+    let director = Director::with_power_config(&mut conn, state.power_config);
 
     if !director.device_exists(&uuid).await.map_err(|e| {
         log::warn!("get_device_power: device_exists check failed: {}", e);
@@ -116,7 +116,7 @@ async fn post_device_power(
     Path(uuid): Path<Uuid>,
     extract::Json(payload): extract::Json<PowerActionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let conn = state.connection_factory.open().await.map_err(|_| {
+    let mut conn = state.connection_factory.open().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -124,7 +124,7 @@ async fn post_device_power(
             }),
         )
     })?;
-    let director = Director::with_power_config(&conn, state.power_config);
+    let director = Director::with_power_config(&mut conn, state.power_config);
 
     // Distinguish "device not found" from "no BMC configured" so callers can
     // surface a meaningful error rather than a generic 404 for both cases.
@@ -248,8 +248,8 @@ mod tests {
         let test_uuid = test_uuid(0x50);
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -287,8 +287,8 @@ mod tests {
         let test_uuid = test_uuid(0x51);
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();

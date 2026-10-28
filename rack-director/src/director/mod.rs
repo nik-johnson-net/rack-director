@@ -3,10 +3,11 @@ use uuid::Uuid;
 use crate::database::Connection;
 use crate::director::store::generate_hostname_from_uuid;
 use crate::lifecycle::{DeviceLifecycle, LifecycleManager, LifecycleTransition, TransitionType};
+use crate::plans::Plan;
 use crate::plans::actions::BootTarget;
-use crate::plans::{Plan, PlanStatus};
 use crate::{platforms, roles};
 
+mod plan_progress;
 pub(crate) mod power;
 mod power_ops;
 pub(crate) mod store;
@@ -48,11 +49,13 @@ impl std::fmt::Display for Architecture {
 /// Short-lived handle for executing device management operations against an open database
 /// connection.
 ///
-/// `Director<'a>` borrows a `Connection` for its lifetime and uses it directly for all
-/// database access. It is constructed at the start of a request or packet handler and
+/// `Director<'a>` mutably borrows a `Connection` for its lifetime and uses it directly for all
+/// database access. The exclusive borrow is what makes [`Connection::transaction`]
+/// safe to use from `&mut self` methods: nothing else (another task, a `join!` branch, a
+/// second `Director`) can issue statements on the connection while a transaction is open. It is constructed at the start of a request or packet handler and
 /// dropped at the end; it never opens a new connection itself.
 pub struct Director<'a> {
-    conn: &'a Connection,
+    conn: &'a mut Connection,
     power_config: power::PowerConfig,
 }
 
@@ -70,7 +73,7 @@ impl<'a> Director<'a> {
     /// `AppState.power_config` instead.
     ///
     /// Suitable for reads, attribute updates, and tests.
-    pub fn new(conn: &'a Connection) -> Self {
+    pub fn new(conn: &'a mut Connection) -> Self {
         Director {
             conn,
             power_config: power::PowerConfig::default(),
@@ -81,7 +84,7 @@ impl<'a> Director<'a> {
     ///
     /// Use this constructor in handlers that perform OOB power operations so
     /// that the CLI's `--redfish-verify-tls` flag is honoured.
-    pub fn with_power_config(conn: &'a Connection, cfg: power::PowerConfig) -> Self {
+    pub fn with_power_config(conn: &'a mut Connection, cfg: power::PowerConfig) -> Self {
         Director {
             conn,
             power_config: cfg,
@@ -233,203 +236,6 @@ impl<'a> Director<'a> {
         crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await
     }
 
-    /// Handle device boot event
-    ///
-    /// Called when a device boots via iPXE. If the current action's advance_on_boot()
-    /// returns true, the action is automatically marked as successful and the plan advances.
-    /// This is used for actions like RebootDevice that complete when the device boots.
-    pub async fn on_boot(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
-        // Get the current active plan
-        let mut plan =
-            match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid).await? {
-                Some(plan) => plan,
-                None => {
-                    // No active plan - this is normal for devices that have completed their lifecycle
-                    log::debug!("No active plan for device {} on boot", device_uuid);
-                    return Ok(());
-                }
-            };
-
-        // Start the plan if it's pending
-        let plan_was_pending = plan.status == PlanStatus::Pending;
-        if plan_was_pending {
-            plan.start();
-        }
-
-        // Check if current action should advance on boot
-        let should_advance = if let Some(action) = plan.get_current_action() {
-            if action.advance_on_boot() {
-                log::info!(
-                    "Device {} booted - advancing action {:?}",
-                    device_uuid,
-                    action
-                );
-
-                // Mark current action as successful and advance
-                let _result = plan.mark_action_success();
-                true
-            } else {
-                log::debug!(
-                    "Device {} booted but current action {:?} does not advance on boot",
-                    device_uuid,
-                    action
-                );
-                false
-            }
-        } else {
-            false
-        };
-
-        // Update the plan in the database if it was started or advanced
-        if plan_was_pending || should_advance {
-            crate::plans::store::update_plan_status(
-                self.conn,
-                plan.id.unwrap(),
-                plan.status.clone(),
-                plan.current_step,
-                plan.error_message.as_deref(),
-            )
-            .await?;
-
-            // Handle lifecycle transition if plan is complete
-            if plan.status == PlanStatus::Success {
-                self.handle_plan_completion_success(plan.id.unwrap())
-                    .await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Mark the current action for a device as successful, advancing the plan.
-    ///
-    /// If `reported_plan_id` is `Some`, it is verified against the active plan's
-    /// ID. A mismatch means the report is stale (sent by an agent that was
-    /// running a since-cancelled plan), and the call is silently ignored so that
-    /// the new plan is not corrupted. When `reported_plan_id` is `None` (old
-    /// agent versions), the report is applied unconditionally.
-    pub async fn mark_action_success(
-        &self,
-        device_uuid: &Uuid,
-        reported_plan_id: Option<i64>,
-    ) -> anyhow::Result<()> {
-        // Get the current active plan
-        let mut plan = match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
-            .await?
-        {
-            Some(plan) => plan,
-            None => {
-                // No active plan: the plan was likely cancelled while the agent was in-flight.
-                // This is expected and not an error from the agent's perspective.
-                log::debug!(
-                    "action_success for {} but no active plan found — ignoring (plan may have been cancelled)",
-                    device_uuid
-                );
-                return Ok(());
-            }
-        };
-
-        // If the agent included a plan_id, verify it matches the active plan
-        if let Some(rid) = reported_plan_id
-            && plan.id != Some(rid)
-        {
-            log::warn!(
-                "action_success for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
-                device_uuid,
-                rid,
-                plan.id
-            );
-            return Ok(());
-        }
-
-        // Start the plan if it's pending
-        if plan.status == PlanStatus::Pending {
-            plan.start();
-        }
-
-        // Mark current action as successful and advance
-        let _result = plan.mark_action_success();
-
-        // Update the plan in the database
-        crate::plans::store::update_plan_status(
-            self.conn,
-            plan.id.unwrap(),
-            plan.status.clone(),
-            plan.current_step,
-            plan.error_message.as_deref(),
-        )
-        .await?;
-
-        // Handle lifecycle transition if plan is complete
-        if plan.status == PlanStatus::Success {
-            self.handle_plan_completion_success(plan.id.unwrap())
-                .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Mark the current action for a device as failed, failing the plan.
-    ///
-    /// If `reported_plan_id` is `Some`, it is verified against the active plan's
-    /// ID. A mismatch means the report is stale (sent by an agent that was
-    /// running a since-cancelled plan), and the call is silently ignored so that
-    /// the new plan is not corrupted. When `reported_plan_id` is `None` (old
-    /// agent versions), the report is applied unconditionally.
-    pub async fn mark_action_failed(
-        &self,
-        device_uuid: &Uuid,
-        error_message: &str,
-        reported_plan_id: Option<i64>,
-    ) -> anyhow::Result<()> {
-        // Get the current active plan
-        let mut plan = match crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
-            .await?
-        {
-            Some(plan) => plan,
-            None => {
-                // No active plan: the plan was likely cancelled while the agent was in-flight.
-                log::debug!(
-                    "action_failed for {} but no active plan found — ignoring (plan may have been cancelled)",
-                    device_uuid
-                );
-                return Ok(());
-            }
-        };
-
-        // If the agent included a plan_id, verify it matches the active plan
-        if let Some(rid) = reported_plan_id
-            && plan.id != Some(rid)
-        {
-            log::warn!(
-                "action_failed for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
-                device_uuid,
-                rid,
-                plan.id
-            );
-            return Ok(());
-        }
-
-        // Mark current action as failed
-        let _result = plan.mark_action_failed(error_message.to_string());
-
-        // Update the plan in the database
-        crate::plans::store::update_plan_status(
-            self.conn,
-            plan.id.unwrap(),
-            plan.status.clone(),
-            plan.current_step,
-            plan.error_message.as_deref(),
-        )
-        .await?;
-
-        // Handle lifecycle transition if plan failed
-        self.handle_plan_completion_failure(plan.id.unwrap(), error_message)
-            .await?;
-
-        Ok(())
-    }
-
     /// Auto-detect and assign platform to a device based on its hardware attributes
     ///
     /// This method is called after successful hardware discovery to automatically
@@ -492,101 +298,59 @@ impl<'a> Director<'a> {
     }
 
     pub async fn start_lifecycle_transition(
-        &self,
+        &mut self,
         device_uuid: &Uuid,
         to_state: DeviceLifecycle,
     ) -> anyhow::Result<i64> {
-        // Get current device lifecycle
-        let current_lifecycle =
-            crate::lifecycle::store::get_device_lifecycle(self.conn, device_uuid)
-                .await?
-                .unwrap_or(DeviceLifecycle::New);
+        // Validate and create the plan and its transition in one transaction, so neither can
+        // exist without the other and the state they were validated against can't change
+        // underneath them.
+        let (transition_id, plan_id) = self
+            .conn
+            .in_transaction(async |conn| {
+                create_transition_with_plan(conn, device_uuid, to_state).await
+            })
+            .await?;
 
-        // Check if transition is allowed
-        if !LifecycleManager::is_transition_allowed(&current_lifecycle, &to_state) {
-            return Err(anyhow::anyhow!(
-                "Transition from {:?} to {:?} is not allowed",
-                current_lifecycle,
-                to_state
-            ));
-        }
+        self.start_first_action(device_uuid, plan_id).await?;
+        Ok(transition_id)
+    }
 
-        // Check if there's already an active transition
-        if let Some(_active_transition) =
-            crate::lifecycle::store::get_active_transition_for_device(self.conn, device_uuid)
-                .await?
-        {
-            return Err(anyhow::anyhow!(
-                "Device {} already has an active lifecycle transition",
-                device_uuid
-            ));
-        }
-
-        // Get transition type
-        let transition_type = LifecycleManager::get_transition_type(&current_lifecycle, &to_state)
-            .ok_or_else(|| anyhow::anyhow!("Cannot determine transition type"))?;
-
-        // Validate that a Provision transition has a Role assigned.
-        // Both PartitionDisks and InstallOs require a Role for disk layout and OS configuration.
-        if transition_type == TransitionType::Provision {
-            let device = store::get_device(self.conn, device_uuid).await?;
-            if device.role_id.is_none() {
-                return Err(anyhow::anyhow!(
-                    "Cannot provision device {}: no Role is assigned. Assign a Role before reprovisioning.",
-                    device_uuid
-                ));
-            }
-        }
-
-        // Create plan for this transition
-        let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
-        let plan = Plan::new(*device_uuid, actions);
-        let plan_id = crate::plans::store::create_plan(self.conn, &plan).await?;
-
-        // Create lifecycle transition
-        let transition =
-            LifecycleTransition::new(*device_uuid, current_lifecycle, to_state, Some(plan_id));
-
-        let transition_id =
-            crate::lifecycle::store::create_transition(self.conn, &transition).await?;
-
-        // Get the newly created plan to access its current action
-        let plan = crate::plans::store::get_active_plan_for_device(self.conn, device_uuid)
+    /// Power the device on if needed and run the plan's first action's start() hook.
+    /// Both steps are best-effort: failures are logged and never block the transition.
+    async fn start_first_action(&self, device_uuid: &Uuid, plan_id: i64) -> anyhow::Result<()> {
+        let plan = crate::plans::store::get_plan(self.conn, plan_id)
             .await?
             .expect("Plan should exist immediately after creation");
+        let Some(action) = plan.get_current_action() else {
+            return Ok(());
+        };
 
-        // If there's a current action, run its start() hook
-        if let Some(action) = plan.get_current_action() {
-            let device = store::get_device(self.conn, device_uuid).await?;
-            let ctx = crate::plans::actions::ActionContext {
-                device: &device,
-                conn: self.conn,
-                director: Some(self), // Provide director for actions that need it (e.g., RebootDevice)
-            };
+        let device = store::get_device(self.conn, device_uuid).await?;
+        let ctx = crate::plans::actions::ActionContext {
+            device: &device,
+            conn: self.conn,
+            director: Some(self), // Provide director for actions that need it (e.g., RebootDevice)
+        };
 
-            // Issue an OOB power kick before starting the action so the device
-            // is actually booted and running the agent.  This is best-effort:
-            // failures are logged and never block the transition.
-            if let Err(e) = self.ensure_powered_for_plan(&device, action).await {
-                log::warn!(
-                    "Power kick failed for device {}: {} (continuing)",
-                    device_uuid,
-                    e
-                );
-            }
-
-            log::debug!("Starting action {:?} for device {}", action, device_uuid);
-            if let Err(e) = action.start(&ctx).await {
-                log::warn!(
-                    "Failed to execute start() for action {:?} on device {}: {}",
-                    action,
-                    device_uuid,
-                    e
-                );
-            }
+        if let Err(e) = self.ensure_powered_for_plan(&device, action).await {
+            log::warn!(
+                "Power kick failed for device {}: {} (continuing)",
+                device_uuid,
+                e
+            );
         }
 
-        Ok(transition_id)
+        log::debug!("Starting action {:?} for device {}", action, device_uuid);
+        if let Err(e) = action.start(&ctx).await {
+            log::warn!(
+                "Failed to execute start() for action {:?} on device {}: {}",
+                action,
+                device_uuid,
+                e
+            );
+        }
+        Ok(())
     }
 
     pub async fn get_device_lifecycle(
@@ -614,82 +378,6 @@ impl<'a> Director<'a> {
             include_completed,
         )
         .await
-    }
-
-    async fn handle_plan_completion_success(&self, plan_id: i64) -> anyhow::Result<()> {
-        // Find the lifecycle transition associated with this plan
-        if let Some(transition) =
-            crate::lifecycle::store::get_transition_by_plan_id(self.conn, plan_id).await?
-        {
-            // Complete the transition first so the row-count acts as a CAS gate.
-            // If a cancel raced us and already closed the transition, rows == 0
-            // and we must NOT overwrite the Broken lifecycle with the success state.
-            let rows = crate::lifecycle::store::complete_transition(
-                self.conn,
-                transition.id.unwrap(),
-                true,
-                None,
-            )
-            .await?;
-
-            if rows == 0 {
-                log::warn!(
-                    "complete_transition returned 0 rows for device {} — transition already closed (cancel race); skipping lifecycle update",
-                    transition.device_uuid
-                );
-                return Ok(());
-            }
-
-            // Update device lifecycle to the target state
-            crate::lifecycle::store::update_device_lifecycle(
-                self.conn,
-                &transition.device_uuid,
-                transition.to_state.clone(),
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    async fn handle_plan_completion_failure(
-        &self,
-        plan_id: i64,
-        error_message: &str,
-    ) -> anyhow::Result<()> {
-        // Find the lifecycle transition associated with this plan
-        if let Some(transition) =
-            crate::lifecycle::store::get_transition_by_plan_id(self.conn, plan_id).await?
-        {
-            // Complete the transition first so the row-count acts as a CAS gate.
-            // If a cancel raced us and already closed the transition, rows == 0
-            // and we must NOT overwrite the Broken lifecycle written by the cancel.
-            let rows = crate::lifecycle::store::complete_transition(
-                self.conn,
-                transition.id.unwrap(),
-                false,
-                Some(error_message),
-            )
-            .await?;
-
-            if rows == 0 {
-                log::warn!(
-                    "complete_transition returned 0 rows for device {} — transition already closed (cancel race); skipping lifecycle update",
-                    transition.device_uuid
-                );
-                return Ok(());
-            }
-
-            // Move device to broken state on failure
-            crate::lifecycle::store::update_device_lifecycle(
-                self.conn,
-                &transition.device_uuid,
-                DeviceLifecycle::Broken,
-            )
-            .await?;
-        }
-
-        Ok(())
     }
 
     pub async fn get_device(&self, uuid: &Uuid) -> anyhow::Result<Device> {
@@ -885,54 +573,58 @@ impl<'a> Director<'a> {
     pub async fn find_device_by_bmc_mac(&self, mac: &str) -> anyhow::Result<Option<Uuid>> {
         store::find_device_by_bmc_mac(self.conn, mac).await
     }
+}
 
-    /// Cancel the active lifecycle transition for a device.
-    ///
-    /// Uses a CAS-style conditional UPDATE on the plan so that a concurrent
-    /// `action_success` report that completes the plan first will be detected,
-    /// and the cancel will return an error rather than overwriting a successful
-    /// completion with Broken. The transition row is closed BEFORE updating the
-    /// device lifecycle so that a crash between the two steps leaves no open
-    /// "ghost" transition that would block future transitions.
-    pub async fn cancel_active_transition(&self, device_uuid: &Uuid) -> anyhow::Result<()> {
-        let transition =
-            crate::lifecycle::store::get_active_transition_for_device(self.conn, device_uuid)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("No active transition to cancel"))?;
-
-        let plan_cancelled =
-            crate::plans::store::cancel_active_plan_for_device(self.conn, device_uuid).await?;
-
-        if !plan_cancelled {
-            // A concurrent action_success (or action_failed) already completed the plan.
-            // The transition will be closed by its completion handler; bail out here so we
-            // don't overwrite a successful provisioning with Broken.
-            return Err(anyhow::anyhow!(
-                "Transition already completed; nothing to cancel"
-            ));
-        }
-
-        let transition_id = transition
-            .id
-            .ok_or_else(|| anyhow::anyhow!("Transition record has no ID"))?;
-
-        crate::lifecycle::store::complete_transition(
-            self.conn,
-            transition_id,
-            false,
-            Some("Cancelled by user"),
-        )
-        .await?;
-
-        crate::lifecycle::store::update_device_lifecycle(
-            self.conn,
-            device_uuid,
-            DeviceLifecycle::Broken,
-        )
-        .await?;
-
-        Ok(())
+/// Validate a transition to `to_state` against the device's current state and insert its
+/// plan and transition. `conn` must be an open transaction so the reads and writes are atomic.
+/// Returns `(transition_id, plan_id)`.
+async fn create_transition_with_plan(
+    conn: &Connection,
+    device_uuid: &Uuid,
+    to_state: DeviceLifecycle,
+) -> anyhow::Result<(i64, i64)> {
+    if crate::lifecycle::store::get_active_transition_for_device(conn, device_uuid)
+        .await?
+        .is_some()
+    {
+        return Err(anyhow::anyhow!(
+            "Device {} already has an active lifecycle transition",
+            device_uuid
+        ));
     }
+
+    let current_lifecycle = crate::lifecycle::store::get_device_lifecycle(conn, device_uuid)
+        .await?
+        .unwrap_or(DeviceLifecycle::New);
+    if !LifecycleManager::is_transition_allowed(&current_lifecycle, &to_state) {
+        return Err(anyhow::anyhow!(
+            "Transition from {:?} to {:?} is not allowed",
+            current_lifecycle,
+            to_state
+        ));
+    }
+    let transition_type = LifecycleManager::get_transition_type(&current_lifecycle, &to_state)
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine transition type"))?;
+
+    // Both PartitionDisks and InstallOs require a Role for disk layout and OS configuration.
+    if transition_type == TransitionType::Provision
+        && store::get_device(conn, device_uuid)
+            .await?
+            .role_id
+            .is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "Cannot provision device {}: no Role is assigned. Assign a Role before reprovisioning.",
+            device_uuid
+        ));
+    }
+
+    let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
+    let plan_id = crate::plans::store::create_plan(conn, &Plan::new(*device_uuid, actions)).await?;
+    let transition =
+        LifecycleTransition::new(*device_uuid, current_lifecycle, to_state, Some(plan_id));
+    let transition_id = crate::lifecycle::store::create_transition(conn, &transition).await?;
+    Ok((transition_id, plan_id))
 }
 
 #[cfg(test)]
@@ -944,7 +636,7 @@ mod tests {
 
     /// Sets up a test database and returns the connection.
     ///
-    /// Each test constructs `Director::new(&conn)` locally so that the Director
+    /// Each test constructs `Director::new(&mut conn)` locally so that the Director
     /// borrows the connection for the duration of the test.
     async fn setup_test_db(factory: DatabaseConnectionFactory) -> database::Connection {
         database::run_migrations(&factory).await.unwrap()
@@ -952,8 +644,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_active_plan_constraint() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440006").unwrap();
 
         // Register device
@@ -1008,8 +700,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_all_devices() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
 
         // Initially should return empty list
         let devices = director.get_all_devices().await.unwrap();
@@ -1062,8 +754,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_discovery_transition() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440007").unwrap();
 
         // Register device - it should start in "new" state
@@ -1170,8 +862,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_boot_advances_reboot_action() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440023").unwrap();
 
         // Register device
@@ -1198,6 +890,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut director = Director::new(&mut conn);
 
         // Verify RebootDevice is now the current action
         let active_plan = director
@@ -1225,8 +918,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_boot_does_not_advance_other_actions() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440024").unwrap();
 
         // Register device
@@ -1264,8 +957,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_boot_without_active_plan() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440025").unwrap();
 
         // Register device without a plan
@@ -1281,8 +974,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_device_sets_default_bmc_config() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440030").unwrap();
 
         // Register device
@@ -1312,8 +1005,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_bmc_config_does_not_override_existing() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440031").unwrap();
 
         // Register device (sets default config)
@@ -1354,8 +1047,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_bmc_config_preserves_other_attributes() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440032").unwrap();
 
         // Register device
@@ -1400,8 +1093,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_device_removes_static_reservations() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440033").unwrap();
 
         // Create a DHCP network using the shared connection
@@ -1418,6 +1110,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Register device
         director
@@ -1459,6 +1152,7 @@ mod tests {
             .await
             .unwrap();
         assert!(reservation.is_some());
+        let director = Director::new(&mut conn);
 
         // Delete device
         director.delete_device(&test_uuid).await.unwrap();
@@ -1472,8 +1166,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_device_removes_reservations_for_multiple_nics() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440034").unwrap();
 
         // Create DHCP network using the shared connection
@@ -1490,6 +1183,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Register device
         director
@@ -1562,6 +1256,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let director = Director::new(&mut conn);
 
         // Delete device
         director.delete_device(&test_uuid).await.unwrap();
@@ -1585,8 +1280,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_success() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440050").unwrap();
 
         // Register device
@@ -1617,6 +1312,7 @@ mod tests {
         crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs, None)
             .await
             .unwrap();
+        let director = Director::new(&mut conn);
 
         // Update device with matching hardware info
         let mut hardware_attrs = serde_json::Map::new();
@@ -1665,8 +1361,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_failed() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440051").unwrap();
 
         // Register device
@@ -1722,8 +1418,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_manual() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440052").unwrap();
 
         // Register device
@@ -1743,6 +1439,7 @@ mod tests {
             crate::platforms::store::create(&conn, "Manual Platform", None, &platform_attrs, None)
                 .await
                 .unwrap();
+        let director = Director::new(&mut conn);
 
         // Manually assign platform
         director
@@ -1757,8 +1454,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_no_hardware_info() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440053").unwrap();
 
         // Register device
@@ -1783,8 +1480,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_creates_new_platform_on_no_match() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440056").unwrap();
 
         // Register device
@@ -1800,6 +1497,7 @@ mod tests {
             0,
             "Should start with empty platform database"
         );
+        let director = Director::new(&mut conn);
 
         // Update device with hardware info that won't match any existing platform
         // (since database is empty, this will auto-create a new platform)
@@ -1852,6 +1550,7 @@ mod tests {
             1,
             "Platform should be auto-created when no match exists"
         );
+        let director = Director::new(&mut conn);
 
         // Verify device was assigned the new platform (no warning on success)
         let device = director.get_device(&test_uuid).await.unwrap();
@@ -1876,8 +1575,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_partial_hardware_info() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440054").unwrap();
 
         // Register device
@@ -1916,8 +1615,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_platform_detection_status_manual_overrides_auto() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440055").unwrap();
 
         // Register device
@@ -1962,6 +1661,7 @@ mod tests {
             crate::platforms::store::create(&conn, "Manual Override", None, &platform_attrs, None)
                 .await
                 .unwrap();
+        let director = Director::new(&mut conn);
 
         director
             .assign_platform_to_device(&test_uuid, manual_platform.id.unwrap())
@@ -1979,8 +1679,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_assign_role_with_labels_no_platform_fails() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440060").unwrap();
 
         // Register device (no platform)
@@ -2015,6 +1715,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Assign role should fail - labels used but no platform
         let result = director
@@ -2031,8 +1732,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_assign_role_with_missing_labels_fails() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440061").unwrap();
 
         // Register device
@@ -2056,6 +1757,7 @@ mod tests {
             crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs, None)
                 .await
                 .unwrap();
+        let director = Director::new(&mut conn);
         director
             .assign_platform_to_device(&test_uuid, platform.id.unwrap())
             .await
@@ -2087,6 +1789,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Assign should fail - label not in platform
         let result = director
@@ -2098,8 +1801,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_assign_role_with_matching_labels_succeeds() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440062").unwrap();
 
         // Register device
@@ -2123,6 +1826,7 @@ mod tests {
             crate::platforms::store::create(&conn, "Test Platform", None, &platform_attrs, None)
                 .await
                 .unwrap();
+        let director = Director::new(&mut conn);
         director
             .assign_platform_to_device(&test_uuid, platform.id.unwrap())
             .await
@@ -2154,6 +1858,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Assign should succeed - label matches platform
         let result = director
@@ -2164,8 +1869,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_assign_role_with_paths_no_platform_succeeds() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440063").unwrap();
 
         // Register device (no platform)
@@ -2200,6 +1905,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Assign should succeed - no labels, no platform needed
         let result = director
@@ -2210,8 +1916,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_assign_role_firmware_mismatch_fails() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440066").unwrap();
 
         // Register device and set its boot_mode to BIOS via attribute update
@@ -2249,6 +1955,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Assign should fail — device is BIOS, role requires UEFI
         let result = director
@@ -2265,8 +1972,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_assign_role_firmware_match_succeeds() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440067").unwrap();
 
         // Register device and set its boot_mode to UEFI
@@ -2303,6 +2010,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Assign should succeed — both are UEFI
         let result = director
@@ -2313,8 +2021,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_assign_role_firmware_constrained_role_no_device_boot_mode_warns_and_proceeds() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440068").unwrap();
 
         // Register device (no boot_mode set — device-scan not yet run)
@@ -2345,6 +2053,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Assign should succeed (with a warning) — device has no boot_mode yet
         let result = director
@@ -2355,8 +2064,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_unknown_device_sleep_reboot() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         // UUID that was never registered
         let unknown_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440064").unwrap();
 
@@ -2369,8 +2078,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_provisioned_device_boots_local_disk() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440065").unwrap();
 
         // Register device and directly set lifecycle to Provisioned via the store.
@@ -2388,6 +2097,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         // Verify lifecycle is Provisioned
         let lifecycle = director.get_device_lifecycle(&test_uuid).await.unwrap();
@@ -2403,8 +2113,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_active_transition_success() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440099").unwrap();
 
         director
@@ -2455,8 +2165,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_active_transition_no_active_transition() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440098").unwrap();
 
         director
@@ -2475,10 +2185,164 @@ mod tests {
         );
     }
 
+    /// Simulate the legacy failure mode: the plan finished but its transition was never closed.
+    async fn orphan_transition(conn: &mut Connection, uuid: &Uuid, status: &str) {
+        let mut director = Director::new(conn);
+        director
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        director
+            .start_lifecycle_transition(uuid, DeviceLifecycle::Unprovisioned)
+            .await
+            .unwrap();
+        conn.execute(
+            "UPDATE plans SET status = ?1, error_message = 'agent failed' WHERE device_uuid = ?2",
+            (status.to_string(), *uuid),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_on_boot_repairs_orphaned_transition_with_plan_outcome() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let succeeded = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440101").unwrap();
+        let failed = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440102").unwrap();
+        orphan_transition(&mut conn, &succeeded, "success").await;
+        orphan_transition(&mut conn, &failed, "failed").await;
+
+        let mut director = Director::new(&mut conn);
+
+        director.on_boot(&succeeded).await.unwrap();
+        director.on_boot(&failed).await.unwrap();
+
+        for uuid in [&succeeded, &failed] {
+            assert!(
+                director
+                    .get_active_transition_for_device(uuid)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            director.get_device_lifecycle(&succeeded).await.unwrap(),
+            Some(DeviceLifecycle::Unprovisioned)
+        );
+        assert_eq!(
+            director.get_device_lifecycle(&failed).await.unwrap(),
+            Some(DeviceLifecycle::Broken)
+        );
+        let transitions = director
+            .get_device_transitions(&failed, true)
+            .await
+            .unwrap();
+        assert_eq!(transitions[0].success, Some(false));
+        assert_eq!(
+            transitions[0].error_message.as_deref(),
+            Some("agent failed")
+        );
+
+        // A repaired device boots normally afterwards.
+        director.on_boot(&succeeded).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_on_boot_leaves_transition_with_active_plan_open() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440103").unwrap();
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        director
+            .start_lifecycle_transition(&test_uuid, DeviceLifecycle::Unprovisioned)
+            .await
+            .unwrap();
+
+        director.on_boot(&test_uuid).await.unwrap();
+
+        assert!(
+            director
+                .get_active_transition_for_device(&test_uuid)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            director
+                .get_active_plan_for_device(&test_uuid)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_orphaned_transition_applies_plan_outcome() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let succeeded = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440104").unwrap();
+        let failed = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440105").unwrap();
+        orphan_transition(&mut conn, &succeeded, "success").await;
+        orphan_transition(&mut conn, &failed, "failed").await;
+
+        let mut director = Director::new(&mut conn);
+
+        director.cancel_active_transition(&succeeded).await.unwrap();
+        director.cancel_active_transition(&failed).await.unwrap();
+
+        for uuid in [&succeeded, &failed] {
+            assert!(
+                director
+                    .get_active_transition_for_device(uuid)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // A plan that already succeeded keeps its outcome rather than being overridden.
+        assert_eq!(
+            director.get_device_lifecycle(&succeeded).await.unwrap(),
+            Some(DeviceLifecycle::Unprovisioned)
+        );
+        assert_eq!(
+            director.get_device_lifecycle(&failed).await.unwrap(),
+            Some(DeviceLifecycle::Broken)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_orphaned_transition_leaves_unrelated_plan_alone() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440106").unwrap();
+        orphan_transition(&mut conn, &test_uuid, "failed").await;
+        let standalone_id = crate::plans::store::create_plan(
+            &conn,
+            &Plan::new(
+                test_uuid,
+                vec![crate::plans::actions::Action::DiscoverHardware],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let mut director = Director::new(&mut conn);
+        director.cancel_active_transition(&test_uuid).await.unwrap();
+
+        let active_plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap()
+            .expect("standalone plan should still be active");
+        assert_eq!(active_plan.id, Some(standalone_id));
+    }
+
     #[tokio::test]
     async fn test_provision_transition_without_role_fails() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440100").unwrap();
 
         // Register device and force it into the Broken state (simulating a failed provisioning
@@ -2495,6 +2359,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut director = Director::new(&mut conn);
 
         // Attempting Broken -> Provisioned without a role must fail with an informative error.
         let result = director

@@ -213,8 +213,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_powered_for_plan_skips_when_in_daemon_mode() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440070").unwrap();
 
         director
@@ -234,7 +234,7 @@ mod tests {
         let device = store::get_device(&conn, &test_uuid).await.unwrap();
 
         // DiscoverHardware requires boot, but daemon mode is active → should skip
-        let result = director
+        let result = Director::new(&mut conn)
             .ensure_powered_for_plan(&device, &Action::DiscoverHardware)
             .await;
         assert!(result.is_ok());
@@ -243,8 +243,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_powered_for_plan_skips_reboot_device() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440071").unwrap();
 
         director
@@ -252,7 +252,7 @@ mod tests {
             .await
             .unwrap();
 
-        let device = store::get_device(&conn, &test_uuid).await.unwrap();
+        let device = director.get_device(&test_uuid).await.unwrap();
 
         // RebootDevice does not require boot → ensure_powered_for_plan returns immediately
         let result = director
@@ -265,8 +265,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_with_bmc_info() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440020").unwrap();
 
         // Register device
@@ -305,8 +305,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_without_bmc_ip() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440021").unwrap();
 
         // Register device without BMC info
@@ -322,8 +322,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reboot_without_bmc_credentials() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440022").unwrap();
 
         // Register device
@@ -353,8 +353,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_ip_with_valid_bmc() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440026").unwrap();
 
         // Register device
@@ -384,8 +384,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_ip_without_bmc() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440027").unwrap();
 
         // Register device without BMC
@@ -401,8 +401,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_credentials_with_valid_config() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440028").unwrap();
 
         // Register device
@@ -436,8 +436,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_bmc_credentials_without_credentials() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&conn);
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
         let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440029").unwrap();
 
         // Register device - will have default BMC config with no credentials

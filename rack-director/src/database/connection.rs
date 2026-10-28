@@ -2,6 +2,7 @@ use std::{
     ops::Deref,
     path::Path,
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use rusqlite::Params;
@@ -41,7 +42,7 @@ fn start_with_file<P: AsRef<Path>>(
     path: P,
     started: oneshot::Sender<rusqlite::Result<mpsc::Sender<ControlMessage>>>,
 ) {
-    let conn = match rusqlite::Connection::open(path) {
+    let conn = match rusqlite::Connection::open(path).and_then(configure) {
         Ok(conn) => conn,
         Err(e) => {
             started
@@ -57,6 +58,19 @@ fn start_with_file<P: AsRef<Path>>(
         .expect("caller did not wait for a response on started channel");
 
     sqlite_loop(conn, rx);
+}
+
+/// How long a statement waits for another connection's lock before failing with SQLITE_BUSY.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-connection settings. Every request opens its own connection, so without a busy
+/// timeout any two overlapping writes fail immediately with "database is locked". WAL lets
+/// readers proceed while a write is in progress. (In-memory test databases stay in
+/// "memory" journal mode; the pragma is a no-op there.)
+fn configure(conn: rusqlite::Connection) -> rusqlite::Result<rusqlite::Connection> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
+    Ok(conn)
 }
 
 /// Macro to get the path to this test's database. Must be called at the top level of the test.
@@ -202,9 +216,33 @@ impl Connection {
         self.send_request(action).await
     }
 
-    /// Start a new Transaction.
+    /// Start a `BEGIN IMMEDIATE` transaction.
+    ///
+    /// IMMEDIATE takes the write lock up front, so the busy timeout applies.
+    /// Every current transaction writes; if a read-only snapshot transaction is ever needed,
+    /// add a separate deferred variant rather than changing this.
     pub async fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>> {
         Transaction::new(self).await
+    }
+
+    /// Run `f` in a [`Self::transaction`], committing if it returns `Ok` and rolling back if
+    /// it returns `Err`. Prefer this over a bare transaction so error paths don't depend on
+    /// the best-effort rollback in `Transaction::drop`.
+    pub async fn in_transaction<T>(
+        &mut self,
+        f: impl AsyncFnOnce(&Connection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let tx = self.transaction().await?;
+        match f(&tx).await {
+            Ok(value) => {
+                tx.commit().await?;
+                Ok(value)
+            }
+            Err(e) => {
+                tx.rollback().await?;
+                Err(e)
+            }
+        }
     }
 
     /// Returns the rowid of the most recent successful INSERT in this connection.
@@ -257,7 +295,7 @@ pub struct Transaction<'conn> {
 
 impl<'conn> Transaction<'conn> {
     async fn new(conn: &'conn mut Connection) -> rusqlite::Result<Self> {
-        conn.execute("BEGIN ", ()).await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
         Ok(Self { conn, done: false })
     }
 
@@ -304,6 +342,7 @@ impl<'conn> Deref for Transaction<'conn> {
 #[cfg(test)]
 mod tests {
     use super::Connection;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn empty_params_tuple() {
@@ -359,6 +398,38 @@ mod tests {
         conn.execute("INSERT INTO foo(x) VALUES (2)", ())
             .await
             .unwrap();
+    }
+
+    /// A file-backed connection waits for a competing writer instead of failing with
+    /// SQLITE_BUSY, and uses WAL.
+    #[tokio::test]
+    async fn file_connection_uses_wal_and_waits_for_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let mut a = Connection::open(path.clone()).await.unwrap();
+        let b = Connection::open(path).await.unwrap();
+
+        let mode: String = a
+            .query_one("PRAGMA journal_mode", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
+        a.execute("CREATE TABLE foo (x INTEGER)", ()).await.unwrap();
+
+        // Hold the write lock on `a` briefly; `b`'s write must wait rather than fail.
+        let holder = async {
+            let tx = a.transaction().await?;
+            tx.execute("INSERT INTO foo(x) VALUES (1)", ()).await?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tx.commit().await
+        };
+        let waiter = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            b.execute("INSERT INTO foo(x) VALUES (2)", ()).await
+        };
+        let (held, waited) = tokio::join!(holder, waiter);
+        held.unwrap();
+        waited.expect("write must wait for the lock instead of returning SQLITE_BUSY");
     }
 
     /// Verify that dropping a Transaction without calling commit() issues a

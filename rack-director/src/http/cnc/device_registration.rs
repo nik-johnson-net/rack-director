@@ -61,7 +61,7 @@ pub async fn resolve_mac_address(
 ///   OOB power kick when the discovery transition starts. Pass `AppState.power_config`
 ///   from HTTP handlers so the `--redfish-verify-tls` CLI flag is honoured.
 pub async fn register_and_start_discovery(
-    conn: &Connection,
+    conn: &mut Connection,
     device_uuid: &Uuid,
     mac_address: Option<&String>,
     power_config: PowerConfig,
@@ -100,7 +100,7 @@ pub async fn register_and_start_discovery(
         && let Ok(Some(lease)) = dhcp::store::get_lease_by_mac(conn, mac).await
         && let Some(network_id) = lease.network_id
     {
-        let hostname = director
+        let hostname = Director::with_power_config(conn, power_config)
             .get_device(device_uuid)
             .await
             .ok()
@@ -123,7 +123,7 @@ pub async fn register_and_start_discovery(
     }
 
     // Automatically start discovery transition for newly registered devices
-    if let Err(e) = director
+    if let Err(e) = Director::with_power_config(conn, power_config)
         .start_lifecycle_transition(
             device_uuid,
             crate::lifecycle::DeviceLifecycle::Unprovisioned,
@@ -224,26 +224,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_and_start_discovery() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let uuid = test_uuid();
 
         // Verify device doesn't exist
-        assert!(!Director::new(&conn).device_exists(&uuid).await.unwrap());
+        assert!(!Director::new(&mut conn).device_exists(&uuid).await.unwrap());
 
-        register_and_start_discovery(&conn, &uuid, None, PowerConfig::default()).await;
+        register_and_start_discovery(&mut conn, &uuid, None, PowerConfig::default()).await;
 
         // Verify device was registered
-        assert!(Director::new(&conn).device_exists(&uuid).await.unwrap());
+        assert!(Director::new(&mut conn).device_exists(&uuid).await.unwrap());
 
         // Verify lifecycle was started (device should be in New state)
-        let lifecycle = Director::new(&conn)
+        let lifecycle = Director::new(&mut conn)
             .get_device_lifecycle(&uuid)
             .await
             .unwrap();
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
 
         // Verify discovery plan was created
-        let plan = Director::new(&conn)
+        let plan = Director::new(&mut conn)
             .get_active_plan_for_device(&uuid)
             .await
             .unwrap();
@@ -252,31 +252,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_and_start_discovery_with_pending_device() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff".to_string();
 
         // Create pending device
-        Director::new(&conn)
+        Director::new(&mut conn)
             .create_pending_device(&mac, network_id)
             .await
             .unwrap();
 
         // Verify pending device exists
-        let pending = Director::new(&conn)
+        let pending = Director::new(&mut conn)
             .find_pending_device_by_mac(&mac)
             .await
             .unwrap();
         assert!(pending.is_some());
 
-        register_and_start_discovery(&conn, &uuid, Some(&mac), PowerConfig::default()).await;
+        register_and_start_discovery(&mut conn, &uuid, Some(&mac), PowerConfig::default()).await;
 
         // Verify device was registered
-        assert!(Director::new(&conn).device_exists(&uuid).await.unwrap());
+        assert!(Director::new(&mut conn).device_exists(&uuid).await.unwrap());
 
         // Verify pending device was completed (removed)
-        let pending = Director::new(&conn)
+        let pending = Director::new(&mut conn)
             .find_pending_device_by_mac(&mac)
             .await
             .unwrap();
@@ -285,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_and_start_discovery_creates_static_reservation() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:11".to_string();
@@ -305,7 +305,7 @@ mod tests {
         .unwrap();
 
         // Register device - this should create a static reservation
-        register_and_start_discovery(&conn, &uuid, Some(&mac), PowerConfig::default()).await;
+        register_and_start_discovery(&mut conn, &uuid, Some(&mac), PowerConfig::default()).await;
 
         // Verify static reservation was created
         let reservation = dhcp::store::get_static_reservation(&conn, network_id, &mac)
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(r.network_id, network_id);
 
         // Verify hostname is included
-        let device = Director::new(&conn).get_device(&uuid).await.unwrap();
+        let device = Director::new(&mut conn).get_device(&uuid).await.unwrap();
         assert_eq!(r.hostname, device.attributes.hostname);
     }
 }

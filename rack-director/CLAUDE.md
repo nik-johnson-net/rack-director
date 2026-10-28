@@ -80,28 +80,31 @@ async fn test_something() {
 
 - Each module will store its primitives in separate database tables.
 - Access to that table will occur in a `store.rs` submodule.
-- `store.rs` submodule MUST remain private to the module.
 
-An example `store.rs` module:
+Store functions are free async functions that take the caller's connection as `conn: &Connection`
+(`crate::database::Connection`, not raw rusqlite), so they work on a plain connection or inside a
+`Transaction`. From `src/director/store.rs`:
 
-```
-pub struct ExampleStore {
-    pub conn: Arc<Mutex<rusqlite::Connection>>,
-}
-
-pub fn new(conn: Arc<Mutex<rusqlite::Connection>>) -> Self {
-    Self { conn }
-}
-
-pub async fn register_device(&self, uuid: &str, architecture: Architecture) -> Result<()> {
-    let conn = self.conn.lock().await;
+```rust
+pub async fn register_device(
+    conn: &Connection,
+    uuid: &Uuid,
+    architecture: Architecture,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO devices (uuid, lifecycle, architecture) VALUES (?1, 'new', ?2)",
-        params![uuid, architecture.as_str()],
-    )?;
+        (*uuid, architecture.as_str().to_string()),
+    )
+    .await
+    .map(|_| ())?;
     Ok(())
 }
 ```
+
+### Connections and transactions
+
+Each request opens its own connection; multi-statement writes use `Connection::transaction()`. See
+`src/database/CLAUDE.md` (locking, transactions) and `src/director/CLAUDE.md` (building a `Director`).
 
 ## Devices
 

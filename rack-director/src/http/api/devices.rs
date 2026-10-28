@@ -120,8 +120,8 @@ async fn put_label_override(
 ) -> Result<(StatusCode, Json<LabelOverridesResponse>), HttpError> {
     validate_label_override_request(&req)?;
 
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
 
     let device = director
         .get_device(&uuid)
@@ -145,8 +145,8 @@ async fn delete_label_override(
     State(state): State<Arc<AppState>>,
     Path((uuid, label)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
 
     let device = director
         .get_device(&uuid)

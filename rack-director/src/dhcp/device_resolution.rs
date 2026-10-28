@@ -22,7 +22,7 @@ pub trait DeviceResolver: Send + Sync {
     /// 2. Otherwise, fall back to MAC-based resolution
     async fn resolve(
         &self,
-        conn: &Connection,
+        conn: &mut Connection,
         mac: &str,
         guid: Option<&Uuid>,
     ) -> Result<DeviceContext>;
@@ -30,7 +30,7 @@ pub trait DeviceResolver: Send + Sync {
     /// Notify that a lease has been activated for a device.
     async fn on_lease_activated(
         &self,
-        conn: &Connection,
+        conn: &mut Connection,
         uuid: &Uuid,
         ip: &str,
         mac: &str,
@@ -60,7 +60,7 @@ impl Default for DirectorDeviceResolver {
 impl DeviceResolver for DirectorDeviceResolver {
     async fn resolve(
         &self,
-        conn: &Connection,
+        conn: &mut Connection,
         mac: &str,
         guid: Option<&Uuid>,
     ) -> Result<DeviceContext> {
@@ -114,13 +114,14 @@ impl DeviceResolver for DirectorDeviceResolver {
 
     async fn on_lease_activated(
         &self,
-        conn: &Connection,
+        conn: &mut Connection,
         uuid: &Uuid,
         ip: &str,
         mac: &str,
     ) -> Result<()> {
-        let director = Director::new(conn);
-        director.set_device_ip_address(uuid, ip, mac).await
+        Director::new(conn)
+            .set_device_ip_address(uuid, ip, mac)
+            .await
     }
 }
 
@@ -136,10 +137,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_unknown_mac() {
-        let conn = create_test_db(test_connection_factory!()).await;
+        let mut conn = create_test_db(test_connection_factory!()).await;
         let resolver = DirectorDeviceResolver::new();
         let ctx = resolver
-            .resolve(&conn, "aa:bb:cc:dd:ee:ff", None)
+            .resolve(&mut conn, "aa:bb:cc:dd:ee:ff", None)
             .await
             .unwrap();
         assert!(ctx.device_uuid.is_none());
@@ -149,10 +150,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_returns_not_disabled_for_unknown() {
-        let conn = create_test_db(test_connection_factory!()).await;
+        let mut conn = create_test_db(test_connection_factory!()).await;
         let resolver = DirectorDeviceResolver::new();
         let ctx = resolver
-            .resolve(&conn, "11:22:33:44:55:66", None)
+            .resolve(&mut conn, "11:22:33:44:55:66", None)
             .await
             .unwrap();
         assert!(!ctx.is_disabled);
@@ -160,17 +161,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_returns_not_pending_for_unknown() {
-        let conn = create_test_db(test_connection_factory!()).await;
+        let mut conn = create_test_db(test_connection_factory!()).await;
         let resolver = DirectorDeviceResolver::new();
         let _ctx = resolver
-            .resolve(&conn, "11:22:33:44:55:66", None)
+            .resolve(&mut conn, "11:22:33:44:55:66", None)
             .await
             .unwrap();
     }
 
     #[tokio::test]
     async fn test_resolve_with_guid_no_match() {
-        let conn = create_test_db(test_connection_factory!()).await;
+        let mut conn = create_test_db(test_connection_factory!()).await;
         let resolver = DirectorDeviceResolver::new();
 
         // Use a GUID that doesn't exist in the database
@@ -178,7 +179,7 @@ mod tests {
 
         // Resolve with non-matching GUID should return None for device_uuid
         let ctx = resolver
-            .resolve(&conn, "aa:bb:cc:dd:ee:ff", Some(&non_existent_guid))
+            .resolve(&mut conn, "aa:bb:cc:dd:ee:ff", Some(&non_existent_guid))
             .await
             .unwrap();
         assert_eq!(ctx.device_uuid, None);
@@ -186,12 +187,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_without_guid() {
-        let conn = create_test_db(test_connection_factory!()).await;
+        let mut conn = create_test_db(test_connection_factory!()).await;
         let resolver = DirectorDeviceResolver::new();
 
         // Resolve without GUID should use MAC-based resolution (returns None for unknown MAC)
         let ctx = resolver
-            .resolve(&conn, "aa:bb:cc:dd:ee:ff", None)
+            .resolve(&mut conn, "aa:bb:cc:dd:ee:ff", None)
             .await
             .unwrap();
         assert_eq!(ctx.device_uuid, None);

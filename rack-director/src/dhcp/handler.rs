@@ -110,7 +110,7 @@ impl DhcpHandler {
         };
 
         trace!("DHCP: Received packet {:?}", msg);
-        let conn = self.db.open().await?;
+        let mut conn = self.db.open().await?;
 
         // If relay agent (giaddr != 0), use relay-based network selection
         if msg.giaddr() != Ipv4Addr::UNSPECIFIED {
@@ -128,9 +128,13 @@ impl DhcpHandler {
             );
             let dest = SocketAddr::new(relay_agent.into(), 67);
             return self
-                .process_and_reply(&conn, &msg, &network, self.server_identifier, move |data| {
-                    DhcpReply::Relay { data, dest }
-                })
+                .process_and_reply(
+                    &mut conn,
+                    &msg,
+                    &network,
+                    self.server_identifier,
+                    move |data| DhcpReply::Relay { data, dest },
+                )
                 .await;
         }
 
@@ -150,10 +154,12 @@ impl DhcpHandler {
             network.name, network.id, pkt_info.if_index, local_ip
         );
         let peer_addr = pkt_info.addr_src;
-        self.process_and_reply(&conn, &msg, network, local_ip, move |data| DhcpReply::L2 {
-            data,
-            local_ip,
-            peer_addr,
+        self.process_and_reply(&mut conn, &msg, network, local_ip, move |data| {
+            DhcpReply::L2 {
+                data,
+                local_ip,
+                peer_addr,
+            }
         })
         .await
     }
@@ -177,7 +183,7 @@ impl DhcpHandler {
         };
 
         trace!("DHCP unicast: Received packet {:?}", msg);
-        let conn = self.db.open().await?;
+        let mut conn = self.db.open().await?;
 
         let l2_networks = store::get_l2_networks(&conn).await?;
         let Some(network) = interface::find_l2_network_for_ip(local_ip, &l2_networks)? else {
@@ -188,10 +194,12 @@ impl DhcpHandler {
             "Unicast: Using network '{}' (id={}) for local_ip={}",
             network.name, network.id, local_ip
         );
-        self.process_and_reply(&conn, &msg, network, local_ip, move |data| DhcpReply::L2 {
-            data,
-            local_ip,
-            peer_addr,
+        self.process_and_reply(&mut conn, &msg, network, local_ip, move |data| {
+            DhcpReply::L2 {
+                data,
+                local_ip,
+                peer_addr,
+            }
         })
         .await
     }
@@ -199,7 +207,7 @@ impl DhcpHandler {
     /// Shared logic for processing a DHCP message against a selected network and producing a reply.
     async fn process_and_reply<F>(
         &self,
-        conn: &Connection,
+        conn: &mut Connection,
         msg: &Message,
         network: &DhcpNetwork,
         server_identifier: Ipv4Addr,
@@ -243,7 +251,7 @@ impl DhcpHandler {
 
     async fn handle_discover(
         &self,
-        conn: &Connection,
+        conn: &mut Connection,
         msg: &Message,
         network: &DhcpNetwork,
         server_identifier: Ipv4Addr,
@@ -316,7 +324,7 @@ impl DhcpHandler {
 
     async fn handle_request(
         &self,
-        conn: &Connection,
+        conn: &mut Connection,
         msg: &Message,
         network: &DhcpNetwork,
         server_identifier: Ipv4Addr,
@@ -1154,7 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_matching_server_id() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
@@ -1192,7 +1200,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1220,7 +1228,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_non_matching_server_id() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
@@ -1264,7 +1272,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1277,7 +1285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_without_server_id() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
@@ -1313,7 +1321,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1341,7 +1349,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_request_init_reboot_without_server_id() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         // Create a lease first
@@ -1378,7 +1386,7 @@ mod tests {
 
         // Handle the request
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1412,7 +1420,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_nak_on_wrong_requested_ip() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
@@ -1438,7 +1446,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1467,7 +1475,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_nak_on_wrong_ciaddr() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
@@ -1491,7 +1499,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1520,7 +1528,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_ack_on_correct_ip() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
@@ -1545,7 +1553,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1581,7 +1589,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_overrides_existing_lease() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
@@ -1618,7 +1626,7 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &request, &network, handler.server_identifier)
             .await
             .unwrap();
 
@@ -1647,7 +1655,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_reservation_full_workflow() {
-        let (handler, conn, network_id, _temp_dir) =
+        let (handler, mut conn, network_id, _temp_dir) =
             create_test_handler_with_store(test_connection_factory!()).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
@@ -1684,7 +1692,12 @@ mod tests {
 
         let network = store::get_network(&conn, network_id).await.unwrap();
         let response = handler
-            .handle_request(&conn, &renew_request, &network, handler.server_identifier)
+            .handle_request(
+                &mut conn,
+                &renew_request,
+                &network,
+                handler.server_identifier,
+            )
             .await
             .unwrap();
 
@@ -1709,7 +1722,7 @@ mod tests {
             .insert(v4::DhcpOption::RequestedIpAddress(reserved_ip));
 
         let response = handler
-            .handle_request(&conn, &new_request, &network, handler.server_identifier)
+            .handle_request(&mut conn, &new_request, &network, handler.server_identifier)
             .await
             .unwrap();
 
