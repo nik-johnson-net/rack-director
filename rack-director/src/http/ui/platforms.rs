@@ -301,13 +301,13 @@ mod tests {
     async fn setup_db(
         path: String,
     ) -> (
-        Arc<crate::database::Connection>,
+        crate::database::Connection,
         Arc<dyn crate::database::ConnectionFactory>,
     ) {
         let factory: Arc<dyn crate::database::ConnectionFactory> = Arc::new(
             crate::database::DatabaseConnectionFactory::new(std::path::PathBuf::from(path)),
         );
-        let db = Arc::new(database::run_migrations(factory.as_ref()).await.unwrap());
+        let db = database::run_migrations(factory.as_ref()).await.unwrap();
         (db, factory)
     }
 
@@ -353,8 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_empty() {
-        let (conn, _factory) = setup_db(test_database_path!()).await;
-        let director = Director::new(&conn);
+        let (mut conn, _factory) = setup_db(test_database_path!()).await;
 
         // Create a platform
         let attrs = sample_platform_attributes();
@@ -367,6 +366,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         let platform_id = platform.id.unwrap();
 
@@ -381,8 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_single_device() {
-        let (conn, _factory) = setup_db(test_database_path!()).await;
-        let director = Director::new(&conn);
+        let (mut conn, _factory) = setup_db(test_database_path!()).await;
 
         // Create a platform
         let attrs = sample_platform_attributes();
@@ -395,6 +394,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         let platform_id = platform.id.unwrap();
 
@@ -433,8 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_multiple_devices() {
-        let (conn, _factory) = setup_db(test_database_path!()).await;
-        let director = Director::new(&conn);
+        let (mut conn, _factory) = setup_db(test_database_path!()).await;
 
         // Create a platform
         let attrs = sample_platform_attributes();
@@ -447,6 +446,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         let platform_id = platform.id.unwrap();
 
@@ -520,8 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_lifecycle_states() {
-        let (conn, _factory) = setup_db(test_database_path!()).await;
-        let director = Director::new(&conn);
+        let (mut conn, _factory) = setup_db(test_database_path!()).await;
 
         // Create a platform
         let attrs = sample_platform_attributes();
@@ -534,6 +533,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let director = Director::new(&mut conn);
 
         let platform_id = platform.id.unwrap();
 
@@ -570,8 +570,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_platform_devices_with_details_nonexistent_platform() {
-        let (conn, _factory) = setup_db(test_database_path!()).await;
-        let director = Director::new(&conn);
+        let (mut conn, _factory) = setup_db(test_database_path!()).await;
+        let director = Director::new(&mut conn);
 
         // Try to get devices for a nonexistent platform
         let result = director.list_devices_with_platform(999).await;

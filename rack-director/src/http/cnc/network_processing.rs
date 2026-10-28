@@ -436,10 +436,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_detect_and_mark_duplicates_no_duplicates() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
 
         let uuid = test_uuid();
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -485,13 +485,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_pending_devices_for_interfaces_with_pending() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let mac = "aa:bb:cc:dd:ee:ff";
         let uuid = test_uuid();
 
-        let director = Director::new(&conn);
+        let director = Director::new(&mut conn);
 
         // Register the device first (required due to foreign key constraint)
         director
@@ -617,7 +617,7 @@ mod tests {
 
     /// Helper: register a device, set stored NICs, and return (uuid, device_id).
     async fn setup_device_with_nics(
-        conn: &Connection,
+        conn: &mut Connection,
         uuid: Uuid,
         stored_nics: Vec<NetworkInterface>,
     ) -> i64 {
@@ -640,12 +640,12 @@ mod tests {
     /// A valid assignment is preserved across a hardware rescan.
     #[tokio::test]
     async fn test_preserve_nic_assignments_preserves_valid_assignment() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000001").unwrap();
         let device_id = setup_device_with_nics(
-            &conn,
+            &mut conn,
             uuid,
             vec![NetworkInterface {
                 interface_name: "eth0".to_string(),
@@ -692,12 +692,12 @@ mod tests {
     /// preservation was skipped entirely whenever the id lookup failed.
     #[tokio::test]
     async fn test_preserve_nic_assignments_preserves_valid_assignment_without_device_id() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000004").unwrap();
         setup_device_with_nics(
-            &conn,
+            &mut conn,
             uuid,
             vec![NetworkInterface {
                 interface_name: "eth0".to_string(),
@@ -736,12 +736,12 @@ mod tests {
     /// Assignment is dropped and a warning is created when the network is deleted.
     #[tokio::test]
     async fn test_preserve_nic_assignments_drops_when_network_deleted() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000002").unwrap();
         let device_id = setup_device_with_nics(
-            &conn,
+            &mut conn,
             uuid,
             vec![NetworkInterface {
                 interface_name: "eth0".to_string(),
@@ -791,13 +791,13 @@ mod tests {
     /// Assignment is dropped and a warning is created when the IP leaves the subnet.
     #[tokio::test]
     async fn test_preserve_nic_assignments_drops_when_ip_leaves_subnet() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         // Network is 10.0.0.0/24; stored IP will be from a different subnet
         let network_id = create_test_network(&conn).await;
 
         let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000003").unwrap();
         let device_id = setup_device_with_nics(
-            &conn,
+            &mut conn,
             uuid,
             vec![NetworkInterface {
                 interface_name: "eth0".to_string(),
@@ -849,13 +849,13 @@ mod tests {
     /// This exercises the `is_assignable_host` check added for Finding 7.
     #[tokio::test]
     async fn test_preserve_nic_assignments_drops_when_ip_is_broadcast_address() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         // Network is 10.0.0.0/24; broadcast address is 10.0.0.255
         let network_id = create_test_network(&conn).await;
 
         let uuid = Uuid::parse_str("b1000000-0000-0000-0000-000000000005").unwrap();
         let device_id = setup_device_with_nics(
-            &conn,
+            &mut conn,
             uuid,
             vec![NetworkInterface {
                 interface_name: "eth0".to_string(),

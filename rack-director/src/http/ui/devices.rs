@@ -286,12 +286,12 @@ pub fn routes(state: Arc<AppState>) -> Router {
 async fn get_all_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DevicesIndex>, StatusCode> {
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
     // Fetch all devices from Director (single source of truth)
     let devices = match director.get_all_devices().await {
         Ok(devices) => devices,
@@ -340,12 +340,12 @@ async fn get_device_by_uuid(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceResponse>, StatusCode> {
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
     // Get device from Director (single source of truth)
     let device = match director.get_device(&uuid).await {
         Ok(device) => device,
@@ -420,12 +420,12 @@ async fn update_device_attributes(
         }
     }
 
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
         .map_err(HttpError::ServerInternalError)?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
 
     // Update device attributes
     match director.update_attributes(&uuid, payload.attributes).await {
@@ -441,12 +441,12 @@ async fn get_device_lifecycle(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceLifecycle>, StatusCode> {
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
     match director.get_device_lifecycle(&uuid).await {
         Ok(Some(lifecycle)) => Ok(Json(lifecycle)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -476,7 +476,7 @@ async fn start_lifecycle_transition(
         }
     };
 
-    let conn = state.connection_factory.open().await.map_err(|_| {
+    let mut conn = state.connection_factory.open().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -484,7 +484,7 @@ async fn start_lifecycle_transition(
             }),
         )
     })?;
-    let director = Director::with_power_config(&conn, state.power_config);
+    let mut director = Director::with_power_config(&mut conn, state.power_config);
 
     match director.start_lifecycle_transition(&uuid, to_state).await {
         Ok(transition_id) => Ok(Json(StartTransitionResponse {
@@ -504,7 +504,7 @@ async fn cancel_lifecycle_transition(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let conn = state.connection_factory.open().await.map_err(|_| {
+    let mut conn = state.connection_factory.open().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -512,7 +512,7 @@ async fn cancel_lifecycle_transition(
             }),
         )
     })?;
-    let director = Director::new(&conn);
+    let mut director = Director::new(&mut conn);
 
     match director.cancel_active_transition(&uuid).await {
         Ok(()) => Ok(Json(serde_json::json!({}))),
@@ -531,12 +531,12 @@ async fn get_device_transitions(
     Query(params): Query<DeviceTransitionsQuery>,
 ) -> Result<Json<Vec<LifecycleTransition>>, StatusCode> {
     let include_completed = params.include_completed.unwrap_or(false);
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
 
     match director
         .get_device_transitions(&uuid, include_completed)
@@ -551,12 +551,12 @@ async fn get_active_transition(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Option<LifecycleTransition>>, StatusCode> {
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
     match director.get_active_transition_for_device(&uuid).await {
         Ok(transition) => Ok(Json(transition)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -567,12 +567,12 @@ async fn get_device_status(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<DeviceStatusResponse>, StatusCode> {
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
 
     let current_lifecycle = match director.get_device_lifecycle(&uuid).await {
         Ok(lifecycle) => lifecycle.map(String::from),
@@ -598,14 +598,13 @@ async fn create_pending_device(
     // Normalize MAC address to lowercase for consistent storage and duplicate detection
     payload.mac_address = payload.mac_address.to_lowercase();
 
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
 
     // Validate MAC address format and check for duplicates/network existence
-    validate_create_pending_device(&conn, &director, &payload).await?;
+    validate_create_pending_device(&mut conn, &payload).await?;
 
     // Create the pending device
-    let id = director
+    let id = Director::new(&mut conn)
         .create_pending_device(&payload.mac_address, payload.network_id)
         .await?;
 
@@ -628,8 +627,7 @@ async fn create_pending_device(
 /// pending device for the same MAC address. Returns a `ValidationError` when
 /// any check fails so the handler can return a structured 400 response.
 async fn validate_create_pending_device(
-    conn: &crate::database::Connection,
-    director: &Director<'_>,
+    conn: &mut crate::database::Connection,
     payload: &CreatePendingDeviceRequest,
 ) -> Result<(), HttpError> {
     let mut errors = ValidationErrors::new();
@@ -652,7 +650,7 @@ async fn validate_create_pending_device(
     }
 
     // Duplicate pending device check
-    match director
+    match Director::new(conn)
         .find_pending_device_by_mac(&payload.mac_address)
         .await
     {
@@ -674,8 +672,8 @@ async fn validate_create_pending_device(
 async fn get_pending_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PendingDeviceResponse>>, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
     let devices = director.get_pending_devices().await?;
     let responses = devices
         .into_iter()
@@ -695,8 +693,8 @@ async fn delete_pending_device(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
     director.delete_pending_device(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -705,7 +703,7 @@ async fn delete_device_by_uuid(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let conn = state.connection_factory.open().await.map_err(|_| {
+    let mut conn = state.connection_factory.open().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -713,7 +711,7 @@ async fn delete_device_by_uuid(
             }),
         )
     })?;
-    let director = Director::new(&conn);
+    let director = Director::new(&mut conn);
     match director.delete_device(&uuid).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
@@ -733,8 +731,8 @@ async fn post_device_plan(
     Path(uuid): Path<Uuid>,
     extract::Json(payload): extract::Json<DevicesPlanRequest>,
 ) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
 
     let plan = Plan::new(uuid, payload.plan);
     director.create_plan(&plan).await?;
@@ -748,11 +746,12 @@ async fn assign_platform(
     Path(uuid): Path<Uuid>,
     Json(req): Json<AssignPlatformRequest>,
 ) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
 
     // Verify platform exists
     crate::platforms::store::get(&conn, req.platform_id).await?;
+
+    let director = Director::new(&mut conn);
 
     // Verify device exists
     director.get_device(&uuid).await?;
@@ -768,8 +767,8 @@ async fn get_device_platform(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Option<Platform>>, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
 
     // Get platform ID from device
     let platform_id = director.get_device_platform_id(&uuid).await?;
@@ -790,11 +789,12 @@ async fn assign_role(
     Path(uuid): Path<Uuid>,
     Json(req): Json<AssignRoleRequest>,
 ) -> Result<StatusCode, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
 
     // Verify role exists
     crate::roles::store::get(&conn, req.role_id).await?;
+
+    let director = Director::new(&mut conn);
 
     // Verify device exists
     director.get_device(&uuid).await?;
@@ -808,8 +808,8 @@ async fn get_device_role(
     State(state): State<Arc<AppState>>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Option<Role>>, HttpError> {
-    let conn = state.connection_factory.open().await?;
-    let director = Director::new(&conn);
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
 
     // Get role ID from device
     let role_id = director.get_device_role_id(&uuid).await?;
@@ -976,8 +976,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1002,8 +1002,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1034,8 +1034,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1062,8 +1062,8 @@ mod tests {
         let mac = "aa:bb:cc:dd:ee:ff";
 
         let pending_id = {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .create_pending_device(mac, network_id)
                 .await
                 .unwrap()
@@ -1083,8 +1083,11 @@ mod tests {
 
         // Verify it's deleted - should return empty list
         let pending_devices = {
-            let conn = test_db(&state).await;
-            Director::new(&conn).get_pending_devices().await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .get_pending_devices()
+                .await
+                .unwrap()
         };
         assert!(
             pending_devices.is_empty(),
@@ -1100,8 +1103,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1110,8 +1113,8 @@ mod tests {
         // Verify device exists before deletion
         assert!(
             {
-                let conn = test_db(&state).await;
-                Director::new(&conn)
+                let mut conn = test_db(&state).await;
+                Director::new(&mut conn)
                     .device_exists(&test_uuid)
                     .await
                     .unwrap()
@@ -1134,8 +1137,8 @@ mod tests {
         // Verify device is deleted
         assert!(
             !{
-                let conn = test_db(&state).await;
-                Director::new(&conn)
+                let mut conn = test_db(&state).await;
+                Director::new(&mut conn)
                     .device_exists(&test_uuid)
                     .await
                     .unwrap()
@@ -1153,15 +1156,15 @@ mod tests {
 
         // Register two devices
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&uuid1, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&uuid2, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1191,12 +1194,18 @@ mod tests {
 
         // Verify both devices are deleted
         assert!(!{
-            let conn = test_db(&state).await;
-            Director::new(&conn).device_exists(&uuid1).await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .device_exists(&uuid1)
+                .await
+                .unwrap()
         });
         assert!(!{
-            let conn = test_db(&state).await;
-            Director::new(&conn).device_exists(&uuid2).await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .device_exists(&uuid2)
+                .await
+                .unwrap()
         });
     }
 
@@ -1238,8 +1247,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1268,8 +1277,11 @@ mod tests {
 
         // Verify hostname was updated
         let device = {
-            let conn = test_db(&state).await;
-            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
         };
         assert_eq!(device.attributes.hostname, Some("server-01".to_string()));
     }
@@ -1282,8 +1294,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1327,8 +1339,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1372,8 +1384,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1417,8 +1429,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1462,8 +1474,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1509,8 +1521,8 @@ mod tests {
 
         // Register device
         let registered_hostname = {
-            let conn = test_db(&state).await;
-            let director = Director::new(&conn);
+            let mut conn = test_db(&state).await;
+            let director = Director::new(&mut conn);
             director
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
@@ -1552,8 +1564,11 @@ mod tests {
 
         // Verify the hostname was left untouched
         let device = {
-            let conn = test_db(&state).await;
-            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
         };
         assert_eq!(device.attributes.hostname, registered_hostname);
     }
@@ -1566,8 +1581,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1611,8 +1626,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1641,8 +1656,11 @@ mod tests {
 
         // Verify attribute was updated
         let device = {
-            let conn = test_db(&state).await;
-            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
         };
         assert_eq!(
             device.attributes.manufacturer,
@@ -1658,8 +1676,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1707,8 +1725,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1755,8 +1773,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1790,8 +1808,11 @@ mod tests {
 
         // Verify bmc_config was updated
         let device = {
-            let conn = test_db(&state).await;
-            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
         };
         let bmc_config = device
             .attributes
@@ -1810,8 +1831,8 @@ mod tests {
         let test_uuid = test_uuid(0x3C);
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1857,8 +1878,8 @@ mod tests {
         let test_uuid = test_uuid(0x3D);
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1904,8 +1925,8 @@ mod tests {
         let test_uuid = test_uuid(0x3E);
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1948,8 +1969,8 @@ mod tests {
         let test_uuid = test_uuid(0x3F);
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -1980,8 +2001,11 @@ mod tests {
 
         // Verify bmc_config was updated
         let device = {
-            let conn = test_db(&state).await;
-            Director::new(&conn).get_device(&test_uuid).await.unwrap()
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .get_device(&test_uuid)
+                .await
+                .unwrap()
         };
         let bmc_config = device
             .attributes
@@ -2069,8 +2093,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -2089,8 +2113,8 @@ mod tests {
         );
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .update_attributes(&test_uuid, attributes)
                 .await
                 .unwrap();
@@ -2136,8 +2160,8 @@ mod tests {
 
         // Register device
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .register_device(&test_uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
@@ -2156,8 +2180,8 @@ mod tests {
         );
 
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .update_attributes(&test_uuid, attributes)
                 .await
                 .unwrap();
@@ -2276,8 +2300,8 @@ mod tests {
 
         // Pre-create a pending device directly
         {
-            let conn = test_db(&state).await;
-            Director::new(&conn)
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
                 .create_pending_device(mac, network_id)
                 .await
                 .unwrap();

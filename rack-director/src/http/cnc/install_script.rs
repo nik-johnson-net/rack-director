@@ -31,16 +31,14 @@ use uuid::Uuid;
 /// * `Ok(Response)` - HTTP response containing the rendered install script
 /// * `Err(Error)` - Error if device not found, missing role, template issues, etc.
 pub async fn render_for_device(
-    conn: &database::Connection,
+    conn: &mut database::Connection,
     image_store: &crate::storage::ImageStore,
     bundled_osm_path: Option<&std::path::Path>,
     device_uuid: &Uuid,
     root_url: &str,
 ) -> Result<Response<String>, Error> {
-    let director = Director::new(conn);
-
     // Get device
-    let device = director
+    let device = Director::new(conn)
         .get_device(device_uuid)
         .await
         .map_err(Error::ServerInternalError)?;
@@ -460,10 +458,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_network_contexts_no_usable_nic() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
 
         let uuid = test_uuid();
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -481,13 +479,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_network_contexts_with_lease() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff";
 
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -547,7 +545,7 @@ mod tests {
     /// lease recorded the MAC in lowercase (or vice versa).
     #[tokio::test]
     async fn test_build_network_contexts_lease_mac_case_insensitive() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = test_uuid();
@@ -556,7 +554,7 @@ mod tests {
         // ...but the DHCP lease recorded the MAC in lowercase.
         let lease_mac = "aa:bb:cc:dd:ee:ff";
 
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -603,13 +601,13 @@ mod tests {
     /// treated as primary when it is the only usable NIC.
     #[tokio::test]
     async fn test_build_network_contexts_assigned_no_lease() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff";
 
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -644,14 +642,14 @@ mod tests {
     /// Verifies that a NIC without both an effective network and IP is skipped.
     #[tokio::test]
     async fn test_build_network_contexts_skips_nic_without_ip() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = test_uuid();
         let mac_with_ip = "aa:bb:cc:dd:ee:01";
         let mac_no_ip = "aa:bb:cc:dd:ee:02";
 
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -696,13 +694,13 @@ mod tests {
     /// enrichment, and that it is never selected as primary.
     #[tokio::test]
     async fn test_build_network_contexts_skips_disabled_nic() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = test_uuid();
         let mac = "aa:bb:cc:dd:ee:ff";
 
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -736,14 +734,14 @@ mod tests {
     /// excluded from `nic_contexts` and the usable NIC is promoted to primary instead.
     #[tokio::test]
     async fn test_build_network_contexts_disabled_nic_not_selected_as_primary() {
-        let conn = create_test_conn(test_database_path!()).await;
+        let mut conn = create_test_conn(test_database_path!()).await;
         let network_id = create_test_network(&conn).await;
 
         let uuid = test_uuid();
         let disabled_mac = "aa:bb:cc:dd:ee:01";
         let usable_mac = "aa:bb:cc:dd:ee:02";
 
-        Director::new(&conn)
+        Director::new(&mut conn)
             .register_device(&uuid, crate::director::Architecture::X86_64)
             .await
             .unwrap();
@@ -792,16 +790,22 @@ mod tests {
 
         let uuid = test_uuid();
         {
-            let conn = state.connection_factory.open().await.unwrap();
-            Director::new(&conn)
+            let mut conn = state.connection_factory.open().await.unwrap();
+            Director::new(&mut conn)
                 .register_device(&uuid, crate::director::Architecture::X86_64)
                 .await
                 .unwrap();
         }
 
-        let conn = state.connection_factory.open().await.unwrap();
-        let result =
-            render_for_device(&conn, &state.image_store, None, &uuid, "http://localhost").await;
+        let mut conn = state.connection_factory.open().await.unwrap();
+        let result = render_for_device(
+            &mut conn,
+            &state.image_store,
+            None,
+            &uuid,
+            "http://localhost",
+        )
+        .await;
         // Should get NotFound error when device has no role
         match result {
             Ok(_) => panic!("Expected error but got Ok"),

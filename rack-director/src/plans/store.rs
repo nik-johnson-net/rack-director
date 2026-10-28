@@ -4,6 +4,9 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
+/// Columns read by `Plan::from_row`.
+const PLAN_COLUMNS: &str = "id, device_uuid, status, current_step, total_steps, actions, error_message, created_at, started_at, completed_at";
+
 pub async fn create_plan(conn: &Connection, plan: &Plan) -> Result<i64> {
     let actions_json = serde_json::to_string(&plan.actions)?;
     let status_str: String = plan.status.clone().into();
@@ -63,12 +66,12 @@ pub async fn get_active_plan_for_device(
 ) -> Result<Option<Plan>> {
     let plan = conn
         .query_row(
-            "SELECT id, device_uuid, status, current_step, total_steps, actions, error_message,
-                    created_at, started_at, completed_at
-             FROM plans
-             WHERE device_uuid = ?1 AND status IN ('pending', 'running')
-             ORDER BY created_at DESC
-             LIMIT 1",
+            format!(
+                "SELECT {PLAN_COLUMNS} FROM plans
+                 WHERE device_uuid = ?1 AND status IN ('pending', 'running')
+                 ORDER BY created_at DESC
+                 LIMIT 1"
+            ),
             (*device_uuid,),
             Plan::from_row,
         )
@@ -78,28 +81,33 @@ pub async fn get_active_plan_for_device(
     Ok(plan)
 }
 
-/// Cancel the active plan for a device using a conditional (CAS-style) UPDATE.
+pub async fn get_plan(conn: &Connection, plan_id: i64) -> Result<Option<Plan>> {
+    let plan = conn
+        .query_row(
+            format!("SELECT {PLAN_COLUMNS} FROM plans WHERE id = ?1"),
+            (plan_id,),
+            Plan::from_row,
+        )
+        .await
+        .optional()?;
+
+    Ok(plan)
+}
+
+/// Cancel a plan using a conditional (CAS-style) UPDATE.
 ///
 /// Only cancels if the plan is still in `pending` or `running` status, which
 /// prevents a race with a concurrent `action_success` call. Returns `true` if
-/// a plan was cancelled, `false` if none was found (already completed, or no
-/// active plan exists).
-pub async fn cancel_active_plan_for_device(conn: &Connection, device_uuid: &Uuid) -> Result<bool> {
+/// the plan was cancelled, `false` if it had already finished or doesn't exist.
+pub async fn cancel_plan(conn: &Connection, plan_id: i64) -> Result<bool> {
     let now = chrono::Utc::now();
     let rows = conn
         .execute(
             "UPDATE plans SET status = 'cancelled', error_message = 'Cancelled by user', completed_at = ?1
-             WHERE device_uuid = ?2 AND status IN ('pending', 'running')",
-            (now, *device_uuid),
+             WHERE id = ?2 AND status IN ('pending', 'running')",
+            (now, plan_id),
         )
         .await?;
-    if rows > 1 {
-        log::warn!(
-            "cancel_active_plan_for_device: cancelled {} plans for device {} — expected at most 1 (data integrity violation?)",
-            rows,
-            device_uuid
-        );
-    }
     Ok(rows > 0)
 }
 
