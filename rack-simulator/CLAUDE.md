@@ -46,6 +46,9 @@ rack-simulator boot <server>
             ├── dhcp.rs::request_as_ipxe()        → iPXE DHCP REQUEST
             ├── http.rs::get_ipxe_script()        → iPXE script from /cnc/ipxe
             └── agent.rs::run()                   → Hardware attributes POST + action_success
+                                                    (skipped, ending the boot, when /cnc/poll
+                                                    returns 204 — the real agent would idle;
+                                                    otherwise the polled plan_id is echoed back)
 
 rack-simulator e2e run <test.toml>
     └── runner.rs::run_test()

@@ -20,7 +20,7 @@ The `rack-director-osm` binary crate is a CLI tool for building and validating O
 
 A server that boots will first request a DHCP lease in both BIOS and UEFI modes, requesting boot options. Rack-director will respond with a DHCP lease containing boot options pointing to an iPXE image, which has more features and provides a common configuration across any device type. BIOS servers will load iPXE over TFTP, while UEFI may load iPXE over TFTP or HTTP. Once the server boots into iPXE, it will again request a DHCP Lease. This time the rack-director DHCP server will recognize the request as coming from iPXE firmware, and will instruct it to load a config from the rack-director HTTP server.
 
-The iPXE config is dynamic and will be constructed based on what the machine should do next, either instructing it to boot into the rack-image, an os installer, local disk, or something else.
+The iPXE config is dynamic and will be constructed based on what the machine should do next, either instructing it to boot into the rack-image, an os installer, local disk, or something else. A registered device with no active plan that isn't Provisioned boots the agent in daemon mode and idles, polling `/cnc/poll` for its next plan; only unknown (unregistered) devices get a sleep-and-reboot script.
 
 # Key Concepts
 

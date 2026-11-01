@@ -33,7 +33,7 @@ pub struct AppState {
     /// Handle to the DHCP socket manager, used by network create/delete
     /// handlers to bind or release per-network sockets in real time.
     pub dhcp: DhcpControl,
-    /// Number of seconds an unprovisioned or unknown device sleeps before
+    /// Number of seconds an unknown (unregistered) device sleeps before
     /// rebooting to retry PXE boot.  Configurable so e2e tests can set it to 0.
     pub unprovisioned_sleep_secs: u64,
     /// Path to the bundled Default OSM directory on disk.

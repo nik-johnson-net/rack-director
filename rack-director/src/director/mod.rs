@@ -127,9 +127,12 @@ impl<'a> Director<'a> {
 
     /// Get the boot target for this device.
     ///
-    /// `sleep_secs` controls how long an unprovisioned or unknown device sleeps
-    /// before rebooting to retry PXE boot.  Production callers pass 600; e2e
-    /// tests may pass 0 to avoid waiting.
+    /// A registered device with no active plan boots local disk if Provisioned, and otherwise
+    /// idles in the agent daemon so it picks up the next plan in-band.
+    ///
+    /// `sleep_secs` controls how long an unknown (unregistered) device sleeps before
+    /// rebooting to retry PXE boot — it can't idle in the daemon because `/cnc/poll`
+    /// only serves registered devices.
     pub async fn next_boot_target(
         &self,
         uuid: &Uuid,
@@ -160,15 +163,16 @@ impl<'a> Director<'a> {
             }
 
             // No active plan — only boot local disk if the device is fully provisioned.
-            // Any other lifecycle state means the device has no OS yet, so sleep and retry
-            // so it will pick up a plan when one becomes available.
+            // Any other lifecycle state means the device may have no OS, so idle in the
+            // agent daemon until a plan becomes available.
             let lifecycle = crate::lifecycle::store::get_device_lifecycle(self.conn, uuid).await?;
             if matches!(lifecycle, Some(DeviceLifecycle::Provisioned)) {
                 return Ok(BootTarget::LocalDisk);
             }
+            return crate::plans::actions::idle_daemon_boot_target();
         }
 
-        // Unknown device or non-provisioned device with no active plan — sleep and retry.
+        // Unknown device — sleep and retry until it is registered.
         Ok(BootTarget::SleepReboot {
             seconds: sleep_secs,
         })
@@ -305,23 +309,20 @@ impl<'a> Director<'a> {
         // Validate and create the plan and its transition in one transaction, so neither can
         // exist without the other and the state they were validated against can't change
         // underneath them.
-        let (transition_id, plan_id) = self
+        let (transition_id, plan) = self
             .conn
             .in_transaction(async |conn| {
                 create_transition_with_plan(conn, device_uuid, to_state).await
             })
             .await?;
 
-        self.start_first_action(device_uuid, plan_id).await?;
+        self.start_first_action(device_uuid, &plan).await?;
         Ok(transition_id)
     }
 
     /// Power the device on if needed and run the plan's first action's start() hook.
     /// Both steps are best-effort: failures are logged and never block the transition.
-    async fn start_first_action(&self, device_uuid: &Uuid, plan_id: i64) -> anyhow::Result<()> {
-        let plan = crate::plans::store::get_plan(self.conn, plan_id)
-            .await?
-            .expect("Plan should exist immediately after creation");
+    async fn start_first_action(&self, device_uuid: &Uuid, plan: &Plan) -> anyhow::Result<()> {
         let Some(action) = plan.get_current_action() else {
             return Ok(());
         };
@@ -577,12 +578,12 @@ impl<'a> Director<'a> {
 
 /// Validate a transition to `to_state` against the device's current state and insert its
 /// plan and transition. `conn` must be an open transaction so the reads and writes are atomic.
-/// Returns `(transition_id, plan_id)`.
+/// Returns the transition ID and the created plan.
 async fn create_transition_with_plan(
     conn: &Connection,
     device_uuid: &Uuid,
     to_state: DeviceLifecycle,
-) -> anyhow::Result<(i64, i64)> {
+) -> anyhow::Result<(i64, Plan)> {
     if crate::lifecycle::store::get_active_transition_for_device(conn, device_uuid)
         .await?
         .is_some()
@@ -620,11 +621,13 @@ async fn create_transition_with_plan(
     }
 
     let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
-    let plan_id = crate::plans::store::create_plan(conn, &Plan::new(*device_uuid, actions)).await?;
+    let mut plan = Plan::new(*device_uuid, actions);
+    let plan_id = crate::plans::store::create_plan(conn, &plan).await?;
+    plan.id = Some(plan_id);
     let transition =
         LifecycleTransition::new(*device_uuid, current_lifecycle, to_state, Some(plan_id));
     let transition_id = crate::lifecycle::store::create_transition(conn, &transition).await?;
-    Ok((transition_id, plan_id))
+    Ok((transition_id, plan))
 }
 
 #[cfg(test)]
@@ -852,11 +855,11 @@ mod tests {
         assert_eq!(transitions[0].success, Some(true));
 
         // After discovery, device is Unprovisioned (no OS installed yet) and has no active plan.
-        // It should sleep and retry rather than attempt to boot local disk.
+        // It should idle in the agent daemon rather than attempt to boot local disk.
         let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
         assert!(
-            matches!(boot_target, BootTarget::SleepReboot { seconds: 600 }),
-            "Expected SleepReboot after discovery completion for Unprovisioned device, got {boot_target:?}"
+            matches!(&boot_target, BootTarget::AgentImage { action, .. } if action == "daemon"),
+            "Expected idle daemon after discovery completion for Unprovisioned device, got {boot_target:?}"
         );
     }
 
@@ -2073,6 +2076,33 @@ mod tests {
         assert!(
             matches!(boot_target, BootTarget::SleepReboot { seconds: 600 }),
             "Expected SleepReboot for unknown device, got {boot_target:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broken_device_without_plan_idles_in_daemon() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440066").unwrap();
+
+        Director::new(&mut conn)
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        crate::lifecycle::store::update_device_lifecycle(
+            &conn,
+            &test_uuid,
+            DeviceLifecycle::Broken,
+        )
+        .await
+        .unwrap();
+
+        let boot_target = Director::new(&mut conn)
+            .next_boot_target(&test_uuid, 600)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&boot_target, BootTarget::AgentImage { action, .. } if action == "daemon"),
+            "Expected idle daemon for Broken device with no plan, got {boot_target:?}"
         );
     }
 

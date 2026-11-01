@@ -244,20 +244,13 @@ async fn perform_migrations(conn: &mut Connection, current_version: usize) -> Re
     while version < LATEST_VERSION {
         version += 1;
 
-        let tx = conn.transaction().await?;
-        let result = perform_migration(&tx, version).await;
-        match result {
-            Ok(()) => tx.commit().await?,
-            Err(e) => {
-                tx.rollback().await?;
-                // Intentionally leave foreign_keys=OFF here rather than attempting to
-                // restore it: a failed migration aborts the startup sequence, and the
-                // connection is not expected to be reused by the caller. Attempting a
-                // "best effort" restore would risk masking the real error with a second
-                // failure from this same pragma call.
-                return Err(e);
-            }
-        }
+        // On failure, intentionally leave foreign_keys=OFF rather than attempting to
+        // restore it: a failed migration aborts the startup sequence, and the
+        // connection is not expected to be reused by the caller. Attempting a
+        // "best effort" restore would risk masking the real error with a second
+        // failure from this same pragma call.
+        conn.in_transaction(async |tx| perform_migration(tx, version).await)
+            .await?;
     }
 
     check_foreign_keys(conn).await?;

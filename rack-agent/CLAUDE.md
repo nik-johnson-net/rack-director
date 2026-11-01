@@ -376,6 +376,9 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=daemon
 4. Polls immediately after each completed action (no sleep)
 5. On `reboot_device` or `install_os`: exits cleanly; systemd handles the reboot
 
+**Idle mode:** rack-director also boots the daemon for registered, non-provisioned devices with **no**
+active plan. The daemon just keeps polling (`204 No Content`) until a plan arrives.
+
 **Implementation:** `rack-agent/src/daemon.rs::run_daemon()`
 
 **⚠ PXE Boot Assumption:**

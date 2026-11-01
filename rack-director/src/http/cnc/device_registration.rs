@@ -100,7 +100,7 @@ pub async fn register_and_start_discovery(
         && let Ok(Some(lease)) = dhcp::store::get_lease_by_mac(conn, mac).await
         && let Some(network_id) = lease.network_id
     {
-        let hostname = Director::with_power_config(conn, power_config)
+        let hostname = Director::new(conn)
             .get_device(device_uuid)
             .await
             .ok()

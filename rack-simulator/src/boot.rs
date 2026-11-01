@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 use anyhow::{Result, anyhow};
 
 use common::cnc::CncClient;
+use common::poll_action::PollResponse;
 
 use crate::ConnectionConfig;
 use crate::agent;
@@ -271,7 +272,14 @@ pub async fn full_boot(
             }
             BootAction::BootAgent => {
                 output.step("Phase 3: Agent Execution");
-                agent::run(&cnc, &state, output).await?;
+                // The real agent runs in daemon mode; with no pending action it idles
+                // polling rather than rebooting, so the simulated boot ends here.
+                let Some(PollResponse::Action { plan_id, .. }) = cnc.poll(&state.uuid).await?
+                else {
+                    output.success("No pending action - agent idling in daemon mode");
+                    break;
+                };
+                agent::run(&cnc, &state, plan_id, output).await?;
 
                 output.info("Agent execution complete - simulating reboot...");
                 state.clear_state();

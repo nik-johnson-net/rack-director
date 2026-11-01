@@ -289,7 +289,8 @@ async fn main() -> Result<()> {
             let state = ServerState::load_or_create(&server, &server_config)?;
             let cnc =
                 common::cnc::CncClient::new(&format!("http://{}:{}", conn.host, conn.http_port));
-            agent::run(&cnc, &state, &output).await?;
+            // A manual run has no preceding poll, so there is no plan_id to echo.
+            agent::run(&cnc, &state, None, &output).await?;
         }
 
         Commands::E2e { command } => match command {

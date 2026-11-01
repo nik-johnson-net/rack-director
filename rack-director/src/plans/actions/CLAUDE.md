@@ -326,6 +326,15 @@ When rack-agent runs in daemon mode (`rackdirector.action=daemon`), it polls
 `GET /cnc/poll?uuid={UUID}` instead of reading the action from the kernel cmdline.
 The endpoint returns the current plan action as JSON, or `204 No Content` if no plan is active.
 
+**Idle daemon (no active plan).** `Director::next_boot_target()` serves the daemon agent image
+(`idle_daemon_boot_target()`) to every *registered* device that has no active plan and is not
+`Provisioned` (New, Unprovisioned, Broken, Removed). The agent sits polling, so a new plan starts
+in-band within one poll interval — and because the device has a fresh `last_polled_at`, the
+out-of-band power kick is skipped. Provisioned devices boot local disk. Only *unknown*
+(unregistered) devices get the `SleepReboot` iPXE script (`--unprovisioned-sleep-secs`, default 600),
+since `/cnc/poll` returns 404 for them. The agent image's `rack-agent.service` uses
+`TimeoutStartSec=infinity` so systemd never kills an idle (or long-wiping) daemon.
+
 **Wire format:** `{"type":"action","payload":{"type":"discover_hardware"}}`
 
 The outer `type` envelope is forward-compatible — future message types (e.g. `cancel`,

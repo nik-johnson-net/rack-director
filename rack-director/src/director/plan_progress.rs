@@ -26,41 +26,30 @@ impl<'a> super::Director<'a> {
     /// [`Self::repair_orphaned_transition`]) before iPXE picks the boot target, so a stuck
     /// device recovers on its next boot.
     pub async fn on_boot(&mut self, device_uuid: &Uuid) -> anyhow::Result<()> {
+        // `apply` may run twice, so log the advanced action once afterwards.
+        let mut advanced = None;
         let found = self
             .update_active_plan(device_uuid, |plan| {
-                // Start the plan if it's pending
                 let plan_was_pending = plan.status == PlanStatus::Pending;
                 if plan_was_pending {
                     plan.start();
                 }
 
-                let should_advance = match plan.get_current_action() {
-                    Some(action) if action.advance_on_boot() => {
-                        log::info!(
-                            "Device {} booted - advancing action {:?}",
-                            device_uuid,
-                            action
-                        );
-                        true
-                    }
-                    Some(action) => {
-                        log::debug!(
-                            "Device {} booted but current action {:?} does not advance on boot",
-                            device_uuid,
-                            action
-                        );
-                        false
-                    }
-                    None => false,
-                };
-                if should_advance {
+                advanced = plan
+                    .get_current_action()
+                    .filter(|action| action.advance_on_boot())
+                    .map(|action| format!("{action:?}"));
+                if advanced.is_some() {
                     plan.mark_action_success();
                 }
 
-                plan_was_pending || should_advance
+                plan_was_pending || advanced.is_some()
             })
             .await?;
 
+        if found && let Some(action) = advanced {
+            log::info!("Device {} booted - advanced action {}", device_uuid, action);
+        }
         if !found && !self.repair_orphaned_transition(device_uuid).await? {
             // No active plan - this is normal for devices that have completed their lifecycle
             log::debug!("No active plan for device {} on boot", device_uuid);
@@ -80,28 +69,13 @@ impl<'a> super::Director<'a> {
         device_uuid: &Uuid,
         reported_plan_id: Option<i64>,
     ) -> anyhow::Result<()> {
-        let found = self
-            .update_active_plan(device_uuid, |plan| {
-                if is_stale_report(device_uuid, plan, reported_plan_id, "action_success") {
-                    return false;
-                }
-                if plan.status == PlanStatus::Pending {
-                    plan.start();
-                }
-                plan.mark_action_success();
-                true
-            })
-            .await?;
-
-        if !found {
-            // No active plan: the plan was likely cancelled while the agent was in-flight.
-            // This is expected and not an error from the agent's perspective.
-            log::debug!(
-                "action_success for {} but no active plan found — ignoring (plan may have been cancelled)",
-                device_uuid
-            );
-        }
-        Ok(())
+        self.apply_agent_report(device_uuid, reported_plan_id, "action_success", |plan| {
+            if plan.status == PlanStatus::Pending {
+                plan.start();
+            }
+            plan.mark_action_success();
+        })
+        .await
     }
 
     /// Mark the current action for a device as failed, failing the plan.
@@ -113,20 +87,36 @@ impl<'a> super::Director<'a> {
         error_message: &str,
         reported_plan_id: Option<i64>,
     ) -> anyhow::Result<()> {
+        self.apply_agent_report(device_uuid, reported_plan_id, "action_failed", |plan| {
+            plan.mark_action_failed(error_message.to_string());
+        })
+        .await
+    }
+
+    /// Apply an agent's report to the active plan unless it is stale. `kind` names the
+    /// report in logs.
+    async fn apply_agent_report(
+        &mut self,
+        device_uuid: &Uuid,
+        reported_plan_id: Option<i64>,
+        kind: &str,
+        mut report: impl FnMut(&mut Plan),
+    ) -> anyhow::Result<()> {
         let found = self
             .update_active_plan(device_uuid, |plan| {
-                if is_stale_report(device_uuid, plan, reported_plan_id, "action_failed") {
+                if is_stale_report(device_uuid, plan, reported_plan_id, kind) {
                     return false;
                 }
-                plan.mark_action_failed(error_message.to_string());
+                report(plan);
                 true
             })
             .await?;
 
         if !found {
             // No active plan: the plan was likely cancelled while the agent was in-flight.
+            // This is expected and not an error from the agent's perspective.
             log::debug!(
-                "action_failed for {} but no active plan found — ignoring (plan may have been cancelled)",
+                "{kind} for {} but no active plan found — ignoring (plan may have been cancelled)",
                 device_uuid
             );
         }
@@ -148,9 +138,9 @@ impl<'a> super::Director<'a> {
     /// close the lifecycle transition if the plan finished. `apply` returns whether it
     /// changed the plan. Returns `false` if the device has no active plan.
     ///
-    /// `apply` first runs on an unlocked read, because most boots and reports change nothing
-    /// and `BEGIN IMMEDIATE` takes the database-wide write lock. It runs again inside the
-    /// transaction only if the plan moved between the read and taking the lock.
+    /// `apply` first runs on an unlocked read, only to decide whether to take the lock: most
+    /// boots and reports change nothing and `BEGIN IMMEDIATE` takes the database-wide write
+    /// lock. Inside the transaction it runs again on a fresh read, and that result is saved.
     async fn update_active_plan<F>(
         &mut self,
         device_uuid: &Uuid,
@@ -159,29 +149,24 @@ impl<'a> super::Director<'a> {
     where
         F: FnMut(&mut Plan) -> bool,
     {
-        let Some(snapshot) = plan_store::get_active_plan_for_device(self.conn, device_uuid).await?
+        let Some(mut plan) = plan_store::get_active_plan_for_device(self.conn, device_uuid).await?
         else {
             return Ok(false);
         };
-        let mut plan = snapshot.clone();
         if !apply(&mut plan) {
             return Ok(true);
         }
 
         self.conn
             .in_transaction(async |conn| {
-                let Some(mut current) =
+                let Some(mut plan) =
                     plan_store::get_active_plan_for_device(conn, device_uuid).await?
                 else {
                     return Ok(false);
                 };
-                if !same_progress(&current, &snapshot) {
-                    if !apply(&mut current) {
-                        return Ok(true);
-                    }
-                    plan = current;
+                if apply(&mut plan) {
+                    save_plan(conn, &plan).await?;
                 }
-                save_plan(conn, &plan).await?;
                 Ok(true)
             })
             .await
@@ -203,30 +188,12 @@ impl<'a> super::Director<'a> {
 
         self.conn
             .in_transaction(async |conn| {
-                let Some(transition) =
-                    lifecycle_store::get_active_transition_for_device(conn, device_uuid).await?
-                else {
-                    return Ok(false);
-                };
-                let plan = get_transition_plan(conn, &transition).await?;
-                let outcome = match &plan {
-                    Some(plan) => plan_outcome(plan),
-                    None => Some((false, Some("Plan missing"))),
-                };
-                let Some((success, error_message)) = outcome else {
-                    // The plan is still active, so the transition isn't orphaned.
-                    return Ok(false);
-                };
-
-                log::warn!(
-                    "Repairing orphaned transition {:?} for device {}: plan {:?} is {:?} but the transition was never closed",
-                    transition.id,
-                    device_uuid,
-                    transition.plan_id,
-                    plan.as_ref().map(|p| &p.status)
-                );
-                close_transition(conn, &transition, success, error_message).await?;
-                Ok(true)
+                match lifecycle_store::get_active_transition_for_device(conn, device_uuid).await? {
+                    Some(transition) => {
+                        close_orphaned_transition(conn, &transition, "Plan missing").await
+                    }
+                    None => Ok(false),
+                }
             })
             .await
     }
@@ -235,6 +202,7 @@ impl<'a> super::Director<'a> {
 /// Cancel the device's open transition and its own plan. If the plan already finished,
 /// the transition is closed with that plan's outcome instead.
 async fn cancel_transition(conn: &Connection, device_uuid: &Uuid) -> anyhow::Result<()> {
+    const CANCELLED: &str = "Cancelled by user";
     let transition = lifecycle_store::get_active_transition_for_device(conn, device_uuid)
         .await?
         .ok_or_else(|| anyhow::anyhow!("No active transition to cancel"))?;
@@ -243,33 +211,38 @@ async fn cancel_transition(conn: &Connection, device_uuid: &Uuid) -> anyhow::Res
         Some(plan_id) => plan_store::cancel_plan(conn, plan_id).await?,
         None => false,
     };
-    let finished_plan = if cancelled {
-        None
-    } else {
-        get_transition_plan(conn, &transition).await?
-    };
-    let (success, error_message) = finished_plan
-        .as_ref()
-        .and_then(plan_outcome)
-        .unwrap_or((false, Some("Cancelled by user")));
-    if !cancelled {
-        log::warn!(
-            "Cancelling orphaned transition {:?} for device {}: plan {:?} is {:?}, closing with success={}",
-            transition.id,
-            device_uuid,
-            transition.plan_id,
-            finished_plan.as_ref().map(|p| &p.status),
-            success
-        );
+    if !cancelled && close_orphaned_transition(conn, &transition, CANCELLED).await? {
+        return Ok(());
     }
-
-    close_transition(conn, &transition, success, error_message).await
+    close_transition(conn, &transition, false, Some(CANCELLED)).await
 }
 
-/// True if `a` and `b` are the same plan at the same point, so an `apply` result computed
-/// from one is valid for the other.
-fn same_progress(a: &Plan, b: &Plan) -> bool {
-    a.id == b.id && a.status == b.status && a.current_step == b.current_step
+/// Close `transition` with its finished plan's outcome, or as failed with `missing_plan_error`
+/// if the plan no longer exists. Returns `false`, closing nothing, while the plan is active.
+async fn close_orphaned_transition(
+    conn: &Connection,
+    transition: &LifecycleTransition,
+    missing_plan_error: &str,
+) -> anyhow::Result<bool> {
+    let plan = get_transition_plan(conn, transition).await?;
+    let outcome = match &plan {
+        Some(plan) => plan_outcome(plan),
+        None => Some((false, Some(missing_plan_error))),
+    };
+    let Some((success, error_message)) = outcome else {
+        return Ok(false);
+    };
+
+    log::warn!(
+        "Closing orphaned transition {:?} for device {}: plan {:?} is {:?}, closing with success={}",
+        transition.id,
+        transition.device_uuid,
+        transition.plan_id,
+        plan.as_ref().map(|p| &p.status),
+        success
+    );
+    close_transition(conn, transition, success, error_message).await?;
+    Ok(true)
 }
 
 /// Persist `plan`'s progress, closing its lifecycle transition if the plan finished.
