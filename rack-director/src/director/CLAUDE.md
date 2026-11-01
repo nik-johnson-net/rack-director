@@ -24,9 +24,9 @@ runs its reads and writes in a single `in_transaction` call. `start_lifecycle_tr
 current lifecycle inside that transaction, so the transition's `from_state` can't go stale.
 
 `on_boot` and agent reports run on every iPXE hit, so they check without the lock first and only open the
-transaction when the plan will change. Inside it they re-read the plan and re-apply the update if it moved
-in between, so the update closure must be safe to call twice (`FnMut`). `repair_orphaned_transition`
-follows the same pattern.
+transaction when the plan will change. Inside it they re-read the plan and re-apply the update to that fresh
+row, so the update closure runs twice and must be idempotent (`FnMut`); log after the call, not inside it.
+`repair_orphaned_transition` follows the same pattern.
 
 Cancelling a transition cancels only the transition's own plan (by `plan_id`), never another active plan
 on the device. If that plan had already finished (an orphaned transition), the transition is closed with

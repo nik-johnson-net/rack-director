@@ -130,7 +130,8 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     no_dhcp_broadcast: bool,
 
-    /// Number of seconds unprovisioned devices sleep before rebooting to retry PXE boot.
+    /// Number of seconds unknown (unregistered) devices sleep before rebooting to retry PXE
+    /// boot. Registered devices with no plan idle in the agent daemon instead.
     #[arg(long, default_value_t = 600)]
     unprovisioned_sleep_secs: u64,
 

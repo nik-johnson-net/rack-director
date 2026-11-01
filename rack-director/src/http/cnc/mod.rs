@@ -804,10 +804,11 @@ mod tests {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("#!ipxe"));
         // A newly registered device is in the New lifecycle state with no active plan.
-        // It should sleep and retry rather than boot local disk (no OS is installed yet).
+        // It should idle in the agent daemon rather than boot local disk (no OS is installed yet).
         assert!(
-            body_str.contains("sleep") && body_str.contains("reboot"),
-            "New device with no active plan must sleep and retry, got: {body_str}"
+            body_str.contains("/cnc/agent-images/vmlinuz")
+                && body_str.contains("rackdirector.action=daemon"),
+            "New device with no active plan must idle in the agent daemon, got: {body_str}"
         );
     }
 

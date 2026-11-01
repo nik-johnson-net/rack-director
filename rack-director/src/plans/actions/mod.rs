@@ -106,6 +106,12 @@ fn prepend_default_cmdline(os_cmdline: Option<String>) -> String {
     }
 }
 
+/// Boot target for a registered device with no work to do: the agent idles in daemon mode,
+/// polling for a plan, so a new plan starts in-band without a reboot or power kick.
+pub fn idle_daemon_boot_target() -> Result<BootTarget> {
+    generate_agent_boot_target("daemon")
+}
+
 /// Generate boot target for agent-based actions (discovery, BMC config, etc.)
 fn generate_agent_boot_target(action_name: &str) -> Result<BootTarget> {
     let cmdline = format!("ro no_timer_check {DEFAULT_LINUX_CMDLINE}");

@@ -10,7 +10,14 @@ use common::device_attributes::{
     BmcInfo, CpuInfo, DeviceAttributes, DiskInfo, MemoryInfo, NetworkInterface,
 };
 
-pub async fn run(cnc: &CncClient, state: &ServerState, output: &Output) -> Result<()> {
+/// Simulate the agent running the polled action. `plan_id` is echoed back so rack-director
+/// can reject stale reports; pass `None` when no poll preceded the run.
+pub async fn run(
+    cnc: &CncClient,
+    state: &ServerState,
+    plan_id: Option<i64>,
+    output: &Output,
+) -> Result<()> {
     output.step("AGENT SIMULATION");
     output.detail("UUID", &state.uuid);
     output.detail(
@@ -33,8 +40,7 @@ pub async fn run(cnc: &CncClient, state: &ServerState, output: &Output) -> Resul
     cnc.update_attributes(&state.uuid, &attributes).await?;
 
     output.info("Reporting action success...");
-    // plan_id is not available in simulator agent mode (no poll step), so pass None
-    cnc.action_success(&state.uuid, None).await?;
+    cnc.action_success(&state.uuid, plan_id).await?;
 
     output.success("Agent simulation complete");
 

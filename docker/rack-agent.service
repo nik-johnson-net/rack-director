@@ -10,7 +10,8 @@ ExecStart=/usr/local/sbin/rack-agent
 # StandardInput=tty
 StandardOutput=journal+console
 StandardError=journal+console
-TimeoutStartSec=300
+# The daemon idles indefinitely waiting for a plan, and wipes can run for hours.
+TimeoutStartSec=infinity
 
 [Install]
 WantedBy=rack-agent.target

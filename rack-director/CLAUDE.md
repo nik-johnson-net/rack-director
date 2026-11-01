@@ -103,7 +103,7 @@ pub async fn register_device(
 
 ### Connections and transactions
 
-Each request opens its own connection; multi-statement writes use `Connection::transaction()`. See
+Each request opens its own connection; multi-statement writes use `Connection::in_transaction()`. See
 `src/database/CLAUDE.md` (locking, transactions) and `src/director/CLAUDE.md` (building a `Director`).
 
 ## Devices
