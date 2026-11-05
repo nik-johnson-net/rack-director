@@ -43,7 +43,7 @@ Actions are atomic operations that devices execute during lifecycle transitions.
 | Transition Type | From State | To State | Actions |
 |-----------------|------------|----------|---------|
 | **Discover** | new | unprovisioned | discover_hardware, configure_bmc |
-| **Provision** | unprovisioned | provisioned | partition_disks, install_os |
+| **Provision** | unprovisioned | provisioned | partition_disks, install_os, first_boot (only when the role's OS declares `cloud_init`) |
 | **Deprovision** | provisioned | unprovisioned | wipe_disks |
 | **Remove** | unprovisioned | removed | wipe_disks |
 | **Repair** | broken | unprovisioned | run_diagnostics, repair_issues, verify_functionality |
@@ -146,6 +146,11 @@ Modern provisioning (unprovisioned → provisioned) is a **multi-stage process**
     └──────────┬───────────┘      merged cmdline
                │
                ▼
+    ┌──────────────────────┐
+    │  Stage 3: first_boot  │ ◄─── LocalDisk (cloud-init OSes only)
+    └──────────┬───────────┘      installed OS applies cloud-config
+               │
+               ▼
        ┌─────────────┐
        │ provisioned │
        └─────────────┘
@@ -165,7 +170,14 @@ Modern provisioning (unprovisioned → provisioned) is a **multi-stage process**
    - Installer image (kernel + initramfs) loaded with merged cmdline
    - OS installed to pre-partitioned disks
    - Device configured and rebooted to local disk
-   - Device reports success, plan completes
+   - Installer reports success; the plan completes, or advances to `first_boot`
+
+3. **first_boot** (only when the role's OS declares `cloud_init`; a role with a cloud-config on an
+   OS that doesn't is refused when the transition starts):
+   - Device boots the installed OS from local disk
+   - cloud-init fetches and applies the merged global + role cloud-config from rack-director
+   - The first-boot reporter posts success/failure once cloud-init finishes; the plan completes
+   - See `@.claude/docs/cloud-init.md`
 
 **Boot Target Switching:**
 Each stage may use a different boot target (NetBoot configuration). Rack-director dynamically determines the correct boot target based on the device's current plan and action.

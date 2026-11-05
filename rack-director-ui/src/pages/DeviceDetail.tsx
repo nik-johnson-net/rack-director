@@ -50,6 +50,7 @@ import { BmcConfiguration } from "@/components/devices/BmcConfiguration";
 import { PlatformAssignment } from "@/components/devices/platform-assignment";
 import { DiskLabelOverrides } from "@/components/devices/disk-label-overrides";
 import { NicNetworkAssignment } from "@/components/devices/nic-network-assignment";
+import { CloudConfigPreview } from "@/components/devices/cloud-config-preview";
 
 type TabId = "overview" | "hardware" | "transitions" | "warnings";
 
@@ -602,6 +603,8 @@ function DeviceDetail() {
           </button>
         )}
       </SectionCard>
+
+      {assignedRole && uuid && <CloudConfigPreview key={assignedRole.id} uuid={uuid} />}
     </div>
   );
 

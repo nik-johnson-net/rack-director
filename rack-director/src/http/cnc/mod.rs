@@ -1,4 +1,5 @@
 mod boot_files;
+pub(crate) mod cloud_init;
 mod device_registration;
 mod install_script;
 mod ipxe_scripts;
@@ -27,8 +28,9 @@ use uuid::Uuid;
 use crate::http::error::Error;
 use crate::{
     device_warnings, dhcp,
-    director::{Director, NetworkInterface},
+    director::{Director, NetworkInterface, ReportedStep},
     http::AppState,
+    plans::Action,
 };
 use common::device_attributes::{BmcConfig, DeviceAttributes};
 
@@ -55,6 +57,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/cnc/action_failed", post(action_failed))
         .route("/cnc/devices/{uuid}/bmc_config", get(get_bmc_config))
         .route("/cnc/devices/{uuid}/disk_layout", get(get_disk_layout))
+        .route(
+            "/cnc/devices/{uuid}/cloud-init/{file}",
+            get(cloud_init::seed_file_handler),
+        )
         .route("/cnc/poll", get(poll::poll_handler))
         .with_state(state)
 }
@@ -388,6 +394,12 @@ struct ActionStatusQuery {
     /// active plan before applying the success report. This prevents stale
     /// reports from a previous (cancelled) plan from corrupting a new plan.
     plan_id: Option<i64>,
+    /// Optional wire name of the action being reported (`install_os`, `first_boot`).
+    ///
+    /// When present, the report is ignored unless the plan is at that action, so a retried
+    /// installer report can't complete a later step. Unknown names are rejected with 400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -400,6 +412,26 @@ struct ActionFailedQuery {
     /// active plan before applying the failure report. This prevents stale
     /// reports from a previous (cancelled) plan from corrupting a new plan.
     plan_id: Option<i64>,
+    /// Optional action wire name, checked as in [`ActionStatusQuery::action`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+}
+
+/// The step a report names, or 400 if `action` isn't a known action.
+fn reported_step(
+    uuid: &Uuid,
+    plan_id: Option<i64>,
+    action: Option<&str>,
+) -> Result<ReportedStep, StatusCode> {
+    let action = action
+        .map(|name| {
+            Action::from_wire_name(name).ok_or_else(|| {
+                warn!("Report for {uuid} names unknown action '{name}'");
+                StatusCode::BAD_REQUEST
+            })
+        })
+        .transpose()?;
+    Ok(ReportedStep { plan_id, action })
 }
 
 #[axum::debug_handler]
@@ -408,7 +440,7 @@ async fn action_success(
     extract::Json(payload): extract::Json<ActionStatusQuery>,
 ) -> Result<NoContent, StatusCode> {
     let uuid = payload.uuid;
-    let plan_id = payload.plan_id;
+    let reported = reported_step(&uuid, payload.plan_id, payload.action.as_deref())?;
 
     let mut conn = match state.connection_factory.open().await {
         Ok(conn) => conn,
@@ -418,7 +450,7 @@ async fn action_success(
     // PowerConfig so any OOB power operation on this path honours the CLI flags.
     let mut director = Director::with_power_config(&mut conn, state.power_config);
 
-    match director.mark_action_success(&uuid, plan_id).await {
+    match director.mark_action_success(&uuid, reported).await {
         Ok(_) => Ok(NoContent),
         Err(e) => {
             warn!("Couldn't mark action success for {uuid}: {e}");
@@ -434,7 +466,7 @@ async fn action_failed(
 ) -> Result<NoContent, StatusCode> {
     let uuid = payload.uuid;
     let error_message = payload.error_message;
-    let plan_id = payload.plan_id;
+    let reported = reported_step(&uuid, payload.plan_id, payload.action.as_deref())?;
 
     let mut conn = match state.connection_factory.open().await {
         Ok(conn) => conn,
@@ -445,7 +477,7 @@ async fn action_failed(
     let mut director = Director::with_power_config(&mut conn, state.power_config);
 
     match director
-        .mark_action_failed(&uuid, &error_message, plan_id)
+        .mark_action_failed(&uuid, &error_message, reported)
         .await
     {
         Ok(_) => Ok(NoContent),
@@ -942,6 +974,7 @@ mod tests {
         let payload = ActionStatusQuery {
             uuid: test_uuid,
             plan_id: None,
+            action: None,
         };
 
         let request = Request::builder()
@@ -953,6 +986,26 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn test_reported_step_parses_action() {
+        let uuid = test_uuid(0x04);
+        assert_eq!(
+            reported_step(&uuid, Some(3), Some("install_os")),
+            Ok(ReportedStep {
+                plan_id: Some(3),
+                action: Some(Action::InstallOs),
+            })
+        );
+        assert_eq!(
+            reported_step(&uuid, None, None),
+            Ok(ReportedStep::default())
+        );
+        assert_eq!(
+            reported_step(&uuid, None, Some("bogus")),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[tokio::test]
@@ -986,6 +1039,7 @@ mod tests {
             uuid: test_uuid,
             error_message: "Installation failed".to_string(),
             plan_id: None,
+            action: None,
         };
 
         let request = Request::builder()
@@ -1020,6 +1074,7 @@ mod tests {
         let payload = ActionStatusQuery {
             uuid: test_uuid,
             plan_id: None,
+            action: None,
         };
 
         let request = Request::builder()
@@ -1199,6 +1254,7 @@ mod tests {
         let success_payload = ActionStatusQuery {
             uuid: test_uuid,
             plan_id: None,
+            action: None,
         };
 
         let app = routes(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
@@ -1655,6 +1711,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1817,6 +1874,7 @@ mod tests {
             "24.04",
             "x86-64",
             &layout,
+            None,
             None,
             None,
             None,

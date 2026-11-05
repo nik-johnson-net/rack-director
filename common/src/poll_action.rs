@@ -15,6 +15,9 @@ pub enum PollAction {
     RebootDevice,
     InstallOs,
     Console,
+    /// The installed OS is booting from local disk for the first time; its own
+    /// first-boot reporter completes the action, so the agent must get out of the way.
+    FirstBoot,
 }
 
 /// Envelope wrapping a [`PollAction`] sent from rack-director to the agent daemon.

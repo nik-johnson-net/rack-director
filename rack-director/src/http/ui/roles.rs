@@ -1,5 +1,5 @@
 use super::super::{AppState, error::Error as HttpError};
-use super::validation::{ValidationErrors, validate_not_blank};
+use super::validation::{ValidationErrors, validate_cloud_config, validate_not_blank};
 use crate::roles::*;
 use axum::{
     Json, Router,
@@ -34,6 +34,10 @@ fn validate_update_role(req: &UpdateRoleRequest) -> Result<(), HashMap<String, S
         "cmdline_args",
         validate_not_blank(req.cmdline_args.value().map(String::as_str), "Cmdline args"),
     );
+    errors.add_if_err(
+        "cloud_config",
+        validate_cloud_config(req.cloud_config.value().map(String::as_str)),
+    );
     errors.into_result()
 }
 
@@ -49,7 +53,77 @@ fn validate_create_role(req: &CreateRoleRequest) -> Result<(), HashMap<String, S
         "cmdline_args",
         validate_not_blank(req.cmdline_args.as_deref(), "Cmdline args"),
     );
+    errors.add_if_err(
+        "cloud_config",
+        validate_cloud_config(req.cloud_config.as_deref()),
+    );
     errors.into_result()
+}
+
+/// Reject a cloud-config on a role whose OS does not run rack-director's cloud-init setup:
+/// it would be silently ignored.
+fn check_cloud_config_supported(
+    cloud_config: Option<&str>,
+    os: &crate::osm::ResolvedOs,
+) -> Result<(), HttpError> {
+    if cloud_config.is_none() || os.os.config.cloud_init {
+        return Ok(());
+    }
+    let mut errors = HashMap::new();
+    errors.insert(
+        "cloud_config".to_string(),
+        format!(
+            "{} {} does not support cloud-config (its OSM does not declare cloud_init)",
+            os.os.name, os.os.release
+        ),
+    );
+    Err(HttpError::ValidationError(errors))
+}
+
+/// Validate the OS reference and cloud-config a role update would leave behind: the OS must
+/// exist, and a cloud-config may only be set on, or moved to, an OS that supports cloud-init.
+///
+/// A role whose OS dropped `cloud_init` after its cloud-config was saved (an OSM upload or
+/// bundled sync) is not re-checked when neither changes. The UI sends both on every save, and
+/// checking them would block unrelated edits; provisioning refuses such a role instead.
+async fn validate_update_os(
+    conn: &crate::database::Connection,
+    id: i64,
+    req: &UpdateRoleRequest,
+) -> Result<(), HttpError> {
+    let os_sent = req.osm_module.is_some()
+        || req.os_name.is_some()
+        || req.os_release.is_some()
+        || req.os_arch.is_some();
+    if !os_sent && req.cloud_config.value().is_none() {
+        return Ok(());
+    }
+
+    // Fill in unchanged fields from the current role.
+    let current = crate::roles::store::get(conn, id).await?;
+    let module = req.osm_module.as_deref().unwrap_or(&current.osm_module);
+    let name = req.os_name.as_deref().unwrap_or(&current.os_name);
+    let release = req.os_release.as_deref().unwrap_or(&current.os_release);
+    let arch = req.os_arch.as_deref().unwrap_or(&current.os_arch);
+    let resolved = crate::osm::resolve_os(conn, module, name, release, arch)
+        .await
+        .map_err(|e| HttpError::BadRequest(format!("Invalid OS reference: {}", e)))?;
+
+    let cloud_config = match req.cloud_config.as_deref_update() {
+        Some(update) => update,
+        None => current.cloud_config.as_deref(),
+    };
+    let os_changed = (module, name, release, arch)
+        != (
+            current.osm_module.as_str(),
+            current.os_name.as_str(),
+            current.os_release.as_str(),
+            current.os_arch.as_str(),
+        );
+    if !os_changed && cloud_config == current.cloud_config.as_deref() {
+        return Ok(());
+    }
+    check_cloud_config_supported(cloud_config, &resolved)
 }
 
 // Create a new role
@@ -71,7 +145,7 @@ async fn create_role(
     let conn = state.connection_factory.open().await?;
 
     // Verify the referenced OS exists in the OSM registry
-    crate::osm::resolve_os(
+    let resolved = crate::osm::resolve_os(
         &conn,
         &req.osm_module,
         &req.os_name,
@@ -80,6 +154,7 @@ async fn create_role(
     )
     .await
     .map_err(|e| HttpError::BadRequest(format!("Invalid OS reference: {}", e)))?;
+    check_cloud_config_supported(req.cloud_config.as_deref(), &resolved)?;
 
     let role = crate::roles::store::create(
         &conn,
@@ -93,6 +168,7 @@ async fn create_role(
         req.cmdline_args.as_deref(),
         req.config_template.as_ref(),
         req.firmware_mode,
+        req.cloud_config.as_deref(),
     )
     .await?;
 
@@ -139,22 +215,7 @@ async fn update_role(
 
     let conn = state.connection_factory.open().await?;
 
-    // If updating any OSM fields, validate the resulting OS reference
-    if req.osm_module.is_some()
-        || req.os_name.is_some()
-        || req.os_release.is_some()
-        || req.os_arch.is_some()
-    {
-        // Get current role to fill in unchanged fields
-        let current = crate::roles::store::get(&conn, id).await?;
-        let module = req.osm_module.as_deref().unwrap_or(&current.osm_module);
-        let name = req.os_name.as_deref().unwrap_or(&current.os_name);
-        let release = req.os_release.as_deref().unwrap_or(&current.os_release);
-        let arch = req.os_arch.as_deref().unwrap_or(&current.os_arch);
-        crate::osm::resolve_os(&conn, module, name, release, arch)
-            .await
-            .map_err(|e| HttpError::BadRequest(format!("Invalid OS reference: {}", e)))?;
-    }
+    validate_update_os(&conn, id, &req).await?;
 
     // Platform compatibility check: if the new disk layout uses labels, verify that every
     // device currently assigned to this role has a platform that satisfies all required labels.
@@ -177,6 +238,7 @@ async fn update_role(
             disk_layout: req.disk_layout.as_ref(),
             cmdline_args: req.cmdline_args.as_deref_update(),
             config_template: req.config_template.as_update(),
+            cloud_config: req.cloud_config.as_deref_update(),
             firmware_mode: req.firmware_mode.copied_update(),
         },
     )
@@ -356,6 +418,7 @@ mod tests {
         let config = osm::os_config::OperatingSystemConfig {
             name: "Ubuntu".to_string(),
             release: "24.04".to_string(),
+            cloud_init: false,
             architectures: vec![osm::os_config::ArchitectureConfig {
                 arch: "x86-64".to_string(),
                 kernel: "vmlinuz".to_string(),
@@ -382,6 +445,7 @@ mod tests {
             "24.04",
             "x86-64",
             layout,
+            None,
             None,
             None,
             None,
@@ -535,6 +599,7 @@ mod tests {
             disk_layout: None,
             cmdline_args: crate::patch::Patch::Keep,
             config_template: crate::patch::Patch::Keep,
+            cloud_config: crate::patch::Patch::Keep,
             firmware_mode: crate::patch::Patch::Keep,
         }
     }
@@ -595,6 +660,7 @@ mod tests {
             disk_layout: label_layout(),
             cmdline_args: cmdline_args.map(str::to_string),
             config_template: None,
+            cloud_config: None,
             firmware_mode: None,
         }
     }
@@ -643,5 +709,176 @@ mod tests {
 
         let result = check_platform_compatibility(&conn, role_id, &label_layout()).await;
         assert!(result.is_ok());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Tests for cloud-config validation
+    // ---------------------------------------------------------------------------
+
+    /// Add an AlmaLinux 10 OS that opts into cloud-init to the module from `create_osm_module`.
+    async fn create_cloud_init_os(conn: &database::Connection) {
+        let config = osm::os_config::OperatingSystemConfig {
+            name: "AlmaLinux".to_string(),
+            release: "10".to_string(),
+            cloud_init: true,
+            architectures: vec![osm::os_config::ArchitectureConfig {
+                arch: "x86-64".to_string(),
+                kernel: "vmlinuz".to_string(),
+                initramfs: "initrd.img".to_string(),
+                modules: vec![],
+                cmdline: String::new(),
+                install_template: "install.ks".to_string(),
+            }],
+            template_variables: vec![],
+        };
+        crate::osm::store::create_operating_system(conn, 1, "alma", "AlmaLinux", "10", &config)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn test_validate_create_role_rejects_bad_cloud_config() {
+        let mut req = create_request(None, None);
+        req.cloud_config = Some("- not\n- a mapping\n".to_string());
+        let errors = validate_create_role(&req).unwrap_err();
+        assert!(errors["cloud_config"].contains("mapping"), "{errors:?}");
+
+        req.cloud_config = Some("  ".to_string());
+        let errors = validate_create_role(&req).unwrap_err();
+        assert!(
+            errors["cloud_config"].contains("cannot be empty"),
+            "{errors:?}"
+        );
+
+        req.cloud_config = Some("#cloud-config\npackages: [jq]\n".to_string());
+        assert!(validate_create_role(&req).is_ok());
+    }
+
+    #[test]
+    fn test_validate_update_role_rejects_invalid_cloud_config() {
+        let req = UpdateRoleRequest {
+            cloud_config: crate::patch::Patch::Set("packages: [jq,\n".to_string()),
+            ..update_request()
+        };
+        let errors = validate_update_role(&req).unwrap_err();
+        assert!(
+            errors["cloud_config"].starts_with("Invalid YAML"),
+            "{errors:?}"
+        );
+    }
+
+    fn cloud_config_error(result: Result<(), HttpError>) -> String {
+        match result {
+            Err(HttpError::ValidationError(errors)) => errors["cloud_config"].clone(),
+            Ok(_) => panic!("expected a cloud_config ValidationError, got Ok"),
+            Err(_) => panic!("expected a cloud_config ValidationError, got another error"),
+        }
+    }
+
+    /// A cloud-config on an OS that never runs rack-director's cloud-init setup would be
+    /// silently ignored, so it is rejected.
+    #[tokio::test]
+    async fn test_update_rejects_cloud_config_on_os_without_cloud_init() {
+        let conn = setup_db(test_connection_factory!()).await;
+        create_osm_module(&conn).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await; // Ubuntu, no cloud_init
+
+        let req = UpdateRoleRequest {
+            cloud_config: crate::patch::Patch::Set("packages: [jq]\n".to_string()),
+            ..update_request()
+        };
+        let msg = cloud_config_error(validate_update_os(&conn, role_id, &req).await);
+        assert!(msg.contains("Ubuntu 24.04"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_update_accepts_cloud_config_on_cloud_init_os() {
+        let conn = setup_db(test_connection_factory!()).await;
+        create_osm_module(&conn).await;
+        create_cloud_init_os(&conn).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await;
+
+        // Switch to the cloud-init OS and set a cloud-config in one request.
+        let req = UpdateRoleRequest {
+            os_name: Some("AlmaLinux".to_string()),
+            os_release: Some("10".to_string()),
+            cloud_config: crate::patch::Patch::Set("packages: [jq]\n".to_string()),
+            ..update_request()
+        };
+        assert!(validate_update_os(&conn, role_id, &req).await.is_ok());
+    }
+
+    /// Moving a role that already has a cloud-config to an OS without cloud-init is rejected
+    /// unless the same request clears the cloud-config.
+    #[tokio::test]
+    async fn test_update_os_change_checks_existing_cloud_config() {
+        let conn = setup_db(test_connection_factory!()).await;
+        create_osm_module(&conn).await;
+        create_cloud_init_os(&conn).await;
+        let role_id = crate::roles::store::create(
+            &conn,
+            "alma-role",
+            None,
+            "Default",
+            "AlmaLinux",
+            "10",
+            "x86-64",
+            &label_layout(),
+            None,
+            None,
+            None,
+            Some("packages: [jq]\n"),
+        )
+        .await
+        .unwrap()
+        .id
+        .unwrap();
+
+        let to_ubuntu = UpdateRoleRequest {
+            os_name: Some("Ubuntu".to_string()),
+            os_release: Some("24.04".to_string()),
+            ..update_request()
+        };
+        cloud_config_error(validate_update_os(&conn, role_id, &to_ubuntu).await);
+
+        let to_ubuntu_and_clear = UpdateRoleRequest {
+            cloud_config: crate::patch::Patch::Clear,
+            ..to_ubuntu
+        };
+        assert!(
+            validate_update_os(&conn, role_id, &to_ubuntu_and_clear)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// A role whose OS dropped cloud_init after its cloud-config was saved can still be edited
+    /// when the save resends the same OS and cloud-config (as the UI does); changing the
+    /// cloud-config is still checked.
+    #[tokio::test]
+    async fn test_update_unchanged_stale_cloud_config_not_blocked() {
+        let conn = setup_db(test_connection_factory!()).await;
+        create_osm_module(&conn).await;
+        let role_id = create_role_helper(&conn, &label_layout()).await; // Ubuntu, no cloud_init
+        conn.execute(
+            "UPDATE roles SET cloud_config = 'packages: [jq]' WHERE id = ?1",
+            (role_id,),
+        )
+        .await
+        .unwrap();
+
+        let resave = UpdateRoleRequest {
+            os_name: Some("Ubuntu".to_string()),
+            os_release: Some("24.04".to_string()),
+            cloud_config: crate::patch::Patch::Set("packages: [jq]".to_string()),
+            ..update_request()
+        };
+        assert!(validate_update_os(&conn, role_id, &resave).await.is_ok());
+
+        let edit = UpdateRoleRequest {
+            cloud_config: crate::patch::Patch::Set("packages: [git]".to_string()),
+            ..resave
+        };
+        cloud_config_error(validate_update_os(&conn, role_id, &edit).await);
     }
 }

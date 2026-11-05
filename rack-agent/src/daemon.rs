@@ -103,7 +103,7 @@ async fn dispatch_action(
                 LoopControl::SleepThenPoll
             }
         },
-        PollAction::RebootDevice | PollAction::InstallOs => {
+        PollAction::RebootDevice | PollAction::InstallOs | PollAction::FirstBoot => {
             info!("Action {:?} requires reboot — exiting daemon", action);
             // EXIT WITHOUT calling action_success. This is intentional — do not
             // "fix" this by adding an action_success call here.
@@ -122,6 +122,9 @@ async fn dispatch_action(
             //   OS installer itself calls action_success when the installation is done.
             //   Calling action_success here would advance the plan before the OS is
             //   installed, causing the installer to never run.
+            //
+            // FirstBoot: the next boot target is local disk. The installed OS's own
+            //   first-boot reporter calls action_success once cloud-init finishes.
             //
             // Known limitation: if the machine crashes after the daemon exits but
             // before rebooting, the plan remains in 'running' state indefinitely with
@@ -172,6 +175,17 @@ mod tests {
 
         let client = CncClient::new(&server.url());
         let control = dispatch_action(&client, "", &PollAction::InstallOs, None).await;
+
+        assert!(matches!(control, LoopControl::Exit));
+    }
+
+    /// Test that `dispatch_action` returns `Exit` for `FirstBoot`, leaving completion to
+    /// the installed OS's first-boot reporter.
+    #[tokio::test]
+    async fn test_dispatch_first_boot_exits() {
+        let server = mockito::Server::new_async().await;
+        let client = CncClient::new(&server.url());
+        let control = dispatch_action(&client, "", &PollAction::FirstBoot, None).await;
 
         assert!(matches!(control, LoopControl::Exit));
     }

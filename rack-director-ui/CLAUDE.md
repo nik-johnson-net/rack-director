@@ -97,6 +97,10 @@ Available extracted components:
 - `PlatformAssignment` (`components/devices/platform-assignment.tsx`) - Platform selection and assignment
 - `BmcConfiguration` (`components/devices/BmcConfiguration.tsx`) - BMC network configuration
 - `EditableHostname` (`components/devices/editable-hostname.tsx`) - Inline hostname editing
+- `CloudConfigEditor` (`components/cloud-config/cloud-config-editor.tsx`) - Monospace cloud-config textarea with the root SSH key example
+- `GlobalCloudConfigCard` (`components/cloud-config/global-cloud-config-card.tsx`) - Settings page global cloud-config layer
+- `RoleCloudConfigCard` (`components/cloud-config/role-cloud-config-card.tsx`) - Role new/edit cloud-config layer (disabled when the OS lacks `cloud_init`)
+- `CloudConfigPreview` (`components/devices/cloud-config-preview.tsx`) - Device overview: merged seed served on first boot (loaded on expand)
 
 # VALIDATION
 

@@ -217,6 +217,44 @@ cmdline: <merged-cmdline>
 
 ---
 
+### first_boot
+
+**Purpose:** Boots the freshly installed OS from local disk and waits for its first boot to apply
+the device's cloud-config
+
+**Lifecycle:** Provision transition (unprovisioned → provisioned), after `install_os`. Only planned
+when the role's OS declares `cloud_init = true` in its OSM (`director::plan_actions`). A role
+that has a cloud-config but whose OS doesn't declare it (e.g. after an OSM upload dropped it) is
+refused: the Provision transition fails instead of installing without the cloud-config.
+
+**Agent Command:** N/A (the installed OS reports completion itself)
+
+**What it does:**
+- `install_os`'s `action_success` (from the kickstart `%post`, naming `"action":"install_os"` so a
+  retried copy can't also complete `first_boot`) advances the plan to `first_boot`
+- On the next PXE boot iPXE serves `LocalDisk`, so the installed OS boots
+- cloud-init fetches its NoCloud seed from `GET /cnc/devices/{uuid}/cloud-init/{meta-data,user-data}`
+  (served **only** while the plan is at `first_boot`) and applies the merged global + role
+  cloud-config
+- `rack-director-first-boot.service`, installed by the OSM's `{{cloud_init.install_script}}`, waits
+  for `cloud-init status --wait` and posts `/cnc/action_success` (status `done`, exit 0 or 2, i.e.
+  done with only warnings) or `/cnc/action_failed` (anything else, with cloud-init's errors),
+  carrying `"action":"first_boot"` and the plan id baked in at install time
+- Success → Provisioned; failure → Broken
+
+**Implementation:** `rack-director/src/plans/actions/mod.rs` (boot target),
+`rack-director/src/cloud_init/install.rs` (reporter), `rack-director/src/http/cnc/cloud_init.rs`
+(seed endpoint). See `@.claude/docs/cloud-init.md`.
+
+**Boot Target:** `LocalDisk`. `advance_on_boot()` is `false`; the agent daemon exits on
+`PollAction::FirstBoot` like `install_os`. Not in `action_requires_boot()` (never a first action).
+
+**Known limitation:** no timeout. A device that never reports (OS fails to boot, rack-director
+unreachable, `halt = true` and never powered on) keeps the transition open until an operator
+cancels it.
+
+---
+
 ### wipe_disks
 
 **Purpose:** Securely erase ALL whole disks on the machine for reuse or removal
@@ -308,10 +346,11 @@ no special-casing is needed beyond the existing `mark_action_failed` path.
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/cnc/update_attributes` | POST | Upload device attributes (from device_scan) |
-| `/cnc/action_success` | POST | Report action completion |
-| `/cnc/action_failed` | POST | Report action failure |
+| `/cnc/action_success` | POST | Report action completion (optional `plan_id` / `action` scope it to a step; see `http/cnc/CLAUDE.md` "Action reports") |
+| `/cnc/action_failed` | POST | Report action failure (same optional `plan_id` / `action`) |
 | `/cnc/devices/{uuid}/bmc_config` | GET | Fetch BMC configuration |
 | `/cnc/devices/{uuid}/disk_layout` | GET | Fetch disk layout configuration |
+| `/cnc/devices/{uuid}/cloud-init/{file}` | GET | NoCloud seed (`meta-data`, `user-data`) for the installed OS; only at `first_boot` |
 | `/cnc/poll` | GET | Poll for the next pending action (daemon mode) |
 | `/cnc/agent-images/vmlinuz` | GET | Download rack-agent kernel |
 | `/cnc/agent-images/initramfs.cpio.gz` | GET | Download rack-agent initramfs |

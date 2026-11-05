@@ -25,6 +25,9 @@ pub struct Role {
     pub disk_layout: DiskLayout,
     pub cmdline_args: Option<String>,
     pub config_template: Option<serde_json::Value>,
+    /// Role layer of the cloud-config applied on first boot (YAML text, merged over the
+    /// global layer). Only meaningful for OSes whose OSM declares `cloud_init`.
+    pub cloud_config: Option<String>,
     /// Required firmware mode for devices assigned to this role.
     /// If set, only devices with the matching boot_mode can be assigned this role.
     /// None means no firmware constraint.
@@ -61,6 +64,7 @@ impl FromRow for Role {
             disk_layout,
             cmdline_args: row.get("cmdline_args")?,
             config_template,
+            cloud_config: row.get("cloud_config")?,
             firmware_mode,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -84,6 +88,8 @@ pub struct CreateRoleRequest {
     pub disk_layout: DiskLayout,
     pub cmdline_args: Option<String>,
     pub config_template: Option<serde_json::Value>,
+    /// Role cloud-config layer (YAML text).
+    pub cloud_config: Option<String>,
     pub firmware_mode: Option<common::FirmwareMode>,
 }
 
@@ -108,6 +114,7 @@ pub struct UpdateRoleRequest {
     pub disk_layout: Option<DiskLayout>,
     pub cmdline_args: Patch<String>,
     pub config_template: Patch<serde_json::Value>,
+    pub cloud_config: Patch<String>,
     pub firmware_mode: Patch<common::FirmwareMode>,
 }
 
@@ -131,28 +138,31 @@ mod tests {
         assert_eq!(req.description, Patch::Keep);
         assert_eq!(req.cmdline_args, Patch::Keep);
         assert_eq!(req.config_template, Patch::Keep);
+        assert_eq!(req.cloud_config, Patch::Keep);
         assert_eq!(req.firmware_mode, Patch::Keep);
     }
 
     #[test]
     fn test_update_role_request_null_patch_fields_are_clear() {
         let req = parse_update(
-            r#"{"description": null, "cmdline_args": null, "config_template": null, "firmware_mode": null}"#,
+            r#"{"description": null, "cmdline_args": null, "config_template": null, "cloud_config": null, "firmware_mode": null}"#,
         );
         assert_eq!(req.description, Patch::Clear);
         assert_eq!(req.cmdline_args, Patch::Clear);
         assert_eq!(req.config_template, Patch::Clear);
+        assert_eq!(req.cloud_config, Patch::Clear);
         assert_eq!(req.firmware_mode, Patch::Clear);
     }
 
     #[test]
     fn test_update_role_request_valued_patch_fields_are_set() {
         let req = parse_update(
-            r#"{"description": "d", "cmdline_args": "quiet", "config_template": {"k": 1}, "firmware_mode": "uefi"}"#,
+            r#"{"description": "d", "cmdline_args": "quiet", "config_template": {"k": 1}, "cloud_config": "packages: [jq]", "firmware_mode": "uefi"}"#,
         );
         assert_eq!(req.description, Patch::Set("d".to_string()));
         assert_eq!(req.cmdline_args, Patch::Set("quiet".to_string()));
         assert_eq!(req.config_template, Patch::Set(serde_json::json!({"k": 1})));
+        assert_eq!(req.cloud_config, Patch::Set("packages: [jq]".to_string()));
         assert_eq!(req.firmware_mode, Patch::Set(common::FirmwareMode::Uefi));
     }
 }

@@ -1,3 +1,4 @@
+mod cloud_config;
 mod devices;
 mod dhcp;
 mod networks;
@@ -29,6 +30,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/{*wildcard}", get(http_index))
         .with_state(state.clone())
         // Merge all UI API routes
+        .merge(cloud_config::routes(state.clone()))
         .merge(devices::routes(state.clone()))
         .merge(dhcp::routes(state.clone()))
         .merge(networks::routes(state.clone()))

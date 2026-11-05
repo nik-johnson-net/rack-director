@@ -84,6 +84,59 @@ NICs attached to it (no default route / no nameserver). Always guard `gateway`/`
 | `{{ os.version }}` | OS version |
 | `{{ config.* }}` | Any key from `role.config_template` JSON |
 
+### Cloud-init
+
+Present for every OS. Populated when the device's active plan has a `first_boot` step, which it
+gets when the OS's OSM declares `cloud_init = true`. The plan decides, not the current OS config
+(`plan_with_first_boot`); a mismatch is logged.
+
+| Variable | Description |
+|---|---|
+| `{{ cloud_init.enabled }}` | `true` when the OS opts into cloud-init |
+| `{{ cloud_init.install_script }}` | POSIX `sh` snippet for a post-install hook: writes the `cloud.cfg.d` drop-in pointing NoCloud at rack-director and installs/enables the first-boot reporter. Uses `$RD_TARGET` as the installed root (empty when chrooted). Exits non-zero on failure |
+| `{{ cloud_init.seed_url }}` | NoCloud `seedfrom` URL: `{root}/cnc/devices/{uuid}/cloud-init/` |
+
+Run the snippet **before** the hook that posts `install_os` success, and install the `cloud-init`
+package. Kickstart example:
+
+```kickstart
+%packages
+@^minimal-environment
+cloud-init
+%end
+
+%post --erroronfail --log=/root/rack-director-cloud-init.log
+RD_TARGET=
+{{cloud_init.install_script}}
+%end
+```
+
+The bundled OSMs no longer declare `packages`/`postinstall`; use cloud-config `packages:` and
+`runcmd:` instead (the `config.packages` loop in the examples below is for OSMs that still declare
+it). See `@.claude/docs/cloud-init.md`.
+
+## Action reports
+
+`POST /cnc/action_success` `{"uuid", "plan_id"?, "action"?}` and `POST /cnc/action_failed`
+`{"uuid", "error_message", "plan_id"?, "action"?}` advance or fail the device's active plan.
+The optional fields make a report stale (logged and ignored, still 204) when they don't match the
+active plan's current step (`director::ReportedStep`):
+
+- `plan_id`: the agent echoes it from `/cnc/poll`; the first-boot reporter bakes it in at install time
+- `action`: the action's wire name (`install_os`, `first_boot`, ...). An unknown name returns 400.
+  Install templates that report from the installer must send `"action":"install_os"`. Otherwise a
+  retried or late installer report would complete or fail the plan's next step, `first_boot`.
+  The bundled kickstarts send it from `%post` and `%onerror`
+
+## NoCloud seed endpoint
+
+`GET /cnc/devices/{uuid}/cloud-init/{file}` (`cloud_init.rs`) serves `meta-data`
+(`instance-id: rd-{uuid}-p{plan_id}`, `local-hostname: {fqdn}`, not applied because the drop-in
+sets `preserve_hostname: true`) and `user-data` (global then role
+cloud-config, merged). `vendor-data`/`network-config` → 404. Everything is 404 unless the device's
+active plan is at `first_boot` — the endpoint is unauthenticated and cloud-config may hold secrets.
+`build_device_seed()` is shared with the `/ui/devices/{uuid}/cloud-config` preview.
+
 ### Disk Layout (resolved, post-partitioning)
 
 These variables are populated from the device's resolved disk layout — platform labels (e.g. `ROOT`, `DATA1`) are already resolved to actual device paths. They reflect the partitions created by the `partition_disks` action.

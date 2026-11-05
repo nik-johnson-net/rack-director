@@ -1,0 +1,279 @@
+//! The install-time shell snippet OSM templates run to hand first boot over to cloud-init.
+//!
+//! It writes a `cloud.cfg.d` drop-in that points cloud-init's NoCloud datasource at
+//! rack-director, plus a systemd unit that reports the first-boot result back so the
+//! device's `first_boot` plan step can complete.
+
+use anyhow::Result;
+use serde_json::json;
+use uuid::Uuid;
+
+/// Where the drop-in is written. Sorts after Ubuntu installer drop-ins (`99-installer.cfg`).
+const DROP_IN_PATH: &str = "/etc/cloud/cloud.cfg.d/99-rack-director.cfg";
+const REPORTER_PATH: &str = "/usr/local/sbin/rack-director-first-boot";
+const UNIT_NAME: &str = "rack-director-first-boot.service";
+
+/// Heredoc terminator; generated content never contains it as a whole line.
+const EOF_MARKER: &str = "RD_EOF";
+
+/// Path of a device's NoCloud seed endpoint, relative to the rack-director root URL.
+///
+/// NoCloud appends `meta-data`, `user-data`, etc. to this base, so it ends in `/`.
+pub fn seed_path(uuid: &Uuid) -> String {
+    format!("/cnc/devices/{uuid}/cloud-init/")
+}
+
+/// Render the POSIX `sh` snippet an install template runs from its post-install hook.
+///
+/// It writes into `$RD_TARGET` (the installed root; empty when already chrooted into it)
+/// and exits the hook non-zero if any step fails. `plan_id` is reported back with the
+/// first-boot result so a stale report cannot complete a newer plan.
+pub fn install_script(root_url: &str, uuid: &Uuid, plan_id: Option<i64>) -> Result<String> {
+    let seed_url = format!("{root_url}{}", seed_path(uuid));
+    let paths = format!("{DROP_IN_PATH} {REPORTER_PATH} /etc/systemd/system/{UNIT_NAME}");
+
+    Ok(format!(
+        r#"# --- rack-director: hand first boot to cloud-init (generated) ---
+# cloud-init fetches its config from {seed_url} on first boot;
+# {UNIT_NAME} then reports the result back to rack-director.
+(
+set -e
+rd_root="${{RD_TARGET:-}}"
+install -d -m 0755 "$rd_root/etc/cloud/cloud.cfg.d" "$rd_root/usr/local/sbin" "$rd_root/etc/systemd/system"
+cat > "$rd_root{DROP_IN_PATH}" <<'{EOF_MARKER}'
+{drop_in}{EOF_MARKER}
+cat > "$rd_root{REPORTER_PATH}" <<'{EOF_MARKER}'
+{reporter}{EOF_MARKER}
+chmod 0755 "$rd_root{REPORTER_PATH}"
+cat > "$rd_root/etc/systemd/system/{UNIT_NAME}" <<'{EOF_MARKER}'
+{unit}{EOF_MARKER}
+if [ -n "$rd_root" ]; then
+    systemctl --root="$rd_root" enable {UNIT_NAME}
+    if [ -x "$rd_root/usr/sbin/restorecon" ]; then chroot "$rd_root" /usr/sbin/restorecon -F {paths}; fi
+else
+    systemctl enable {UNIT_NAME}
+    if command -v restorecon >/dev/null 2>&1; then restorecon -F {paths}; fi
+fi
+)
+rd_status=$?
+if [ "$rd_status" -ne 0 ]; then
+    echo "rack-director: cloud-init setup failed (exit $rd_status)" >&2
+    exit "$rd_status"
+fi
+# --- end rack-director ---
+"#,
+        drop_in = drop_in(&seed_url)?,
+        reporter = reporter_script(root_url, uuid, plan_id),
+        unit = REPORTER_UNIT,
+    ))
+}
+
+/// cloud-init system config for a rack-director provisioned host.
+///
+/// The installer already configured networking, disks and the hostname, so cloud-init must
+/// not redo them; the seed is fetched once (`manual_cache_clean`) and only `NoCloud` is
+/// listed, since an HTTP seed can lose detection to other datasources.
+///
+/// `preserve_hostname` keeps the hostname the installer set. The seed's `local-hostname` is
+/// computed again at first boot from current lease data, and could name a different NIC's
+/// domain, or `unknown`.
+///
+/// `ssh_pwauth: true` restores sshd's own default (password auth on) that RHEL's `cloud.cfg`
+/// would turn off. It must be a boolean: the string `unchanged` is deprecated and logs a
+/// deprecation, which makes `cloud-init status` exit 2 (degraded).
+fn drop_in(seed_url: &str) -> Result<String> {
+    let config = json!({
+        "datasource_list": ["NoCloud"],
+        "datasource": { "NoCloud": { "seedfrom": seed_url } },
+        "manual_cache_clean": true,
+        "network": { "config": "disabled" },
+        "growpart": { "mode": "off" },
+        "resize_rootfs": false,
+        "preserve_hostname": true,
+        "ssh_pwauth": true,
+        "users": [],
+    });
+    let yaml = serde_saphyr::to_string(&config)?;
+    Ok(format!(
+        "# Managed by rack-director. Settings here are defaults: the device's cloud-config\n\
+         # (served from the seedfrom URL) may override all but datasource and network.\n{yaml}"
+    ))
+}
+
+/// Wait for cloud-init, then report success or failure to rack-director once.
+///
+/// `cloud-init status` exits 2 ("degraded done") when cloud-init finished but logged warnings
+/// or deprecations, for example a schema warning in the cloud-config. That counts as success;
+/// the warnings go to the journal. The report names `first_boot` so it can't complete any
+/// other step.
+fn reporter_script(root_url: &str, uuid: &Uuid, plan_id: Option<i64>) -> String {
+    let plan = plan_id.map(|id| id.to_string()).unwrap_or_default();
+    format!(
+        r#"#!/bin/sh
+# Generated by rack-director: reports this machine's first boot (the cloud-init result)
+# so its provisioning plan can complete, then disables itself.
+RD_URL={url}
+RD_UUID={uuid}
+RD_PLAN_ID={plan}
+
+rd_errors() {{
+    cloud-init status --format json 2>/dev/null | python3 -c '{errors_py}' 2>/dev/null
+}}
+
+rc=1
+state=missing
+if command -v cloud-init >/dev/null 2>&1; then
+    cloud-init status --wait >/dev/null 2>&1
+    rc=$?
+    state=$(cloud-init status 2>/dev/null | sed -n 's/^status: //p')
+fi
+
+fields="\"uuid\":\"$RD_UUID\",\"action\":\"first_boot\""
+if [ -n "$RD_PLAN_ID" ]; then fields="$fields,\"plan_id\":$RD_PLAN_ID"; fi
+
+# Exit 2 is "degraded done": finished, but warnings or deprecations were logged.
+if [ "$state" = "done" ] && {{ [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; }}; then
+    endpoint=action_success
+    if [ "$rc" -eq 2 ]; then
+        echo "cloud-init finished with warnings: $(rd_errors)" >&2
+    fi
+    body="{{$fields}}"
+else
+    endpoint=action_failed
+    detail=$(rd_errors)
+    msg="cloud-init did not finish cleanly on first boot (status: ${{state:-unknown}}, exit $rc)${{detail:+: $detail}}. Run 'cloud-init status --long' on the host."
+    msg_json=$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null) \
+        || msg_json='"cloud-init did not finish cleanly on first boot"'
+    body="{{$fields,\"error_message\":$msg_json}}"
+fi
+
+if curl -sf --max-time 30 --retry 30 --retry-delay 10 --retry-all-errors \
+    -X POST "$RD_URL/cnc/$endpoint" -H 'Content-Type: application/json' -d "$body"; then
+    systemctl disable {UNIT_NAME}
+fi
+"#,
+        url = shell_quote(root_url),
+        uuid = shell_quote(&uuid.to_string()),
+        plan = shell_quote(&plan),
+        errors_py = ERRORS_PY,
+    )
+}
+
+/// Summarize `cloud-init status --format json` errors on one line (Python, run by the
+/// reporter; cloud-init itself depends on python3).
+const ERRORS_PY: &str = "import json,sys
+d=json.load(sys.stdin)
+m=list(d.get(\"errors\") or [])
+for lvl,items in (d.get(\"recoverable_errors\") or {}).items():
+    m+=[\"%s: %s\" % (lvl,i) for i in items]
+print(\"; \".join(m)[:1500])";
+
+/// Runs the reporter in the background (`Type=simple`) so boot never waits on it, and it is
+/// deliberately not ordered after `cloud-final.service`: on some distros that unit is
+/// `After=multi-user.target`, which would form an ordering cycle. The script itself waits.
+const REPORTER_UNIT: &str = "[Unit]
+Description=Report first boot to rack-director
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rack-director-first-boot
+
+[Install]
+WantedBy=multi-user.target
+";
+
+/// Quote `value` as a single POSIX shell word.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uuid() -> Uuid {
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
+    }
+
+    fn script() -> String {
+        install_script("http://10.0.0.1:3000", &uuid(), Some(7)).unwrap()
+    }
+
+    /// Extract the body of the heredoc written to `path`.
+    fn heredoc_for(script: &str, path: &str) -> String {
+        let start_marker = format!("cat > \"$rd_root{path}\" <<'{EOF_MARKER}'\n");
+        let start = script.find(&start_marker).unwrap() + start_marker.len();
+        let len = script[start..].find(&format!("{EOF_MARKER}\n")).unwrap();
+        script[start..start + len].to_string()
+    }
+
+    #[test]
+    fn test_seed_path_ends_with_slash() {
+        assert_eq!(
+            seed_path(&uuid()),
+            "/cnc/devices/550e8400-e29b-41d4-a716-446655440001/cloud-init/"
+        );
+    }
+
+    #[test]
+    fn test_drop_in_points_nocloud_at_rack_director() {
+        let drop_in: serde_json::Value =
+            serde_saphyr::from_str(&heredoc_for(&script(), DROP_IN_PATH)).unwrap();
+        assert_eq!(drop_in["datasource_list"], json!(["NoCloud"]));
+        assert_eq!(
+            drop_in["datasource"]["NoCloud"]["seedfrom"],
+            json!(
+                "http://10.0.0.1:3000/cnc/devices/550e8400-e29b-41d4-a716-446655440001/cloud-init/"
+            )
+        );
+        assert_eq!(drop_in["manual_cache_clean"], json!(true));
+        assert_eq!(drop_in["network"]["config"], json!("disabled"));
+        // `off` must stay a string: YAML 1.1 would otherwise read it as boolean false.
+        assert_eq!(drop_in["growpart"]["mode"], json!("off"));
+        assert_eq!(drop_in["resize_rootfs"], json!(false));
+        assert_eq!(drop_in["preserve_hostname"], json!(true));
+        // A string value is deprecated and would leave cloud-init "degraded".
+        assert_eq!(drop_in["ssh_pwauth"], json!(true));
+        assert_eq!(drop_in["users"], json!([]));
+    }
+
+    #[test]
+    fn test_reporter_embeds_device_and_plan() {
+        let reporter = heredoc_for(&script(), REPORTER_PATH);
+        assert!(reporter.starts_with("#!/bin/sh\n"));
+        assert!(reporter.contains("RD_URL='http://10.0.0.1:3000'"));
+        assert!(reporter.contains("RD_UUID='550e8400-e29b-41d4-a716-446655440001'"));
+        assert!(reporter.contains("RD_PLAN_ID='7'"));
+        assert!(reporter.contains("cloud-init status --wait"));
+        assert!(reporter.contains("\"$RD_URL/cnc/$endpoint\""));
+        assert!(reporter.contains(r#"\"action\":\"first_boot\""#));
+        // Exit 2 ("degraded done") is a success, not a failed first boot.
+        assert!(reporter.contains(
+            r#"if [ "$state" = "done" ] && { [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; }; then"#
+        ));
+    }
+
+    #[test]
+    fn test_reporter_without_plan_omits_plan_id() {
+        let script = install_script("http://rd", &uuid(), None).unwrap();
+        assert!(heredoc_for(&script, REPORTER_PATH).contains("RD_PLAN_ID=''"));
+    }
+
+    #[test]
+    fn test_script_enables_unit_and_fails_loudly() {
+        let script = script();
+        assert!(script.contains(&format!("systemctl --root=\"$rd_root\" enable {UNIT_NAME}")));
+        assert!(script.contains("set -e"));
+        assert!(script.contains("exit \"$rd_status\""));
+        // Kickstart ends a %post section at a line starting with %end.
+        assert!(!script.lines().any(|l| l.starts_with("%end")));
+    }
+
+    #[test]
+    fn test_root_url_is_shell_quoted() {
+        let script = install_script("http://a'b", &uuid(), None).unwrap();
+        assert!(script.contains(r"RD_URL='http://a'\''b'"));
+    }
+}

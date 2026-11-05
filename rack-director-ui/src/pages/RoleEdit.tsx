@@ -14,6 +14,7 @@ import {
   validateRequiredVars,
 } from "@/components/roles/os-variable-form";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
+import { RoleCloudConfigCard } from "@/components/cloud-config/role-cloud-config-card";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
 import { selectClassName } from "@/components/roles/styles";
 import { Trash2 } from "lucide-react";
@@ -53,6 +54,7 @@ function RoleEdit() {
   const [osConfigValues, setOsConfigValues] = useState<Record<string, unknown>>(
     data.config_template ?? {}
   );
+  const [cloudConfig, setCloudConfig] = useState(data.cloud_config ?? "");
   const [assignedDevices, setAssignedDevices] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -147,6 +149,7 @@ function RoleEdit() {
         disk_layout: diskLayout,
         firmware_mode: firmwareMode ?? null,
         config_template: parsedConfig ?? null,
+        cloud_config: cloudConfig.trim() ? cloudConfig : null,
       });
 
       setData({ ...data, ...updated });
@@ -407,6 +410,17 @@ function RoleEdit() {
               )}
             </div>
           </div>
+
+          <RoleCloudConfigCard
+            value={cloudConfig}
+            onChange={(value) => {
+              setCloudConfig(value);
+              clearFieldError("cloud_config");
+            }}
+            error={fieldErrors["cloud_config"]}
+            os={matchedOs}
+            loading={loadingOs}
+          />
 
           {/* Error banner */}
           {error && (

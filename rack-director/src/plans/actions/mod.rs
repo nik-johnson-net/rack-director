@@ -22,6 +22,9 @@ pub enum Action {
     WipeDisks,
     RebootDevice,
     Console,
+    /// Boot the freshly installed OS from local disk and wait for it to report that its
+    /// first boot (cloud-init) finished. Only planned for OSes whose OSM declares `cloud_init`.
+    FirstBoot,
 }
 
 /// Context required for converting Actions to BootTargets
@@ -45,6 +48,7 @@ impl Action {
             | Action::WipeDisks => generate_agent_boot_target("daemon"),
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
             Action::Console => generate_agent_boot_target("console"),
+            Action::FirstBoot => Ok(BootTarget::LocalDisk),
             // All other actions default to local disk boot
             _ => Ok(BootTarget::LocalDisk),
         }
@@ -86,6 +90,13 @@ impl Action {
             Action::RebootDevice => true,
             _ => false,
         }
+    }
+
+    /// Parse an action from its wire name (`install_os`, `first_boot`, ...): the `type` tag it
+    /// serializes with. Reports from install templates and the first-boot reporter name the
+    /// step they finish this way. `None` for an unknown name.
+    pub fn from_wire_name(name: &str) -> Option<Action> {
+        serde_json::from_value(serde_json::json!({ "type": name })).ok()
     }
 }
 
@@ -241,7 +252,8 @@ mod tests {
             | Action::PartitionDisks
             | Action::WipeDisks
             | Action::RebootDevice
-            | Action::Console => {}
+            | Action::Console
+            | Action::FirstBoot => {}
         }
     }
 
@@ -256,6 +268,7 @@ mod tests {
             Action::WipeDisks,
             Action::RebootDevice,
             Action::Console,
+            Action::FirstBoot,
         ];
 
         for action in &actions {
@@ -270,6 +283,29 @@ mod tests {
         let action = Action::Console;
         let json = serde_json::to_string(&action).unwrap();
         assert_eq!(json, r#"{"type":"console"}"#);
+    }
+
+    #[test]
+    fn test_first_boot_serialization_roundtrip() {
+        let json = serde_json::to_string(&Action::FirstBoot).unwrap();
+        assert_eq!(json, r#"{"type":"first_boot"}"#);
+        let action: Action = serde_json::from_str(&json).unwrap();
+        assert_eq!(action, Action::FirstBoot);
+        assert!(!action.advance_on_boot());
+    }
+
+    #[test]
+    fn test_from_wire_name() {
+        assert_eq!(
+            Action::from_wire_name("install_os"),
+            Some(Action::InstallOs)
+        );
+        assert_eq!(
+            Action::from_wire_name("first_boot"),
+            Some(Action::FirstBoot)
+        );
+        assert_eq!(Action::from_wire_name("InstallOs"), None);
+        assert_eq!(Action::from_wire_name("reboot"), None);
     }
 
     #[test]
@@ -317,6 +353,7 @@ mod tests {
         let config = osm::os_config::OperatingSystemConfig {
             name: "TestOS".to_string(),
             release: "1.0".to_string(),
+            cloud_init: false,
             architectures: vec![osm::os_config::ArchitectureConfig {
                 arch: "x86-64".to_string(),
                 kernel: "vmlinuz".to_string(),
@@ -348,6 +385,7 @@ mod tests {
             "1.0",
             "x86-64",
             &disk_layout,
+            None,
             None,
             None,
             None,
@@ -463,6 +501,7 @@ mod tests {
         let config = osm::os_config::OperatingSystemConfig {
             name: "Debian".to_string(),
             release: "12".to_string(),
+            cloud_init: false,
             architectures: vec![osm::os_config::ArchitectureConfig {
                 arch: "x86-64".to_string(),
                 kernel: "vmlinuz".to_string(),
@@ -493,6 +532,7 @@ mod tests {
             "12",
             "x86-64",
             &disk_layout,
+            None,
             None,
             None,
             None,
@@ -646,6 +686,37 @@ mod tests {
                 panic!("Expected LocalDisk for RebootDevice, got NetBoot")
             }
         }
+    }
+
+    /// FirstBoot must boot the installed OS, never the agent or the installer again.
+    #[tokio::test]
+    async fn test_first_boot_boot_target() {
+        let conn = setup_test_db(test_connection_factory!()).await;
+
+        let device = Device {
+            id: 0,
+            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440010").unwrap(),
+            architecture: Architecture::X86_64,
+            lifecycle: None,
+            role_id: None,
+            platform_id: None,
+            attributes: common::device_attributes::DeviceAttributes::default(),
+            created_at: None,
+            first_seen_at: None,
+            last_seen_at: None,
+            last_polled_at: None,
+        };
+        let ctx = ActionContext {
+            device: &device,
+            conn: &conn,
+            director: None,
+        };
+
+        let boot_target = Action::FirstBoot.to_boot_target(&ctx).await.unwrap();
+        assert!(
+            matches!(boot_target, BootTarget::LocalDisk),
+            "Expected LocalDisk for FirstBoot, got {boot_target:?}"
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 mod boot_files;
+mod cloud_init;
 mod database;
 mod device_warnings;
 mod dhcp;
@@ -11,6 +12,7 @@ mod patch;
 mod plans;
 mod platforms;
 mod roles;
+mod settings;
 mod storage;
 mod templates;
 mod tftp;

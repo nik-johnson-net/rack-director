@@ -59,6 +59,19 @@ export default function TemplateDocs({ type }: TemplateDocsProps) {
         <Var name="config.*" desc="Any custom config from role.config_template" />
       </Section>
 
+      {/* Cloud-init (OSMs that declare cloud_init = true) */}
+      <Section title="Cloud-Init (OS declares cloud_init = true)">
+        <Var
+          name="cloud_init.enabled"
+          desc="true when this install hands first boot to cloud-init (the provision plan has a first_boot step). Report install_os with &quot;action&quot;:&quot;install_os&quot;"
+        />
+        <Var
+          name="cloud_init.install_script"
+          desc="Shell snippet for a post-install hook: points cloud-init at rack-director and installs the first-boot reporter. Set RD_TARGET to the installed root when not chrooted"
+        />
+        <Var name="cloud_init.seed_url" desc="NoCloud seedfrom URL the installed OS fetches its cloud-config from" />
+      </Section>
+
       {/* Disk Layout */}
       <Section title="Disk Layout (resolved, post-partitioning)">
         <p className="text-text-muted mb-2">

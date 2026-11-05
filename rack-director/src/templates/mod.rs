@@ -51,6 +51,29 @@ pub struct NicNetworkContext {
     pub domain_name: Option<String>,
 }
 
+/// Cloud-init setup exposed to install templates as `{{ cloud_init.* }}`.
+///
+/// Present only when the OS's OSM declares `cloud_init`; templates then run
+/// `{{ cloud_init.install_script }}` from their post-install hook.
+#[derive(Debug, Clone)]
+pub struct CloudInitContext {
+    /// NoCloud `seedfrom` URL the installed system fetches its cloud-config from.
+    pub seed_url: String,
+    /// POSIX `sh` snippet that points cloud-init at `seed_url` and installs the first-boot
+    /// reporter (see `crate::cloud_init::install_script`).
+    pub install_script: String,
+}
+
+/// A device's FQDN: `{hostname}.{domain}` when its primary network has a domain, else the
+/// bare hostname (`unknown` when the device has none).
+pub fn fqdn(hostname: Option<&str>, domain: Option<&str>) -> String {
+    let short_hostname = hostname.unwrap_or("unknown");
+    match domain {
+        Some(d) => format!("{short_hostname}.{d}"),
+        None => short_hostname.to_string(),
+    }
+}
+
 /// Device attributes for template rendering
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -191,6 +214,9 @@ pub fn build_disk_layout_context(
 /// configured, else it falls back to the bare hostname. `device.domain_name` emits an
 /// empty string when the primary network has no domain, following the same
 /// empty-string-when-absent convention as `device.gateway`.
+///
+/// `cloud_init` is `Some` when the OS opts into cloud-init; templates see
+/// `cloud_init.enabled` either way.
 #[allow(clippy::too_many_arguments)]
 pub fn render_install_script_osm(
     template: &str,
@@ -204,6 +230,7 @@ pub fn render_install_script_osm(
     nics: &[NicNetworkContext],
     disk_layout: &DiskLayout,
     root_url: &str,
+    cloud_init: Option<&CloudInitContext>,
 ) -> Result<String> {
     let mut handlebars = Handlebars::new();
     handlebars.register_escape_fn(handlebars::no_escape);
@@ -234,14 +261,9 @@ pub fn render_install_script_osm(
     let legacy_gateway = network.gateway.clone().unwrap_or_default();
     let dns_csv = network.dns_servers.join(",");
 
-    // `device.fqdn` combines the short hostname with the primary NIC's network domain.
-    // Falls back to the bare hostname when the network has no domain configured.
     let short_hostname = device.hostname.as_deref().unwrap_or("unknown");
     let domain = network.domain_name.as_deref();
-    let fqdn = match domain {
-        Some(d) => format!("{short_hostname}.{d}"),
-        None => short_hostname.to_string(),
-    };
+    let fqdn = fqdn(device.hostname.as_deref(), domain);
 
     let context = json!({
         "device": {
@@ -274,9 +296,22 @@ pub fn render_install_script_osm(
         "logical_volumes": logical_volumes,
         "volume_groups": volume_groups,
         "rack_director_url": root_url,
+        "cloud_init": cloud_init_json(cloud_init),
     });
 
     Ok(handlebars.render_template(template, &context)?)
+}
+
+/// The `cloud_init` template object; `enabled` is always present so templates can branch on it.
+fn cloud_init_json(cloud_init: Option<&CloudInitContext>) -> serde_json::Value {
+    match cloud_init {
+        Some(c) => json!({
+            "enabled": true,
+            "seed_url": c.seed_url,
+            "install_script": c.install_script,
+        }),
+        None => json!({ "enabled": false }),
+    }
 }
 
 pub fn render_cmdline_args(
@@ -684,6 +719,7 @@ mod tests {
             &[],
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
+            None,
         )
         .unwrap();
         assert_eq!(result, "hostname: server01\nos: Ubuntu 22.04");
@@ -708,6 +744,7 @@ mod tests {
             &[],
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
+            None,
         )
         .unwrap();
         assert_eq!(result, "gateway=");
@@ -733,6 +770,7 @@ mod tests {
             &[],
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -761,6 +799,7 @@ mod tests {
             &[],
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
+            None,
         )
         .unwrap();
         assert_eq!(result, "fqdn=server01 domain=");
@@ -785,6 +824,7 @@ mod tests {
             &[],
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
+            None,
         )
         .unwrap();
         assert_eq!(result, "fqdn=unknown");
@@ -843,6 +883,7 @@ mod tests {
             &nics,
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
+            None,
         )
         .unwrap();
 
@@ -917,6 +958,7 @@ mod tests {
             &nics,
             &empty_disk_layout(),
             "http://127.0.0.1:3000",
+            None,
         )
         .unwrap();
         // Legacy fields must come from `network` (the primary NetworkInfo), not the nics slice
@@ -998,9 +1040,13 @@ mod tests {
 
         let config_template = Some(serde_json::json!({
             "rootpw": "$6$fakehash",
-            "packages": ["vim", "curl"],
-            "postinstall": "echo done",
         }));
+        let cloud_init = CloudInitContext {
+            seed_url: "http://127.0.0.1:3000/cnc/devices/x/cloud-init/".to_string(),
+            install_script: "# rack-director cloud-init setup
+"
+            .to_string(),
+        };
 
         let device = DeviceInfo {
             uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
@@ -1029,6 +1075,7 @@ mod tests {
             &[primary_nic],
             &disk_layout,
             "http://127.0.0.1:3000",
+            Some(&cloud_init),
         )
         .unwrap();
 
@@ -1077,5 +1124,53 @@ mod tests {
             "expected '--hostname=server01.test.local' in rendered output, got: {}",
             result
         );
+
+        // cloud-init is installed and its setup runs in a %post ahead of the one that
+        // reports install_os success.
+        assert!(result.contains(
+            "@^minimal-environment
+cloud-init
+%end"
+        ));
+        let setup = result
+            .find(
+                "RD_TARGET=
+# rack-director cloud-init setup",
+            )
+            .expect("cloud-init setup %post should be rendered");
+        let report = result.find("/cnc/action_success").unwrap();
+        assert!(
+            setup < report,
+            "cloud-init setup must run before action_success"
+        );
+    }
+
+    /// Without cloud-init the template still sees `cloud_init.enabled`.
+    #[test]
+    fn test_render_cloud_init_disabled() {
+        let template = "{{#if cloud_init.enabled}}on{{else}}off{{/if}}";
+        let result = render_install_script_osm(
+            template,
+            &make_device(),
+            "test-role",
+            &empty_disk_layout(),
+            &None,
+            "Linux",
+            "1.0",
+            &make_network(),
+            &[],
+            &empty_disk_layout(),
+            "http://127.0.0.1:3000",
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, "off");
+    }
+
+    #[test]
+    fn test_fqdn() {
+        assert_eq!(fqdn(Some("web"), Some("corp.example")), "web.corp.example");
+        assert_eq!(fqdn(Some("web"), None), "web");
+        assert_eq!(fqdn(None, None), "unknown");
     }
 }

@@ -7,6 +7,7 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | File | Responsibility |
 |------|----------------|
 | `mod.rs` | Route registration, static assets (`/ui/assets/{asset}`), SPA index fallback |
+| `cloud_config.rs` | Global cloud-config layer and the per-device merged seed preview |
 | `devices.rs` | Device CRUD, lifecycle transitions, platform/role assignment, pending devices |
 | `networks.rs` | DHCP networks, pools, static reservations, per-network lease listing, make-static |
 | `dhcp.rs` | Global DHCP lease queries (all leases, by MAC) |
@@ -114,6 +115,21 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | DELETE | `/ui/platforms/{id}` | Delete platform (blocked if devices assigned) |
 | GET | `/ui/platforms/{id}/devices` | List platform devices |
 
+### Cloud-Config (`cloud_config.rs`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/ui/settings/cloud-config` | Global cloud-config layer: `{cloud_config, updated_at}` (both null when unset) |
+| PUT | `/ui/settings/cloud-config` | Body `{cloud_config: string\|null}`; the key is required, `null` clears. Invalid/blank → 400 `errors.cloud_config` |
+| GET | `/ui/devices/{uuid}/cloud-config` | Preview `{supported, seed_path, user_data, meta_data}` of the seed the device gets on first boot; 400 if the device has no role |
+
+Role cloud-config is the `cloud_config` field on the role endpoints below. Create/update reject it
+(400 `errors.cloud_config`) when it is invalid or the role's OS does not declare `cloud_init`.
+An update is only checked against the OS when it changes the cloud-config or the OS
+(`validate_update_os`). The UI resends both on every save, so a role whose OS later dropped
+`cloud_init` stays editable. Provisioning refuses that role instead. See
+`@.claude/docs/cloud-init.md`.
+
 ### Roles (`roles.rs`)
 
 | Method | Path | Description |
@@ -166,6 +182,7 @@ async fn create_foo(...) -> Result<..., HttpError> {
 | `validate_u32_range(value, min, max, field_name)` | Numeric range check |
 | `validate_hostname(hostname)` | RFC 1123 **single label** — alphanum + hyphens, 1-63 chars, no leading/trailing hyphen. **Dots are rejected**: a device hostname is bare and the domain comes from its network (see `src/http/cnc/CLAUDE.md`) |
 | `validate_domain_name(domain)` | RFC 1123 DNS domain (dot-separated labels, alphanum + hyphens, 1-63 chars/label, no leading/trailing hyphen, ≤253 total) |
+| `validate_cloud_config(Option<&str>)` | Rejects blank text, then anything `cloud_init::validate` rejects (non-mapping, jinja/multipart, > 64 KiB, invalid YAML) |
 | `validate_not_blank(Option<&str>, field_name)` | Rejects an empty/whitespace-only string on a nullable field; `None` is accepted. For a `Patch<String>` pass `patch.value().map(String::as_str)` so only the `Set` case is checked |
 
 Network-specific validators (`validate_create_network_request`, `validate_update_network_request`) live in `validation.rs` and include async duplicate-checking against the database.
@@ -206,8 +223,9 @@ The same blank-string rejection applies on the **create** path (plain `Option<T>
 - `Patch::value()` returns `Some` only for `Set`, which is what validators should check.
 
 DTOs using `Patch`: `UpdateNetworkRequest` (`gateway`, `relay_agent_address`, `domain_name`),
-`UpdateRoleRequest` (`description`, `cmdline_args`, `config_template`, `firmware_mode`),
-`UpdatePlatformRequest` (`description`, `firmware_mode`).
+`UpdateRoleRequest` (`description`, `cmdline_args`, `config_template`, `cloud_config`, `firmware_mode`),
+`UpdatePlatformRequest` (`description`, `firmware_mode`), and `UpdateGlobalCloudConfig`
+(`cloud_config` — there `Keep`, an absent key, is rejected with 400 rather than ignored).
 
 `UpdateRoleRequest` previously carried a `clear_firmware_mode: bool` escape hatch; it is **removed** —
 send `"firmware_mode": null` instead.

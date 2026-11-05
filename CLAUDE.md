@@ -50,8 +50,16 @@ Devices move through lifecycle states via multi-stage provisioning. The modern p
 
 1. **partition_disks** - Configure disk layout based on Role configuration (uses Platform labels if available)
 2. **install_os** - Install operating system via PXE boot
+3. **first_boot** - Only for OSes whose OSM declares `cloud_init`: boot the installed OS from local disk and wait for it to report that cloud-init applied its cloud-config
 
 See @.claude/docs/actions-reference.md for complete action documentation and workflow details.
+
+## Cloud-Config
+Post-install configuration (root SSH keys, packages, files, commands, users) is cloud-init cloud-config rather than one-off features. Operators write a **global** layer (Settings page) and a **role** layer (`roles.cloud_config`); rack-director validates both on save and merges global-then-role (maps merge, lists append, role wins on scalars). Root SSH keys are a standard `users: [{name: root, ssh_authorized_keys: [...]}]` snippet in the global layer.
+
+An OSM opts in with `cloud_init = true`; its install template installs `cloud-init` and runs `{{cloud_init.install_script}}`, which points the installed system's NoCloud datasource at `GET /cnc/devices/{uuid}/cloud-init/` (served only while the device is at `first_boot`) and installs a first-boot reporter. The bundled OSMs' former `packages`/`postinstall` variables were migrated into role cloud-config. Requires cloud-init >= 24.4 on the target.
+
+See @.claude/docs/cloud-init.md for merge rules, the `cloud.cfg.d` drop-in, and troubleshooting.
 
 ## Firmware Mode
 Devices are classified as `bios` or `uefi` based on whether `/sys/firmware/efi` exists at boot time (x86/x86_64 only). This is stored as `device.boot_mode` and flows through:
