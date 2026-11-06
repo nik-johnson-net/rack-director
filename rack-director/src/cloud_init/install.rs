@@ -4,7 +4,7 @@
 //! rack-director, plus a systemd unit that reports the first-boot result back so the
 //! device's `first_boot` plan step can complete.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -13,8 +13,26 @@ const DROP_IN_PATH: &str = "/etc/cloud/cloud.cfg.d/99-rack-director.cfg";
 const REPORTER_PATH: &str = "/usr/local/sbin/rack-director-first-boot";
 const UNIT_NAME: &str = "rack-director-first-boot.service";
 
-/// Heredoc terminator; generated content never contains it as a whole line.
-const EOF_MARKER: &str = "RD_EOF";
+/// The outer snippet. It writes the other files through quoted heredocs, so they are copied
+/// verbatim.
+const INSTALL_SH: &str = include_str!("files/install.sh");
+
+/// Waits for cloud-init, then reports success or failure to rack-director once.
+///
+/// `cloud-init status` exits 2 ("degraded done") when cloud-init finished but logged warnings
+/// or deprecations, for example a schema warning in the cloud-config. That counts as success;
+/// the warnings go to the journal. The report names `first_boot` so it can't complete any
+/// other step.
+const REPORTER_SH: &str = include_str!("files/first-boot.sh");
+
+/// Summarizes `cloud-init status --format json` errors on one line. The reporter passes it to
+/// `python3 -c` in single quotes, so it must not contain `'`.
+const ERRORS_PY: &str = include_str!("files/cloud-init-errors.py");
+
+/// Runs the reporter in the background (`Type=simple`) so boot never waits on it, and it is
+/// deliberately not ordered after `cloud-final.service`: on some distros that unit is
+/// `After=multi-user.target`, which would form an ordering cycle. The script itself waits.
+const REPORTER_UNIT: &str = include_str!("files/first-boot.service");
 
 /// Path of a device's NoCloud seed endpoint, relative to the rack-director root URL.
 ///
@@ -30,42 +48,45 @@ pub fn seed_path(uuid: &Uuid) -> String {
 /// first-boot result so a stale report cannot complete a newer plan.
 pub fn install_script(root_url: &str, uuid: &Uuid, plan_id: Option<i64>) -> Result<String> {
     let seed_url = format!("{root_url}{}", seed_path(uuid));
-    let paths = format!("{DROP_IN_PATH} {REPORTER_PATH} /etc/systemd/system/{UNIT_NAME}");
+    let unit_path = format!("/etc/systemd/system/{UNIT_NAME}");
+    let paths = format!("{DROP_IN_PATH} {REPORTER_PATH} {unit_path}");
+    render(
+        INSTALL_SH,
+        &[
+            ("SEED_URL", &seed_url),
+            ("UNIT_NAME", UNIT_NAME),
+            ("UNIT_PATH", &unit_path),
+            ("DROP_IN_PATH", DROP_IN_PATH),
+            ("REPORTER_PATH", REPORTER_PATH),
+            ("PATHS", &paths),
+            ("DROP_IN", &drop_in(&seed_url)?),
+            ("REPORTER", &reporter_script(root_url, uuid, plan_id)?),
+            ("UNIT", REPORTER_UNIT),
+        ],
+    )
+}
 
-    Ok(format!(
-        r#"# --- rack-director: hand first boot to cloud-init (generated) ---
-# cloud-init fetches its config from {seed_url} on first boot;
-# {UNIT_NAME} then reports the result back to rack-director.
-(
-set -e
-rd_root="${{RD_TARGET:-}}"
-install -d -m 0755 "$rd_root/etc/cloud/cloud.cfg.d" "$rd_root/usr/local/sbin" "$rd_root/etc/systemd/system"
-cat > "$rd_root{DROP_IN_PATH}" <<'{EOF_MARKER}'
-{drop_in}{EOF_MARKER}
-cat > "$rd_root{REPORTER_PATH}" <<'{EOF_MARKER}'
-{reporter}{EOF_MARKER}
-chmod 0755 "$rd_root{REPORTER_PATH}"
-cat > "$rd_root/etc/systemd/system/{UNIT_NAME}" <<'{EOF_MARKER}'
-{unit}{EOF_MARKER}
-if [ -n "$rd_root" ]; then
-    systemctl --root="$rd_root" enable {UNIT_NAME}
-    if [ -x "$rd_root/usr/sbin/restorecon" ]; then chroot "$rd_root" /usr/sbin/restorecon -F {paths}; fi
-else
-    systemctl enable {UNIT_NAME}
-    if command -v restorecon >/dev/null 2>&1; then restorecon -F {paths}; fi
-fi
-)
-rd_status=$?
-if [ "$rd_status" -ne 0 ]; then
-    echo "rack-director: cloud-init setup failed (exit $rd_status)" >&2
-    exit "$rd_status"
-fi
-# --- end rack-director ---
-"#,
-        drop_in = drop_in(&seed_url)?,
-        reporter = reporter_script(root_url, uuid, plan_id),
-        unit = REPORTER_UNIT,
-    ))
+/// Fill `@@NAME@@` placeholders in one pass, so substituted values are never re-scanned.
+/// An unknown or unterminated placeholder is a bug in a bundled file.
+fn render(template: &str, vars: &[(&str, &str)]) -> Result<String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("@@") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let len = after
+            .find("@@")
+            .ok_or_else(|| anyhow!("unterminated placeholder in cloud-init template"))?;
+        let name = &after[..len];
+        let (_, value) = vars
+            .iter()
+            .find(|(key, _)| *key == name)
+            .ok_or_else(|| anyhow!("unknown placeholder @@{name}@@ in cloud-init template"))?;
+        out.push_str(value);
+        rest = &after[len + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// cloud-init system config for a rack-director provisioned host.
@@ -100,89 +121,19 @@ fn drop_in(seed_url: &str) -> Result<String> {
     ))
 }
 
-/// Wait for cloud-init, then report success or failure to rack-director once.
-///
-/// `cloud-init status` exits 2 ("degraded done") when cloud-init finished but logged warnings
-/// or deprecations, for example a schema warning in the cloud-config. That counts as success;
-/// the warnings go to the journal. The report names `first_boot` so it can't complete any
-/// other step.
-fn reporter_script(root_url: &str, uuid: &Uuid, plan_id: Option<i64>) -> String {
+fn reporter_script(root_url: &str, uuid: &Uuid, plan_id: Option<i64>) -> Result<String> {
     let plan = plan_id.map(|id| id.to_string()).unwrap_or_default();
-    format!(
-        r#"#!/bin/sh
-# Generated by rack-director: reports this machine's first boot (the cloud-init result)
-# so its provisioning plan can complete, then disables itself.
-RD_URL={url}
-RD_UUID={uuid}
-RD_PLAN_ID={plan}
-
-rd_errors() {{
-    cloud-init status --format json 2>/dev/null | python3 -c '{errors_py}' 2>/dev/null
-}}
-
-rc=1
-state=missing
-if command -v cloud-init >/dev/null 2>&1; then
-    cloud-init status --wait >/dev/null 2>&1
-    rc=$?
-    state=$(cloud-init status 2>/dev/null | sed -n 's/^status: //p')
-fi
-
-fields="\"uuid\":\"$RD_UUID\",\"action\":\"first_boot\""
-if [ -n "$RD_PLAN_ID" ]; then fields="$fields,\"plan_id\":$RD_PLAN_ID"; fi
-
-# Exit 2 is "degraded done": finished, but warnings or deprecations were logged.
-if [ "$state" = "done" ] && {{ [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; }}; then
-    endpoint=action_success
-    if [ "$rc" -eq 2 ]; then
-        echo "cloud-init finished with warnings: $(rd_errors)" >&2
-    fi
-    body="{{$fields}}"
-else
-    endpoint=action_failed
-    detail=$(rd_errors)
-    msg="cloud-init did not finish cleanly on first boot (status: ${{state:-unknown}}, exit $rc)${{detail:+: $detail}}. Run 'cloud-init status --long' on the host."
-    msg_json=$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null) \
-        || msg_json='"cloud-init did not finish cleanly on first boot"'
-    body="{{$fields,\"error_message\":$msg_json}}"
-fi
-
-if curl -sf --max-time 30 --retry 30 --retry-delay 10 --retry-all-errors \
-    -X POST "$RD_URL/cnc/$endpoint" -H 'Content-Type: application/json' -d "$body"; then
-    systemctl disable {UNIT_NAME}
-fi
-"#,
-        url = shell_quote(root_url),
-        uuid = shell_quote(&uuid.to_string()),
-        plan = shell_quote(&plan),
-        errors_py = ERRORS_PY,
+    render(
+        REPORTER_SH,
+        &[
+            ("URL", &shell_quote(root_url)),
+            ("UUID", &shell_quote(&uuid.to_string())),
+            ("PLAN_ID", &shell_quote(&plan)),
+            ("ERRORS_PY", ERRORS_PY),
+            ("UNIT_NAME", UNIT_NAME),
+        ],
     )
 }
-
-/// Summarize `cloud-init status --format json` errors on one line (Python, run by the
-/// reporter; cloud-init itself depends on python3).
-const ERRORS_PY: &str = "import json,sys
-d=json.load(sys.stdin)
-m=list(d.get(\"errors\") or [])
-for lvl,items in (d.get(\"recoverable_errors\") or {}).items():
-    m+=[\"%s: %s\" % (lvl,i) for i in items]
-print(\"; \".join(m)[:1500])";
-
-/// Runs the reporter in the background (`Type=simple`) so boot never waits on it, and it is
-/// deliberately not ordered after `cloud-final.service`: on some distros that unit is
-/// `After=multi-user.target`, which would form an ordering cycle. The script itself waits.
-const REPORTER_UNIT: &str = "[Unit]
-Description=Report first boot to rack-director
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/sbin/rack-director-first-boot
-
-[Install]
-WantedBy=multi-user.target
-";
 
 /// Quote `value` as a single POSIX shell word.
 fn shell_quote(value: &str) -> String {
@@ -192,6 +143,9 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Heredoc terminator in `files/install.sh`.
+    const EOF_MARKER: &str = "RD_EOF";
 
     fn uuid() -> Uuid {
         Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap()
@@ -275,5 +229,28 @@ mod tests {
     fn test_root_url_is_shell_quoted() {
         let script = install_script("http://a'b", &uuid(), None).unwrap();
         assert!(script.contains(r"RD_URL='http://a'\''b'"));
+    }
+
+    #[test]
+    fn test_render_fills_placeholders_once() {
+        // A value that looks like a placeholder is not expanded again.
+        let out = render("a @@X@@ b @@Y@@", &[("X", "@@Y@@"), ("Y", "y")]).unwrap();
+        assert_eq!(out, "a @@Y@@ b y");
+        assert!(render("@@NOPE@@", &[]).is_err());
+        assert!(render("@@X", &[("X", "x")]).is_err());
+    }
+
+    #[test]
+    fn test_bundled_files_are_shell_safe() {
+        for file in [INSTALL_SH, REPORTER_SH, ERRORS_PY, REPORTER_UNIT] {
+            // A CRLF checkout would break the scripts; .gitattributes pins these to LF.
+            assert!(!file.contains('\r'));
+        }
+        // ERRORS_PY is embedded in a single-quoted shell word.
+        assert!(!ERRORS_PY.contains('\''));
+        let script = script();
+        assert!(!script.contains("@@"));
+        // Each of the three heredocs ends exactly once: no written file contains the marker.
+        assert_eq!(script.lines().filter(|l| *l == EOF_MARKER).count(), 3);
     }
 }

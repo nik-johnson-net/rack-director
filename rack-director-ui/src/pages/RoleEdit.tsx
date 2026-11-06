@@ -82,7 +82,7 @@ function RoleEdit() {
         setOsmModules(modules);
 
         // Include disabled OS if it matches the current role's OS (so it stays selectable)
-        const currentKey = `${data.osm_module || ""}|${data.os_name || ""}|${data.os_release || ""}`;
+        const currentKey = `${initialData.osm_module || ""}|${initialData.os_name || ""}|${initialData.os_release || ""}`;
         const enrichedList = osList.map((os) => {
           const modName = modules.find((m) => m.id === os.module_id)?.name || "";
           const key = `${modName}|${os.name}|${os.release}`;
@@ -112,7 +112,7 @@ function RoleEdit() {
       }
     };
     fetchData();
-  }, [roleId]);
+  }, [roleId, initialData]);
 
   useEffect(() => {
     if (saveSuccess) window.scrollTo({ top: 0, behavior: "smooth" });

@@ -2,7 +2,7 @@
 
 Rack Director is the server component, written in rust. Database functionality is provided by SQLite.
 
-`src/cloud_init`: Cloud-config delivered through cloud-init — validation/parsing (`parse.rs`), global-then-role layering (`merge.rs`), the NoCloud seed (`seed.rs`) and the install-time `{{cloud_init.install_script}}` snippet (`install.rs`). See `@.claude/docs/cloud-init.md`.
+`src/cloud_init`: Cloud-config delivered through cloud-init — validation/parsing (`parse.rs`), global-then-role layering (`merge.rs`), the NoCloud seed (`seed.rs`) and the install-time `{{cloud_init.install_script}}` snippet (`install.rs`, which `include_str!`s the shell/systemd/Python files in `files/`, filled via `@@NAME@@` placeholders; `.gitattributes` keeps them LF). See `@.claude/docs/cloud-init.md`.
 `src/database`: The database initialization code & migrations
 `src/dhcp`: DHCP Service, IPAM (IP Address Management) and PXE Boot next-server information.
 `src/director`: `Device` code, main business logic, and the `Architecture` enum.
