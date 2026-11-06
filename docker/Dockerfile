@@ -10,8 +10,10 @@ RUN <<EOT
   mkdir -p $NVM_DIR
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
   source $NVM_DIR/nvm.sh
-  nvm install --lts
-  nvm alias default 'lts/*'
+  # Pinned to the major check-ui uses (.github/workflows/pull_request.yml), so a new
+  # LTS can't change the build unannounced.
+  nvm install 24
+  nvm alias default 24
 EOT
 COPY rack-director-ui /build
 RUN --mount=type=cache,target=/root/.npm <<EOT
