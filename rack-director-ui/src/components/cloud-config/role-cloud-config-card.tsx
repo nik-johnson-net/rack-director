@@ -34,7 +34,7 @@ export function RoleCloudConfigCard({ value, onChange, error, os, loading }: Rol
           <div className="px-3 py-2 border border-warn-border bg-warn-bg text-status-unprovisioned text-xs">
             {os ? `${os.name} ${os.release}` : "The selected OS"} does not support cloud-config
             (its OSM does not declare <code>cloud_init</code>).
-            {value.trim() && " Provisioning devices with this role is refused until it is cleared."}
+            {value.trim() && " Provisioning devices with this role is refused while it has any settings; clear it."}
           </div>
         )}
         <CloudConfigEditor

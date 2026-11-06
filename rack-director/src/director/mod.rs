@@ -622,10 +622,11 @@ async fn create_transition_with_plan(
 
 /// The actions for a transition's plan.
 ///
-/// Provisioning requires a Role (for the disk layout and OS), and appends `FirstBoot` when the
-/// role's OS opts into cloud-init, so the device only becomes Provisioned once its first boot
-/// has applied the cloud-config. An OS that cannot be resolved gets no `FirstBoot`; `InstallOs`
-/// reports that failure when it runs.
+/// Provisioning requires a Role (for the disk layout and OS) whose OS resolves, and appends
+/// `FirstBoot` when that OS opts into cloud-init, so the device only becomes Provisioned once
+/// its first boot has applied the cloud-config. An OS that can't be resolved is refused rather
+/// than planned without `FirstBoot`: the error may be transient, and the install script could
+/// resolve it later and install without the cloud-config.
 ///
 /// A role with a cloud-config whose OS doesn't opt into cloud-init is refused rather than
 /// provisioned without it. Roles are only checked when saved, so an OSM upload or bundled
@@ -647,13 +648,15 @@ async fn plan_actions(
         ));
     };
     let role = crate::roles::store::get(conn, role_id).await?;
-    let resolved = match role.resolve_os(conn).await {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            log::warn!("Provisioning {device_uuid}: cannot resolve role's OS: {e}");
-            return Ok(actions);
-        }
-    };
+    let resolved = role.resolve_os(conn).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot provision device {device_uuid}: role '{}' OS {} {} ({}) can't be resolved: {e:#}",
+            role.name,
+            role.os_name,
+            role.os_release,
+            role.os_arch
+        )
+    })?;
     if let Some(reason) = roles::unsupported_cloud_config(role.cloud_config.as_deref(), &resolved) {
         return Err(anyhow::anyhow!(
             "Cannot provision device {device_uuid}: role '{}' has a cloud-config, but {reason}. \
@@ -2494,6 +2497,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("has a cloud-config"), "{err}");
+        assert!(
+            director
+                .get_active_plan_for_device(&uuid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A cloud-config with no content applies nothing, so it doesn't block an OS without
+    /// cloud_init.
+    #[tokio::test]
+    async fn test_provision_allows_empty_cloud_config_without_cloud_init() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440206").unwrap();
+        provisionable_device(&mut conn, &uuid, false, Some("#cloud-config\n# todo\n")).await;
+
+        let plan = start_provision(&mut conn, &uuid).await;
+
+        use crate::plans::Action;
+        assert_eq!(
+            plan.actions,
+            vec![Action::PartitionDisks, Action::InstallOs]
+        );
+    }
+
+    /// An OS that can't be resolved is refused, not planned without first_boot: the install
+    /// script could resolve it later and install without the cloud-config.
+    #[tokio::test]
+    async fn test_provision_refused_when_os_unresolvable() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440207").unwrap();
+        provisionable_device(&mut conn, &uuid, true, Some("packages: [jq]")).await;
+        conn.execute("UPDATE roles SET os_release = 'missing'", ())
+            .await
+            .unwrap();
+
+        let mut director = Director::new(&mut conn);
+        let err = director
+            .start_lifecycle_transition(&uuid, DeviceLifecycle::Provisioned)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("can't be resolved"), "{err}");
         assert!(
             director
                 .get_active_plan_for_device(&uuid)

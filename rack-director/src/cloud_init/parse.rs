@@ -64,6 +64,17 @@ pub(crate) fn parse(text: &str) -> Result<Option<Map<String, Value>>, String> {
     }
 }
 
+/// Whether `text` would contribute anything to a merged cloud-config. Blank, comment-only and
+/// `{}` documents don't. Text that doesn't parse counts as content, so callers that refuse
+/// cloud-config err on the side of refusing; saves validate it anyway.
+pub fn has_content(text: &str) -> bool {
+    match parse(text) {
+        Ok(None) => false,
+        Ok(Some(map)) => !map.is_empty(),
+        Err(_) => true,
+    }
+}
+
 /// Check that `text` is cloud-config rack-director can store and merge.
 pub fn validate(text: &str) -> Result<(), String> {
     parse(text).map(|_| ())
@@ -107,6 +118,30 @@ mod tests {
 
     /// Unquoted `0644` and `yes` must mean what PyYAML (YAML 1.1) reads, or a merged
     /// document would silently change file modes and booleans.
+    #[test]
+    fn test_has_content() {
+        assert!(!has_content(""));
+        assert!(!has_content(
+            "#cloud-config
+# nothing yet
+"
+        ));
+        assert!(!has_content(
+            "#cloud-config
+{}
+"
+        ));
+        assert!(has_content(
+            "#cloud-config
+packages: [jq]
+"
+        ));
+        assert!(has_content(
+            "- not a mapping
+"
+        ));
+    }
+
     #[test]
     fn test_parse_follows_yaml_1_1_scalars() {
         let map = parse("package_update: yes\nwrite_files:\n  - path: /x\n    permissions: 0644\n")

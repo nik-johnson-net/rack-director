@@ -91,8 +91,10 @@ impl Role {
 ///
 /// An OS whose OSM doesn't declare `cloud_init` never runs rack-director's cloud-init setup,
 /// so a role cloud-config would be silently ignored. Role saves and provisioning both refuse it.
+/// A cloud-config with no content (blank, comments only) contributes nothing, so it is allowed.
 pub fn unsupported_cloud_config(cloud_config: Option<&str>, os: &ResolvedOs) -> Option<String> {
-    (cloud_config.is_some() && !os.os.config.cloud_init).then(|| {
+    let has_content = cloud_config.is_some_and(crate::cloud_init::has_content);
+    (has_content && !os.os.config.cloud_init).then(|| {
         format!(
             "{} {} does not support cloud-config (its OSM does not declare cloud_init)",
             os.os.name, os.os.release
