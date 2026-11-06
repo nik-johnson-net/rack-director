@@ -5,6 +5,8 @@ RUN mkdir /output && mkdir -p /build
 ENV NVM_DIR=/root/.nvm
 RUN <<EOT
   set -ex
+  # Newer Node LTS builds link libatomic, which the UBI base image lacks.
+  dnf -y install libatomic
   mkdir -p $NVM_DIR
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
   source $NVM_DIR/nvm.sh
