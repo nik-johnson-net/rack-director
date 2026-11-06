@@ -288,6 +288,8 @@ export type Role = {
   disk_layout: DiskLayout;
   cmdline_args?: string;
   config_template?: Record<string, unknown>;
+  /** Role cloud-config layer (YAML), merged over the global layer on first boot. */
+  cloud_config?: string | null;
   firmware_mode?: FirmwareMode;
   created_at?: string;
   updated_at?: string;
@@ -303,6 +305,7 @@ export type CreateRoleRequest = {
   disk_layout: DiskLayout;
   cmdline_args?: string;
   config_template?: Record<string, unknown>;
+  cloud_config?: string;
   firmware_mode?: FirmwareMode;
 }
 
@@ -316,6 +319,7 @@ export type UpdateRoleRequest = {
   disk_layout?: DiskLayout;
   cmdline_args?: string | null;
   config_template?: Record<string, unknown> | null;
+  cloud_config?: string | null;
   firmware_mode?: FirmwareMode | null;
 }
 
@@ -415,6 +419,51 @@ export async function getDeviceRole(deviceUuid: string): Promise<Role | null> {
       throw new Error('Failed to fetch device role');
     }
   });
+}
+
+// Cloud-config API
+
+export type GlobalCloudConfig = {
+  cloud_config: string | null;
+  updated_at: string | null;
+}
+
+export type DeviceCloudConfigPreview = {
+  /** Whether the device's role OS opts into cloud-init. */
+  supported: boolean;
+  /** NoCloud seed path, relative to the rack-director root URL. */
+  seed_path: string;
+  user_data: string | null;
+  meta_data: string | null;
+}
+
+export async function getGlobalCloudConfig(): Promise<GlobalCloudConfig> {
+  const response = await fetch('/ui/settings/cloud-config');
+  if (response.ok) {
+    return response.json();
+  }
+  return handleApiError(response, 'Failed to fetch global cloud-config');
+}
+
+/** Set the global cloud-config layer; `null` clears it. */
+export async function updateGlobalCloudConfig(cloudConfig: string | null): Promise<GlobalCloudConfig> {
+  const response = await fetch('/ui/settings/cloud-config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cloud_config: cloudConfig })
+  });
+  if (response.ok) {
+    return response.json();
+  }
+  return handleApiError(response, 'Failed to save global cloud-config');
+}
+
+export async function getDeviceCloudConfig(uuid: string): Promise<DeviceCloudConfigPreview> {
+  const response = await fetch(`/ui/devices/${uuid}/cloud-config`);
+  if (response.ok) {
+    return response.json();
+  }
+  return handleApiError(response, 'Failed to fetch cloud-config preview');
 }
 
 // Devices API
@@ -1139,6 +1188,8 @@ export type OsmOperatingSystem = {
 export type OsmOperatingSystemConfig = {
   name: string;
   release: string;
+  /** The OS installs cloud-init and applies rack-director cloud-config on first boot. */
+  cloud_init?: boolean;
   architectures: OsmArchitectureConfig[];
   template_variables: OsmTemplateVariable[];
 }

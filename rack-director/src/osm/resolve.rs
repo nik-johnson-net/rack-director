@@ -130,6 +130,7 @@ mod tests {
         let config = OperatingSystemConfig {
             name: "Ubuntu".to_string(),
             release: "22.04".to_string(),
+            cloud_init: false,
             architectures: vec![ArchitectureConfig {
                 arch: "x86-64".to_string(),
                 kernel: "x86-64/vmlinuz".to_string(),

@@ -374,7 +374,7 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=daemon
 2. Polls `GET /cnc/poll?uuid={UUID}` every 5 seconds when idle
 3. Dispatches received actions to the appropriate handler (`discover_hardware`, `configure_bmc`, `partition_disks`)
 4. Polls immediately after each completed action (no sleep)
-5. On `reboot_device` or `install_os`: exits cleanly; systemd handles the reboot
+5. On `reboot_device`, `install_os` or `first_boot`: exits cleanly; systemd handles the reboot
 
 **Idle mode:** rack-director also boots the daemon for registered, non-provisioned devices with **no**
 active plan. The daemon just keeps polling (`204 No Content`) until a plan arrives.
@@ -393,6 +393,10 @@ Plan advancement for these actions is handled externally by rack-director's `on_
   it serves the OS installer boot target. The OS installer calls `action_success` when the
   installation is complete. Calling `action_success` here would advance the plan **before** the
   OS is installed, causing the installer to never run.
+
+- `first_boot`: the next boot target is local disk; the installed OS's first-boot reporter (from
+  rack-director's cloud-init install script) calls `action_success`/`action_failed` once cloud-init
+  finishes. The daemon only gets out of the way.
 
 **Known limitation:** if the machine crashes after the daemon exits but before rebooting, the
 plan remains in `running` state indefinitely with no timeout. This requires manual intervention

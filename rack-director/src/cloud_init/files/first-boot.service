@@ -1,0 +1,11 @@
+[Unit]
+Description=Report first boot to rack-director
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rack-director-first-boot
+
+[Install]
+WantedBy=multi-user.target

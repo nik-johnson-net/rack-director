@@ -14,6 +14,7 @@ import {
   validateRequiredVars,
 } from "@/components/roles/os-variable-form";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
+import { RoleCloudConfigCard } from "@/components/cloud-config/role-cloud-config-card";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
 import { selectClassName } from "@/components/roles/styles";
 import { Trash2 } from "lucide-react";
@@ -53,6 +54,7 @@ function RoleEdit() {
   const [osConfigValues, setOsConfigValues] = useState<Record<string, unknown>>(
     data.config_template ?? {}
   );
+  const [cloudConfig, setCloudConfig] = useState(data.cloud_config ?? "");
   const [assignedDevices, setAssignedDevices] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +82,7 @@ function RoleEdit() {
         setOsmModules(modules);
 
         // Include disabled OS if it matches the current role's OS (so it stays selectable)
-        const currentKey = `${data.osm_module || ""}|${data.os_name || ""}|${data.os_release || ""}`;
+        const currentKey = `${initialData.osm_module || ""}|${initialData.os_name || ""}|${initialData.os_release || ""}`;
         const enrichedList = osList.map((os) => {
           const modName = modules.find((m) => m.id === os.module_id)?.name || "";
           const key = `${modName}|${os.name}|${os.release}`;
@@ -110,7 +112,7 @@ function RoleEdit() {
       }
     };
     fetchData();
-  }, [roleId]);
+  }, [roleId, initialData]);
 
   useEffect(() => {
     if (saveSuccess) window.scrollTo({ top: 0, behavior: "smooth" });
@@ -147,6 +149,7 @@ function RoleEdit() {
         disk_layout: diskLayout,
         firmware_mode: firmwareMode ?? null,
         config_template: parsedConfig ?? null,
+        cloud_config: cloudConfig.trim() ? cloudConfig : null,
       });
 
       setData({ ...data, ...updated });
@@ -407,6 +410,17 @@ function RoleEdit() {
               )}
             </div>
           </div>
+
+          <RoleCloudConfigCard
+            value={cloudConfig}
+            onChange={(value) => {
+              setCloudConfig(value);
+              clearFieldError("cloud_config");
+            }}
+            error={fieldErrors["cloud_config"]}
+            os={matchedOs}
+            loading={loadingOs}
+          />
 
           {/* Error banner */}
           {error && (

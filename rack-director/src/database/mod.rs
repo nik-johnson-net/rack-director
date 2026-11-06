@@ -75,7 +75,7 @@ pub fn text_or_null(value: Option<&str>) -> rusqlite::types::Value {
     }
 }
 
-const LATEST_VERSION: usize = 25;
+const LATEST_VERSION: usize = 26;
 const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/1.sql"),
     include_str!("migrations/2.sql"),
@@ -102,6 +102,7 @@ const MIGRATIONS: [&str; LATEST_VERSION] = [
     include_str!("migrations/23.sql"),
     include_str!("migrations/24.sql"),
     include_str!("migrations/25.sql"),
+    include_str!("migrations/26.sql"),
 ];
 
 use futures::{FutureExt, future::BoxFuture};
@@ -135,6 +136,7 @@ const POST_MIGRATION_HOOKS: [Option<PostMigrationHook>; LATEST_VERSION] = [
     None,                                                                          // Migration 23
     None,                                                                          // Migration 24
     None,                                                                          // Migration 25
+    Some(|conn| migrations::migration_26::move_os_variables_to_cloud_config(conn).boxed()), // Migration 26
 ];
 
 /// Pre-migration hooks run Rust code BEFORE the SQL for each migration version.
@@ -166,6 +168,7 @@ const PRE_MIGRATION_HOOKS: [Option<PreMigrationHook>; LATEST_VERSION] = [
     None,                                                                     // Migration 23
     None,                                                                     // Migration 24
     None,                                                                     // Migration 25
+    None,                                                                     // Migration 26
 ];
 
 /// Run all pending database migrations against the database opened by `factory`.

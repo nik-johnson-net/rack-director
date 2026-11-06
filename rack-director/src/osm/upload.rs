@@ -279,7 +279,12 @@ fn build_template_context(os_dir: &str, os_config: &OperatingSystemConfig) -> se
         "config": serde_json::Value::Object(config_vars),
         "partitions": [],
         "logical_volumes": [],
-        "install_script_url": "http://stub/install.sh"
+        "install_script_url": "http://stub/install.sh",
+        "cloud_init": {
+            "enabled": os_config.cloud_init,
+            "seed_url": "http://stub/cnc/devices/00000000-0000-0000-0000-000000000000/cloud-init/",
+            "install_script": "# stub rack-director cloud-init setup"
+        }
     })
 }
 
@@ -959,6 +964,7 @@ install_template = "install.sh"
         let config = OperatingSystemConfig {
             name: "TestOS".to_string(),
             release: "1.0".to_string(),
+            cloud_init: false,
             architectures: vec![ArchitectureConfig {
                 arch: "x86-64".to_string(),
                 kernel: "vmlinuz".to_string(),
@@ -985,5 +991,7 @@ install_template = "install.sh"
         assert_eq!(ctx["config"]["root_password"], "secret");
         assert!(ctx["partitions"].is_array());
         assert!(ctx["logical_volumes"].is_array());
+        assert_eq!(ctx["cloud_init"]["enabled"], false);
+        assert!(ctx["cloud_init"]["install_script"].is_string());
     }
 }

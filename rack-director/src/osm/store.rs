@@ -541,6 +541,7 @@ mod tests {
         OperatingSystemConfig {
             name: "Test OS".to_string(),
             release: "1.0".to_string(),
+            cloud_init: false,
             architectures: vec![ArchitectureConfig {
                 arch: "x86-64".to_string(),
                 kernel: "vmlinuz".to_string(),
@@ -937,6 +938,7 @@ mod tests {
                 zfs_pools: None,
                 wipe_all_disks: false,
             },
+            None,
             None,
             None,
             None,

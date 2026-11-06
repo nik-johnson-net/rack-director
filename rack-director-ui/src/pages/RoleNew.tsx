@@ -15,6 +15,7 @@ import {
   validateRequiredVars,
 } from "@/components/roles/os-variable-form";
 import { useFieldErrors } from "@/hooks/useFieldErrors";
+import { RoleCloudConfigCard } from "@/components/cloud-config/role-cloud-config-card";
 import { selectClassName } from "@/components/roles/styles";
 import {
   createRole,
@@ -73,6 +74,7 @@ function RoleNew() {
   );
   const [firmwareMode, setFirmwareMode] = useState<FirmwareMode | undefined>(undefined);
   const [osConfigValues, setOsConfigValues] = useState<Record<string, unknown>>({});
+  const [cloudConfig, setCloudConfig] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { fieldErrors, setErrors, clearAllErrors, clearFieldError } = useFieldErrors();
@@ -153,6 +155,7 @@ function RoleNew() {
         disk_layout: diskLayout,
         firmware_mode: firmwareMode || undefined,
         config_template: parsedConfig,
+        cloud_config: cloudConfig.trim() ? cloudConfig : undefined,
       });
 
       navigate(`/roles/${role.id}`);
@@ -375,6 +378,17 @@ function RoleNew() {
               )}
             </div>
           </div>
+
+          <RoleCloudConfigCard
+            value={cloudConfig}
+            onChange={(value) => {
+              setCloudConfig(value);
+              clearFieldError("cloud_config");
+            }}
+            error={fieldErrors["cloud_config"]}
+            os={matchedOs}
+            loading={loadingOs}
+          />
 
           {/* Error banner */}
           {error && (

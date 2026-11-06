@@ -8,6 +8,7 @@ use crate::plans::actions::BootTarget;
 use crate::{platforms, roles};
 
 mod plan_progress;
+pub use plan_progress::ReportedStep;
 pub(crate) mod power;
 mod power_ops;
 pub(crate) mod store;
@@ -607,20 +608,7 @@ async fn create_transition_with_plan(
     let transition_type = LifecycleManager::get_transition_type(&current_lifecycle, &to_state)
         .ok_or_else(|| anyhow::anyhow!("Cannot determine transition type"))?;
 
-    // Both PartitionDisks and InstallOs require a Role for disk layout and OS configuration.
-    if transition_type == TransitionType::Provision
-        && store::get_device(conn, device_uuid)
-            .await?
-            .role_id
-            .is_none()
-    {
-        return Err(anyhow::anyhow!(
-            "Cannot provision device {}: no Role is assigned. Assign a Role before reprovisioning.",
-            device_uuid
-        ));
-    }
-
-    let actions = LifecycleManager::get_plan_stub_for_transition(&transition_type);
+    let actions = plan_actions(conn, device_uuid, &transition_type).await?;
     let mut plan = Plan::new(*device_uuid, actions);
     let plan_id = crate::plans::store::create_plan(conn, &plan).await?;
     plan.id = Some(plan_id);
@@ -628,6 +616,63 @@ async fn create_transition_with_plan(
         LifecycleTransition::new(*device_uuid, current_lifecycle, to_state, Some(plan_id));
     let transition_id = crate::lifecycle::store::create_transition(conn, &transition).await?;
     Ok((transition_id, plan))
+}
+
+/// The actions for a transition's plan.
+///
+/// Provisioning requires a Role (for the disk layout and OS), and appends `FirstBoot` when the
+/// role's OS opts into cloud-init, so the device only becomes Provisioned once its first boot
+/// has applied the cloud-config. An OS that cannot be resolved gets no `FirstBoot`; `InstallOs`
+/// reports that failure when it runs.
+///
+/// A role with a cloud-config whose OS doesn't opt into cloud-init is refused rather than
+/// provisioned without it. Roles are only checked when saved, so an OSM upload or bundled
+/// sync that drops `cloud_init` can leave such a role behind.
+async fn plan_actions(
+    conn: &Connection,
+    device_uuid: &Uuid,
+    transition_type: &TransitionType,
+) -> anyhow::Result<Vec<crate::plans::Action>> {
+    let mut actions = LifecycleManager::get_plan_stub_for_transition(transition_type);
+    if *transition_type != TransitionType::Provision {
+        return Ok(actions);
+    }
+
+    let Some(role_id) = store::get_device(conn, device_uuid).await?.role_id else {
+        return Err(anyhow::anyhow!(
+            "Cannot provision device {}: no Role is assigned. Assign a Role before reprovisioning.",
+            device_uuid
+        ));
+    };
+    let role = crate::roles::store::get(conn, role_id).await?;
+    let resolved = match crate::osm::resolve_os(
+        conn,
+        &role.osm_module,
+        &role.os_name,
+        &role.os_release,
+        &role.os_arch,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            log::warn!("Provisioning {device_uuid}: cannot resolve role's OS: {e}");
+            return Ok(actions);
+        }
+    };
+    if resolved.os.config.cloud_init {
+        actions.push(crate::plans::Action::FirstBoot);
+    } else if role.cloud_config.is_some() {
+        return Err(anyhow::anyhow!(
+            "Cannot provision device {device_uuid}: role '{}' has a cloud-config, but {} {} does \
+             not support cloud-init (its OSM does not declare cloud_init). Clear the role's \
+             cloud-config or choose an OS that supports it.",
+            role.name,
+            resolved.os.name,
+            resolved.os.release
+        ));
+    }
+    Ok(actions)
 }
 
 #[cfg(test)]
@@ -810,7 +855,7 @@ mod tests {
 
         // Simulate discovery action completion
         director
-            .mark_action_success(&test_uuid, None)
+            .mark_action_success(&test_uuid, ReportedStep::default())
             .await
             .unwrap();
 
@@ -831,7 +876,7 @@ mod tests {
 
         // Simulate BMC configuration completion
         director
-            .mark_action_success(&test_uuid, None)
+            .mark_action_success(&test_uuid, ReportedStep::default())
             .await
             .unwrap();
 
@@ -1715,6 +1760,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1789,6 +1835,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1858,6 +1905,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1902,6 +1950,7 @@ mod tests {
             "24.04",
             "x86-64",
             &layout,
+            None,
             None,
             None,
             None,
@@ -1955,6 +2004,7 @@ mod tests {
             None,
             None,
             Some(common::FirmwareMode::Uefi),
+            None,
         )
         .await
         .unwrap();
@@ -2010,6 +2060,7 @@ mod tests {
             None,
             None,
             Some(common::FirmwareMode::Uefi),
+            None,
         )
         .await
         .unwrap();
@@ -2053,6 +2104,7 @@ mod tests {
             None,
             None,
             Some(common::FirmwareMode::Uefi),
+            None,
         )
         .await
         .unwrap();
@@ -2403,5 +2455,258 @@ mod tests {
             "Expected 'no Role is assigned' in error, got: {}",
             err_msg
         );
+    }
+
+    /// Register an Unprovisioned device whose role uses an OS that does (or does not) opt
+    /// into cloud-init.
+    async fn provisionable_device(conn: &mut database::Connection, uuid: &Uuid, cloud_init: bool) {
+        let module = crate::osm::store::create_module(
+            conn,
+            "Default",
+            "1.0.0",
+            "Test",
+            "Test",
+            "bundled",
+            "osm/Default/1.0.0/",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let config = osm::os_config::OperatingSystemConfig {
+            name: "AlmaLinux".to_string(),
+            release: "10".to_string(),
+            cloud_init,
+            architectures: vec![osm::os_config::ArchitectureConfig {
+                arch: "x86-64".to_string(),
+                kernel: "vmlinuz".to_string(),
+                initramfs: "initrd.img".to_string(),
+                modules: vec![],
+                cmdline: String::new(),
+                install_template: "install.ks".to_string(),
+            }],
+            template_variables: vec![],
+        };
+        crate::osm::store::create_operating_system(
+            conn,
+            module.id,
+            "almalinux-10",
+            "AlmaLinux",
+            "10",
+            &config,
+        )
+        .await
+        .unwrap();
+        let empty_layout = common::disk_layout::DiskLayout {
+            disks: vec![],
+            volume_groups: None,
+            zfs_pools: None,
+            wipe_all_disks: false,
+        };
+        let role = crate::roles::store::create(
+            conn,
+            "role",
+            None,
+            "Default",
+            "AlmaLinux",
+            "10",
+            "x86-64",
+            &empty_layout,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        Director::new(conn)
+            .register_device(uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        crate::lifecycle::store::update_device_lifecycle(
+            conn,
+            uuid,
+            DeviceLifecycle::Unprovisioned,
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "UPDATE devices SET role_id = ?1 WHERE uuid = ?2",
+            (role.id.unwrap(), *uuid),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Start the Provision transition and return its plan.
+    async fn start_provision(conn: &mut database::Connection, uuid: &Uuid) -> Plan {
+        let mut director = Director::new(conn);
+        director
+            .start_lifecycle_transition(uuid, DeviceLifecycle::Provisioned)
+            .await
+            .unwrap();
+        director
+            .get_active_plan_for_device(uuid)
+            .await
+            .unwrap()
+            .expect("provision plan should be active")
+    }
+
+    #[tokio::test]
+    async fn test_provision_plan_adds_first_boot_for_cloud_init_os() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440200").unwrap();
+        provisionable_device(&mut conn, &uuid, true).await;
+
+        let plan = start_provision(&mut conn, &uuid).await;
+
+        use crate::plans::Action;
+        assert_eq!(
+            plan.actions,
+            vec![Action::PartitionDisks, Action::InstallOs, Action::FirstBoot]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_provision_plan_without_cloud_init_has_no_first_boot() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440201").unwrap();
+        provisionable_device(&mut conn, &uuid, false).await;
+
+        let plan = start_provision(&mut conn, &uuid).await;
+
+        use crate::plans::Action;
+        assert_eq!(
+            plan.actions,
+            vec![Action::PartitionDisks, Action::InstallOs]
+        );
+    }
+
+    /// A role left with a cloud-config after its OS dropped cloud_init is refused, not
+    /// provisioned without it, and nothing is left behind.
+    #[tokio::test]
+    async fn test_provision_refused_when_role_cloud_config_unsupported() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440205").unwrap();
+        provisionable_device(&mut conn, &uuid, false).await;
+        conn.execute("UPDATE roles SET cloud_config = 'packages: [jq]'", ())
+            .await
+            .unwrap();
+
+        let mut director = Director::new(&mut conn);
+        let err = director
+            .start_lifecycle_transition(&uuid, DeviceLifecycle::Provisioned)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("has a cloud-config"), "{err}");
+        assert!(
+            director
+                .get_active_plan_for_device(&uuid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Drive a cloud-init provision through the installer's success, check the device then
+    /// boots local disk without being Provisioned yet, and apply the first-boot report.
+    /// Returns the resulting lifecycle.
+    async fn report_first_boot(
+        conn: &mut database::Connection,
+        uuid: &Uuid,
+        success: bool,
+    ) -> Option<DeviceLifecycle> {
+        provisionable_device(conn, uuid, true).await;
+        let plan = start_provision(conn, uuid).await;
+        let mut director = Director::new(conn);
+        director
+            .mark_action_success(uuid, ReportedStep::plan(plan.id))
+            .await
+            .unwrap(); // partition_disks
+        director
+            .mark_action_success(uuid, ReportedStep::plan(plan.id))
+            .await
+            .unwrap(); // install_os
+
+        let lifecycle = crate::lifecycle::store::get_device_lifecycle(conn, uuid)
+            .await
+            .unwrap();
+        assert_eq!(lifecycle, Some(DeviceLifecycle::Unprovisioned));
+        let mut director = Director::new(conn);
+        let boot_target = director.next_boot_target(uuid, 600).await.unwrap();
+        assert!(matches!(boot_target, BootTarget::LocalDisk));
+
+        if success {
+            director
+                .mark_action_success(uuid, ReportedStep::plan(plan.id))
+                .await
+                .unwrap();
+        } else {
+            director
+                .mark_action_failed(uuid, "cloud-init failed", ReportedStep::plan(plan.id))
+                .await
+                .unwrap();
+        }
+        crate::lifecycle::store::get_device_lifecycle(conn, uuid)
+            .await
+            .unwrap()
+    }
+
+    /// Only the first-boot report, not the installer's, completes provisioning.
+    #[tokio::test]
+    async fn test_first_boot_success_completes_provisioning() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440202").unwrap();
+        let lifecycle = report_first_boot(&mut conn, &uuid, true).await;
+        assert_eq!(lifecycle, Some(DeviceLifecycle::Provisioned));
+    }
+
+    #[tokio::test]
+    async fn test_first_boot_failure_breaks_device() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440203").unwrap();
+        let lifecycle = report_first_boot(&mut conn, &uuid, false).await;
+        assert_eq!(lifecycle, Some(DeviceLifecycle::Broken));
+    }
+
+    /// A retried installer report names `install_os`, so it can't complete `first_boot`, and a
+    /// late installer failure can't fail it either.
+    #[tokio::test]
+    async fn test_report_for_earlier_action_is_ignored() {
+        use crate::plans::Action;
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440204").unwrap();
+        provisionable_device(&mut conn, &uuid, true).await;
+        let plan = start_provision(&mut conn, &uuid).await;
+        let install_os = ReportedStep {
+            plan_id: None,
+            action: Some(Action::InstallOs),
+        };
+
+        let mut director = Director::new(&mut conn);
+        director
+            .mark_action_success(&uuid, ReportedStep::plan(plan.id))
+            .await
+            .unwrap(); // partition_disks
+        director
+            .mark_action_success(&uuid, install_os.clone())
+            .await
+            .unwrap();
+        director
+            .mark_action_success(&uuid, install_os.clone())
+            .await
+            .unwrap(); // retried duplicate
+        director
+            .mark_action_failed(&uuid, "Installation failed.", install_os)
+            .await
+            .unwrap(); // late %onerror
+
+        let plan = director
+            .get_active_plan_for_device(&uuid)
+            .await
+            .unwrap()
+            .expect("plan should still be active");
+        assert_eq!(plan.get_current_action(), Some(&Action::FirstBoot));
     }
 }

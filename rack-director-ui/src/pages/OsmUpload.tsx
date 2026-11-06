@@ -75,11 +75,14 @@ function OsmUpload() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const uploadId = upload?.id;
+  const uploadStatus = upload?.status;
+
   // Poll for upload status when we have an upload in progress
   useEffect(() => {
-    if (!upload) return;
+    if (uploadId === undefined) return;
 
-    const isTerminal = upload.status === "complete" || upload.status === "failed";
+    const isTerminal = uploadStatus === "complete" || uploadStatus === "failed";
     if (isTerminal) {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
@@ -91,7 +94,7 @@ function OsmUpload() {
     // Start polling
     intervalRef.current = setInterval(async () => {
       try {
-        const updated = await getOsmUpload(upload.id);
+        const updated = await getOsmUpload(uploadId);
         setUpload(updated);
         if (updated.status === "complete" || updated.status === "failed") {
           if (intervalRef.current) {
@@ -110,7 +113,7 @@ function OsmUpload() {
         intervalRef.current = null;
       }
     };
-  }, [upload?.id, upload?.status]);
+  }, [uploadId, uploadStatus]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0] ?? null;

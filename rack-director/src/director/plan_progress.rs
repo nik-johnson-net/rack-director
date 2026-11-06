@@ -13,7 +13,29 @@ use crate::database::Connection;
 use crate::lifecycle::store as lifecycle_store;
 use crate::lifecycle::{DeviceLifecycle, LifecycleTransition};
 use crate::plans::store as plan_store;
-use crate::plans::{Plan, PlanStatus};
+use crate::plans::{Action, Plan, PlanStatus};
+
+/// The plan step an agent report claims to finish. It is checked against the active plan so a
+/// stale or duplicated report is ignored. A field left unset isn't checked: old agents send
+/// neither, and the agent sends only `plan_id`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ReportedStep {
+    /// The plan the reporter was working on.
+    pub plan_id: Option<i64>,
+    /// The action being reported. Without it, a retried `install_os` report that arrives after
+    /// the plan moved on to `first_boot` would complete `first_boot` instead.
+    pub action: Option<Action>,
+}
+
+impl ReportedStep {
+    /// A report scoped to a plan only, as the agent sends it.
+    pub fn plan(plan_id: Option<i64>) -> Self {
+        Self {
+            plan_id,
+            action: None,
+        }
+    }
+}
 
 impl<'a> super::Director<'a> {
     /// Handle device boot event
@@ -59,17 +81,16 @@ impl<'a> super::Director<'a> {
 
     /// Mark the current action for a device as successful, advancing the plan.
     ///
-    /// If `reported_plan_id` is `Some`, it is verified against the active plan's
-    /// ID. A mismatch means the report is stale (sent by an agent that was
-    /// running a since-cancelled plan), and the call is silently ignored so that
-    /// the new plan is not corrupted. When `reported_plan_id` is `None` (old
-    /// agent versions), the report is applied unconditionally.
+    /// The report is ignored as stale if `reported` names a different plan than the active one
+    /// (an agent still running a since-cancelled plan) or a different action than the current
+    /// one (a retried or late report for an earlier step). Unset fields aren't checked, so a
+    /// report from an old agent that names neither is applied unconditionally.
     pub async fn mark_action_success(
         &mut self,
         device_uuid: &Uuid,
-        reported_plan_id: Option<i64>,
+        reported: ReportedStep,
     ) -> anyhow::Result<()> {
-        self.apply_agent_report(device_uuid, reported_plan_id, "action_success", |plan| {
+        self.apply_agent_report(device_uuid, &reported, "action_success", |plan| {
             if plan.status == PlanStatus::Pending {
                 plan.start();
             }
@@ -80,14 +101,14 @@ impl<'a> super::Director<'a> {
 
     /// Mark the current action for a device as failed, failing the plan.
     ///
-    /// `reported_plan_id` is checked the same way as in [`Self::mark_action_success`].
+    /// `reported` is checked the same way as in [`Self::mark_action_success`].
     pub async fn mark_action_failed(
         &mut self,
         device_uuid: &Uuid,
         error_message: &str,
-        reported_plan_id: Option<i64>,
+        reported: ReportedStep,
     ) -> anyhow::Result<()> {
-        self.apply_agent_report(device_uuid, reported_plan_id, "action_failed", |plan| {
+        self.apply_agent_report(device_uuid, &reported, "action_failed", |plan| {
             plan.mark_action_failed(error_message.to_string());
         })
         .await
@@ -98,13 +119,13 @@ impl<'a> super::Director<'a> {
     async fn apply_agent_report(
         &mut self,
         device_uuid: &Uuid,
-        reported_plan_id: Option<i64>,
+        reported: &ReportedStep,
         kind: &str,
         mut report: impl FnMut(&mut Plan),
     ) -> anyhow::Result<()> {
         let found = self
             .update_active_plan(device_uuid, |plan| {
-                if is_stale_report(device_uuid, plan, reported_plan_id, kind) {
+                if is_stale_report(device_uuid, plan, reported, kind) {
                     return false;
                 }
                 report(plan);
@@ -277,21 +298,28 @@ async fn get_transition_plan(
     }
 }
 
-/// True if the agent reported a plan ID that doesn't match the active plan.
-fn is_stale_report(uuid: &Uuid, plan: &Plan, reported_plan_id: Option<i64>, kind: &str) -> bool {
-    match reported_plan_id {
-        Some(rid) if plan.id != Some(rid) => {
-            log::warn!(
-                "{} for device {} reported plan_id={} but active plan is {:?} — ignoring stale report",
-                kind,
-                uuid,
-                rid,
-                plan.id
-            );
-            true
-        }
-        _ => false,
+/// True if the report names a plan or action other than the active plan's current step.
+fn is_stale_report(uuid: &Uuid, plan: &Plan, reported: &ReportedStep, kind: &str) -> bool {
+    if let Some(rid) = reported.plan_id
+        && plan.id != Some(rid)
+    {
+        log::warn!(
+            "{kind} for device {uuid} reported plan_id={rid} but active plan is {:?} — ignoring stale report",
+            plan.id
+        );
+        return true;
     }
+    if let Some(action) = &reported.action
+        && plan.get_current_action() != Some(action)
+    {
+        log::warn!(
+            "{kind} for device {uuid} reported action {action:?} but plan {:?} is at {:?} — ignoring stale report",
+            plan.id,
+            plan.get_current_action()
+        );
+        return true;
+    }
+    false
 }
 
 /// The transition outcome for a finished plan as `(success, error_message)`, or `None`

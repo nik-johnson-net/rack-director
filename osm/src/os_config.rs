@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 pub struct OperatingSystemConfig {
     pub name: String,
     pub release: String,
+    /// The install template installs cloud-init and runs rack-director's
+    /// `{{cloud_init.install_script}}`, so the installed system fetches its cloud-config
+    /// from rack-director on first boot and reports back. Provisioning then waits for that
+    /// first boot. Declared before the table arrays so TOML serialization stays valid.
+    #[serde(default)]
+    pub cloud_init: bool,
     pub architectures: Vec<ArchitectureConfig>,
     #[serde(default)]
     pub template_variables: Vec<TemplateVariable>,
@@ -101,6 +107,24 @@ install_template = "install.sh"
         assert!(config.architectures[0].modules.is_empty());
         assert_eq!(config.architectures[0].cmdline, "");
         assert!(config.template_variables.is_empty());
+        assert!(!config.cloud_init);
+    }
+
+    #[test]
+    fn test_deserialize_cloud_init_flag() {
+        let toml_str = r#"
+name = "AlmaLinux"
+release = "10"
+cloud_init = true
+
+[[architectures]]
+arch = "x86-64"
+kernel = "vmlinuz"
+initramfs = "initrd.img"
+install_template = "install.ks"
+"#;
+        let config: OperatingSystemConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.cloud_init);
     }
 
     #[test]
@@ -199,6 +223,7 @@ description = "Max connections"
         let config = OperatingSystemConfig {
             name: "Test OS".to_string(),
             release: "3.0".to_string(),
+            cloud_init: true,
             architectures: vec![ArchitectureConfig {
                 arch: "x86-64".to_string(),
                 kernel: "vmlinuz".to_string(),

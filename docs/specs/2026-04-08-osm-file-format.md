@@ -68,6 +68,7 @@ Each OS subdirectory listed in the manifest must contain an `OperatingSystem.tom
 |-------|------|----------|-------------|
 | `name` | String | Yes | Human-readable OS name (e.g., `"Ubuntu"`). |
 | `release` | String | Yes | OS version or release identifier (e.g., `"22.04"`). |
+| `cloud_init` | Boolean | No | Defaults to `false`. When `true`, the install template installs cloud-init and runs `{{cloud_init.install_script}}` so the installed OS fetches its cloud-config from rack-director on first boot; provisioning then waits for that first boot (`first_boot` plan step). Must appear before the `[[architectures]]` tables. |
 | `architectures` | Array of ArchitectureConfig | Yes | One or more architecture-specific configurations. |
 | `template_variables` | Array of TemplateVariable | No | User-configurable variables for install templates. Defaults to empty. |
 
@@ -130,6 +131,20 @@ type = "boolean"
 description = "Enable SSH daemon on first boot"
 default = true
 ```
+
+### Cloud-init
+
+An OS that sets `cloud_init = true` must, in its install template:
+
+1. install the `cloud-init` package (cloud-init >= 24.4), and
+2. run `{{cloud_init.install_script}}` from a post-install hook before reporting `install_os`
+   success, with `RD_TARGET` set to the installed root (empty when chrooted), and
+3. send `"action":"install_os"` in its `/cnc/action_success` and `/cnc/action_failed` reports, so a
+   retried installer report can't complete or fail the following `first_boot` step.
+
+Template variables `cloud_init.enabled`, `cloud_init.install_script` and `cloud_init.seed_url` are
+available to every install template. They are populated when the device's provisioning plan has a
+`first_boot` step. See `.claude/docs/cloud-init.md`.
 
 ### Minimal Example
 

@@ -1,5 +1,7 @@
 name = "AlmaLinux"
 release = "10"
+# Install cloud-init and fetch first-boot cloud-config from rack-director.
+cloud_init = true
 
 [[architectures]]
 arch = "x86-64"
@@ -9,21 +11,10 @@ install_template = "almalinux-x86_64.ks"
 cmdline = "inst.ks={{install_script_url}} inst.nomux"
 
 [[template_variables]]
-name = "packages"
-type = "list"
-description = "Additional packages to install"
-
-[[template_variables]]
 name = "rootpw"
 type = "string"
 required = true
 description = "Encrypted password to use for root"
-
-[[template_variables]]
-name = "postinstall"
-type = "string"
-default = ""
-description = "Post install script to run"
 
 [[template_variables]]
 name = "halt"

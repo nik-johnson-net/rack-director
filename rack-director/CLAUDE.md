@@ -2,6 +2,7 @@
 
 Rack Director is the server component, written in rust. Database functionality is provided by SQLite.
 
+`src/cloud_init`: Cloud-config delivered through cloud-init — validation/parsing (`parse.rs`), global-then-role layering (`merge.rs`), the NoCloud seed (`seed.rs`) and the install-time `{{cloud_init.install_script}}` snippet (`install.rs`, which `include_str!`s the shell/systemd/Python files in `files/`, filled via `@@NAME@@` placeholders; `.gitattributes` keeps them LF). See `@.claude/docs/cloud-init.md`.
 `src/database`: The database initialization code & migrations
 `src/dhcp`: DHCP Service, IPAM (IP Address Management) and PXE Boot next-server information.
 `src/director`: `Device` code, main business logic, and the `Architecture` enum.
@@ -11,6 +12,7 @@ Rack Director is the server component, written in rust. Database functionality i
 `src/patch.rs`: `Patch<T>` — the tri-state (keep / clear / set) field type used by update request DTOs so nullable columns can be cleared over the wire. See "Partial Updates" in `src/http/ui/CLAUDE.md`.
 `src/plans`: `Plan` code - concrete `Actions` to move a `Device` from one `Lifecycle` state to another.
 `src/roles`: `Role` code - configuration for a group of `Devices`. Roles reference OS via composite OSM fields (`osm_module`, `os_name`, `os_release`, `os_arch`).
+`src/settings`: Site-wide key/value settings (`settings` table); holds the global cloud-config layer.
 `src/storage`:  Interfaces for the storage layer. Used to store uploaded images for `Operating Systems`.
 `src/templates`: Location for storing templates and rendering functions that are needed by other modules.
 `tests/`: Integration tests that provide end-to-end testing.
@@ -140,9 +142,9 @@ A table called plans is used to store a list of actions, their parameters, and t
 
 ## Overview
 
-Rack Director uses SQLite with 25 migrations. Schema is versioned and migrations are applied sequentially on startup.
+Rack Director uses SQLite with 26 migrations. Schema is versioned and migrations are applied sequentially on startup.
 
-**Current Version:** 25 (as of 2026-07)
+**Current Version:** 26 (as of 2026-11)
 
 **Migration Location:** `src/database/migrations/*.sql`
 
@@ -228,13 +230,26 @@ Device role definitions (groups of devices with same configuration).
 | `disk_layout` | TEXT | JSON disk partition layout |
 | `cmdline_args` | TEXT | Role-specific kernel cmdline args |
 | `config_template` | TEXT | JSON additional configuration |
+| `cloud_config` | TEXT | Role cloud-config layer (YAML text); only allowed when the OS's OSM declares `cloud_init` |
 | `firmware_mode` | TEXT | Optional firmware constraint (bios/uefi) |
 | `created_at` | DATETIME | Creation time |
 | `updated_at` | DATETIME | Last update time |
 
 **Indexes:** `name`, `(osm_module, os_name, os_release)`
 
-**Migration:** v5, v10 (cmdline_args), v19 (OSM composite reference, dropped os_id)
+**Migration:** v5, v10 (cmdline_args), v19 (OSM composite reference, dropped os_id), v26 (cloud_config)
+
+### settings
+
+Site-wide key/value settings.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `key` | TEXT | Primary key. `cloud_config` = global cloud-config layer (YAML text) |
+| `value` | TEXT | Setting value |
+| `updated_at` | DATETIME | Last change |
+
+**Migration:** v26
 
 ## DHCP Tables
 
@@ -362,6 +377,16 @@ pending_devices
 ```
 
 ## Recent Schema Changes
+
+### Migration v26 (2026-11)
+- Added nullable `roles.cloud_config` (role cloud-config layer, YAML text) and the `settings` key/value
+  table (key `cloud_config` = global layer). Plain `ADD COLUMN` / `CREATE TABLE`.
+- Post-migration hook `migration_26::move_os_variables_to_cloud_config`: for roles on the `Default`
+  module's AlmaLinux/CentOS OSes, moves the retired `packages`/`postinstall` OS variables out of
+  `config_template` into `cloud_config` (`packages:` / `runcmd:`). Kickstart exclusions (`-pkg`) are
+  dropped with a warning; roles on uploaded OSMs are untouched. Migrations run before the bundled-OSM
+  sync, so the hook only acts when `Default` will be the bundled module afterwards (source `bundled`,
+  or an uploaded `Default` older than 0.2.0 that the sync replaces). See `@.claude/docs/cloud-init.md`.
 
 ### Migration v25 (2026-07)
 - Added nullable `dhcp_networks.domain_name` column via a plain `ALTER TABLE ... ADD COLUMN` (no table

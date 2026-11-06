@@ -28,6 +28,15 @@ pub fn validate_not_blank(value: Option<&str>, field_name: &str) -> Option<Strin
         .map(|_| format!("{} cannot be empty; send null to clear.", field_name))
 }
 
+/// Validate an optional cloud-config document (role or global layer).
+///
+/// Blank text is rejected like any nullable field; otherwise the text must be plain
+/// cloud-config that rack-director can merge (see `crate::cloud_init::validate`).
+pub fn validate_cloud_config(value: Option<&str>) -> Option<String> {
+    validate_not_blank(value, "Cloud-config")
+        .or_else(|| value.and_then(|v| crate::cloud_init::validate(v).err()))
+}
+
 /// Validate string length constraints
 pub fn validate_string_length(value: &str, max_len: usize, field_name: &str) -> Option<String> {
     if value.len() > max_len {

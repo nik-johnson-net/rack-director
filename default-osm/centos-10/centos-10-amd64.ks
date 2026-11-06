@@ -49,13 +49,14 @@ bootloader --boot-drive={{partitions.[0].disk_name}}
 
 %packages
 @^minimal-environment
-{{#each config.packages}}
-{{this}}
-{{/each}}
+cloud-init
 %end
 
-%post --erroronfail --log=/var/log/postinstall.log
-{{config.postinstall}}
+# Hand the first boot to cloud-init: the installed system fetches its cloud-config
+# (role + global layers) from rack-director, then reports back to finish provisioning.
+%post --erroronfail --log=/root/rack-director-cloud-init.log
+RD_TARGET=
+{{cloud_init.install_script}}
 %end
 
 %post --erroronfail --nochroot --log=/mnt/sysroot/var/log/rack-director-post.log
@@ -67,7 +68,7 @@ if [ -n "$UUID" ]; then
     /usr/bin/curl -sf --max-time 30 --retry 5 --retry-delay 5 \
         -X POST {{rack_director_url}}/cnc/action_success \
         -H "Content-Type: application/json" \
-        -d "{\"uuid\":\"${UUID}\"}"
+        -d "{\"uuid\":\"${UUID}\",\"action\":\"install_os\"}"
     echo "rack-director post: action_success status=$?"
 else
     echo "rack-director post: WARNING: could not read SMBIOS UUID; skipping action_success"
@@ -84,7 +85,7 @@ if [ -n "$UUID" ]; then
     /usr/bin/curl -sf --max-time 30 --retry 5 --retry-delay 5 \
         -X POST {{rack_director_url}}/cnc/action_failed \
         -H "Content-Type: application/json" \
-        -d "{\"uuid\":\"${UUID}\", \"error_message\": \"Installation failed.\"}"
+        -d "{\"uuid\":\"${UUID}\", \"action\": \"install_os\", \"error_message\": \"Installation failed.\"}"
     echo "rack-director onerror: action_failed status=$?"
 else
     echo "rack-director onerror: WARNING: could not read SMBIOS UUID; skipping action_failed"

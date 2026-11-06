@@ -19,10 +19,12 @@ pub struct UpdateRoleParams<'a> {
     pub disk_layout: Option<&'a DiskLayout>,
     pub cmdline_args: Option<Option<&'a str>>,
     pub config_template: Option<Option<&'a serde_json::Value>>,
+    pub cloud_config: Option<Option<&'a str>>,
     pub firmware_mode: Option<Option<common::FirmwareMode>>,
 }
 
 /// Create a new role.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     conn: &Connection,
     name: &str,
@@ -35,6 +37,7 @@ pub async fn create(
     cmdline_args: Option<&str>,
     config_template: Option<&serde_json::Value>,
     firmware_mode: Option<common::FirmwareMode>,
+    cloud_config: Option<&str>,
 ) -> Result<Role> {
     let now = Utc::now();
     let disk_layout_json = serde_json::to_string(disk_layout)?;
@@ -42,8 +45,8 @@ pub async fn create(
     let firmware_mode_val = firmware_mode.map(|m| m.as_db_str());
 
     conn.execute(
-        "INSERT INTO roles (name, description, osm_module, os_name, os_release, os_arch, disk_layout, cmdline_args, config_template, firmware_mode, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO roles (name, description, osm_module, os_name, os_release, os_arch, disk_layout, cmdline_args, config_template, firmware_mode, created_at, updated_at, cloud_config)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         (
             name.to_string(),
             description.map(|s| s.to_string()),
@@ -57,6 +60,7 @@ pub async fn create(
             firmware_mode_val,
             now,
             now,
+            cloud_config.map(|s| s.to_string()),
         ),
     )
     .await
@@ -75,6 +79,7 @@ pub async fn create(
         disk_layout: disk_layout.clone(),
         cmdline_args: cmdline_args.map(|s| s.to_string()),
         config_template: config_template.cloned(),
+        cloud_config: cloud_config.map(|s| s.to_string()),
         firmware_mode,
         created_at: Some(now),
         updated_at: Some(now),
@@ -86,7 +91,8 @@ pub async fn get(conn: &Connection, id: i64) -> Result<Role> {
     let role = conn
         .query_one(
             "SELECT id, name, description, osm_module, os_name, os_release, os_arch,
-                    disk_layout, cmdline_args, config_template, firmware_mode, created_at, updated_at
+                    disk_layout, cmdline_args, config_template, cloud_config, firmware_mode,
+                    created_at, updated_at
              FROM roles WHERE id = ?1",
             (id,),
             Role::from_row,
@@ -102,7 +108,8 @@ pub async fn list(conn: &Connection) -> Result<Vec<Role>> {
     let roles = conn
         .query(
             "SELECT id, name, description, osm_module, os_name, os_release, os_arch,
-                    disk_layout, cmdline_args, config_template, firmware_mode, created_at, updated_at
+                    disk_layout, cmdline_args, config_template, cloud_config, firmware_mode,
+                    created_at, updated_at
              FROM roles ORDER BY name",
             (),
             Role::from_row,
@@ -120,50 +127,59 @@ fn build_role_updates(
     let mut updates = Vec::new();
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
 
-    if let Some(name) = params.name {
-        updates.push("name = ?");
-        values.push(rusqlite::types::Value::Text(name.to_string()));
-    }
-    if let Some(description) = params.description {
-        updates.push("description = ?");
-        values.push(text_or_null(description));
-    }
-    if let Some(osm_module) = params.osm_module {
-        updates.push("osm_module = ?");
-        values.push(rusqlite::types::Value::Text(osm_module.to_string()));
-    }
-    if let Some(os_name) = params.os_name {
-        updates.push("os_name = ?");
-        values.push(rusqlite::types::Value::Text(os_name.to_string()));
-    }
-    if let Some(os_release) = params.os_release {
-        updates.push("os_release = ?");
-        values.push(rusqlite::types::Value::Text(os_release.to_string()));
-    }
-    if let Some(os_arch) = params.os_arch {
-        updates.push("os_arch = ?");
-        values.push(rusqlite::types::Value::Text(os_arch.to_string()));
+    let text_columns = [
+        ("name = ?", params.name),
+        ("osm_module = ?", params.osm_module),
+        ("os_name = ?", params.os_name),
+        ("os_release = ?", params.os_release),
+        ("os_arch = ?", params.os_arch),
+    ];
+    for (clause, value) in text_columns {
+        if let Some(value) = value {
+            updates.push(clause);
+            values.push(rusqlite::types::Value::Text(value.to_string()));
+        }
     }
     if let Some(disk_layout) = params.disk_layout {
         updates.push("disk_layout = ?");
         let json = serde_json::to_string(disk_layout)?;
         values.push(rusqlite::types::Value::Text(json));
     }
-    if let Some(cmdline_args) = params.cmdline_args {
-        updates.push("cmdline_args = ?");
-        values.push(text_or_null(cmdline_args));
-    }
-    if let Some(config_template) = params.config_template {
-        updates.push("config_template = ?");
-        let json = config_template.map(serde_json::to_string).transpose()?;
-        values.push(text_or_null(json.as_deref()));
-    }
-    if let Some(firmware_mode) = params.firmware_mode {
-        updates.push("firmware_mode = ?");
-        values.push(text_or_null(firmware_mode.map(|m| m.as_db_str())));
-    }
+    push_nullable_updates(params, &mut updates, &mut values)?;
 
     Ok((updates, values))
+}
+
+/// Append `SET` clauses for the nullable columns: `Some(None)` writes `NULL`.
+fn push_nullable_updates(
+    params: &UpdateRoleParams<'_>,
+    updates: &mut Vec<&'static str>,
+    values: &mut Vec<rusqlite::types::Value>,
+) -> Result<()> {
+    let config_template = params
+        .config_template
+        .map(|c| c.map(serde_json::to_string).transpose())
+        .transpose()?;
+    let nullable_columns = [
+        ("description = ?", params.description),
+        ("cmdline_args = ?", params.cmdline_args),
+        (
+            "config_template = ?",
+            config_template.as_ref().map(|c| c.as_deref()),
+        ),
+        ("cloud_config = ?", params.cloud_config),
+        (
+            "firmware_mode = ?",
+            params.firmware_mode.map(|m| m.map(|m| m.as_db_str())),
+        ),
+    ];
+    for (clause, value) in nullable_columns {
+        if let Some(value) = value {
+            updates.push(clause);
+            values.push(text_or_null(value));
+        }
+    }
+    Ok(())
 }
 
 /// Update a role.
@@ -257,6 +273,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -294,6 +311,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -306,6 +324,7 @@ mod tests {
             "24.04",
             "x86-64",
             &empty_disk_layout(),
+            None,
             None,
             None,
             None,
@@ -333,6 +352,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -357,6 +377,7 @@ mod tests {
             "22.04",
             "x86-64",
             &empty_disk_layout(),
+            None,
             None,
             None,
             None,
@@ -401,6 +422,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -441,6 +463,7 @@ mod tests {
             Some("console=ttyS0 quiet"),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -470,6 +493,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -494,6 +518,7 @@ mod tests {
             None,
             None,
             Some(common::FirmwareMode::Uefi),
+            None,
         )
         .await
         .unwrap();
@@ -520,6 +545,7 @@ mod tests {
             None,
             None,
             Some(common::FirmwareMode::Bios),
+            None,
         )
         .await
         .unwrap();
@@ -546,6 +572,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -569,6 +596,7 @@ mod tests {
             "24.04",
             "x86-64",
             &empty_disk_layout(),
+            None,
             None,
             None,
             None,
@@ -608,6 +636,10 @@ mod tests {
             Some("console=ttyS0"),
             Some(&serde_json::json!({"k": "v"})),
             Some(common::FirmwareMode::Uefi),
+            Some(
+                "packages: [vim]
+",
+            ),
         )
         .await
         .unwrap()
@@ -627,6 +659,7 @@ mod tests {
                 description: Some(None),
                 cmdline_args: Some(None),
                 config_template: Some(None),
+                cloud_config: Some(None),
                 firmware_mode: Some(None),
                 ..Default::default()
             },
@@ -637,12 +670,14 @@ mod tests {
         assert_eq!(updated.description, None);
         assert_eq!(updated.cmdline_args, None);
         assert_eq!(updated.config_template, None);
+        assert_eq!(updated.cloud_config, None);
         assert_eq!(updated.firmware_mode, None);
 
         let retrieved = get(&db, role_id).await.unwrap();
         assert_eq!(retrieved.description, None);
         assert_eq!(retrieved.cmdline_args, None);
         assert_eq!(retrieved.config_template, None);
+        assert_eq!(retrieved.cloud_config, None);
         assert_eq!(retrieved.firmware_mode, None);
     }
 
@@ -666,6 +701,13 @@ mod tests {
         assert_eq!(updated.description, Some("A description".to_string()));
         assert_eq!(updated.cmdline_args, Some("console=ttyS0".to_string()));
         assert_eq!(updated.config_template, Some(serde_json::json!({"k": "v"})));
+        assert_eq!(
+            updated.cloud_config.as_deref(),
+            Some(
+                "packages: [vim]
+"
+            )
+        );
         assert_eq!(updated.firmware_mode, Some(common::FirmwareMode::Uefi));
     }
 
@@ -682,6 +724,10 @@ mod tests {
                 description: Some(Some("New description")),
                 cmdline_args: Some(Some("quiet")),
                 config_template: Some(Some(&new_config)),
+                cloud_config: Some(Some(
+                    "packages: [jq]
+",
+                )),
                 firmware_mode: Some(Some(common::FirmwareMode::Bios)),
                 ..Default::default()
             },
@@ -692,6 +738,13 @@ mod tests {
         assert_eq!(updated.description, Some("New description".to_string()));
         assert_eq!(updated.cmdline_args, Some("quiet".to_string()));
         assert_eq!(updated.config_template, Some(new_config));
+        assert_eq!(
+            updated.cloud_config.as_deref(),
+            Some(
+                "packages: [jq]
+"
+            )
+        );
         assert_eq!(updated.firmware_mode, Some(common::FirmwareMode::Bios));
     }
 }
