@@ -88,7 +88,7 @@ NICs attached to it (no default route / no nameserver). Always guard `gateway`/`
 
 Present for every OS. Populated when the device's active plan has a `first_boot` step, which it
 gets when the OS's OSM declares `cloud_init = true`. The plan decides, not the current OS config
-(`plan_with_first_boot`); a mismatch is logged.
+(`first_boot_planned`); a mismatch is logged.
 
 | Variable | Description |
 |---|---|

@@ -41,13 +41,18 @@ pub fn seed_path(uuid: &Uuid) -> String {
     format!("/cnc/devices/{uuid}/cloud-init/")
 }
 
+/// Absolute NoCloud `seedfrom` URL of a device's seed endpoint.
+pub fn seed_url(root_url: &str, uuid: &Uuid) -> String {
+    format!("{root_url}{}", seed_path(uuid))
+}
+
 /// Render the POSIX `sh` snippet an install template runs from its post-install hook.
 ///
 /// It writes into `$RD_TARGET` (the installed root; empty when already chrooted into it)
 /// and exits the hook non-zero if any step fails. `plan_id` is reported back with the
 /// first-boot result so a stale report cannot complete a newer plan.
 pub fn install_script(root_url: &str, uuid: &Uuid, plan_id: Option<i64>) -> Result<String> {
-    let seed_url = format!("{root_url}{}", seed_path(uuid));
+    let seed_url = seed_url(root_url, uuid);
     let unit_path = format!("/etc/systemd/system/{UNIT_NAME}");
     let paths = format!("{DROP_IN_PATH} {REPORTER_PATH} {unit_path}");
     render(

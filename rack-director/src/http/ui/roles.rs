@@ -60,24 +60,17 @@ fn validate_create_role(req: &CreateRoleRequest) -> Result<(), HashMap<String, S
     errors.into_result()
 }
 
-/// Reject a cloud-config on a role whose OS does not run rack-director's cloud-init setup:
-/// it would be silently ignored.
+/// Reject a cloud-config on a role whose OS does not run rack-director's cloud-init setup.
 fn check_cloud_config_supported(
     cloud_config: Option<&str>,
     os: &crate::osm::ResolvedOs,
 ) -> Result<(), HttpError> {
-    if cloud_config.is_none() || os.os.config.cloud_init {
-        return Ok(());
-    }
-    let mut errors = HashMap::new();
-    errors.insert(
-        "cloud_config".to_string(),
-        format!(
-            "{} {} does not support cloud-config (its OSM does not declare cloud_init)",
-            os.os.name, os.os.release
-        ),
+    let mut errors = ValidationErrors::new();
+    errors.add_if_err(
+        "cloud_config",
+        crate::roles::unsupported_cloud_config(cloud_config, os),
     );
-    Err(HttpError::ValidationError(errors))
+    errors.into_result().map_err(HttpError::ValidationError)
 }
 
 /// Validate the OS reference and cloud-config a role update would leave behind: the OS must
@@ -717,20 +710,7 @@ mod tests {
 
     /// Add an AlmaLinux 10 OS that opts into cloud-init to the module from `create_osm_module`.
     async fn create_cloud_init_os(conn: &database::Connection) {
-        let config = osm::os_config::OperatingSystemConfig {
-            name: "AlmaLinux".to_string(),
-            release: "10".to_string(),
-            cloud_init: true,
-            architectures: vec![osm::os_config::ArchitectureConfig {
-                arch: "x86-64".to_string(),
-                kernel: "vmlinuz".to_string(),
-                initramfs: "initrd.img".to_string(),
-                modules: vec![],
-                cmdline: String::new(),
-                install_template: "install.ks".to_string(),
-            }],
-            template_variables: vec![],
-        };
+        let config = crate::director::test_support::os_config("AlmaLinux", "10", true);
         crate::osm::store::create_operating_system(conn, 1, "alma", "AlmaLinux", "10", &config)
             .await
             .unwrap();

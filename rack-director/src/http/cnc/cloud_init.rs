@@ -31,9 +31,11 @@ pub(super) async fn seed_file_handler(
     Path((uuid, file)): Path<(Uuid, String)>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
 ) -> Result<Response<String>, Error> {
-    if file != META_DATA && file != USER_DATA {
-        return Err(Error::NotFound(format!("No cloud-init {file} is served")));
-    }
+    let select: fn(CloudInitSeed) -> String = match file.as_str() {
+        META_DATA => |seed| seed.meta_data,
+        USER_DATA => |seed| seed.user_data,
+        _ => return Err(Error::NotFound(format!("No cloud-init {file} is served"))),
+    };
 
     let mut conn = state
         .connection_factory
@@ -61,15 +63,10 @@ pub(super) async fn seed_file_handler(
         .ok_or_else(|| Error::NotFound(format!("Device {uuid}'s OS does not use cloud-init")))?;
     log::info!("Serving cloud-init {file} to device {uuid} ({remote})");
 
-    let body = if file == META_DATA {
-        seed.meta_data
-    } else {
-        seed.user_data
-    };
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(body)
+        .body(select(seed))
         .expect("response building should never error"))
 }
 
@@ -84,14 +81,15 @@ pub(crate) async fn build_device_seed(
     uuid: &Uuid,
     plan_id: Option<i64>,
 ) -> Result<Option<CloudInitSeed>, Error> {
-    if !Director::new(conn)
+    let director = Director::new(conn);
+    if !director
         .device_exists(uuid)
         .await
         .map_err(Error::ServerInternalError)?
     {
         return Err(Error::NotFound(format!("Device {uuid} not found")));
     }
-    let device = Director::new(conn)
+    let device = director
         .get_device(uuid)
         .await
         .map_err(Error::ServerInternalError)?;
@@ -101,15 +99,10 @@ pub(crate) async fn build_device_seed(
     let role = crate::roles::store::get(conn, role_id)
         .await
         .map_err(Error::ServerInternalError)?;
-    let resolved = crate::osm::resolve_os(
-        conn,
-        &role.osm_module,
-        &role.os_name,
-        &role.os_release,
-        &role.os_arch,
-    )
-    .await
-    .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Failed to resolve OS: {e}")))?;
+    let resolved = role
+        .resolve_os(conn)
+        .await
+        .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Failed to resolve OS: {e}")))?;
     if !resolved.os.config.cloud_init {
         return Ok(None);
     }
@@ -135,7 +128,8 @@ pub(crate) async fn build_device_seed(
 mod tests {
     use super::super::{routes, test_helpers::setup_test_state};
     use super::*;
-    use crate::{lifecycle::DeviceLifecycle, test_connection_factory};
+    use crate::director::test_support::{provisionable_device, start_provision};
+    use crate::test_connection_factory;
     use axum::body::Body;
     use axum::http::Request;
     use tower::util::ServiceExt;
@@ -147,100 +141,25 @@ mod tests {
     /// Register a device whose role runs an OS with (or without) cloud-init, set a global
     /// and role cloud-config, and start provisioning. Returns the plan id.
     async fn provisioning_device(conn: &mut database::Connection, cloud_init: bool) -> i64 {
-        let module = crate::osm::store::create_module(
-            conn,
-            "Default",
-            "1.0.0",
-            "Test",
-            "Test",
-            "bundled",
-            "osm/Default/1.0.0/",
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        let config = osm::os_config::OperatingSystemConfig {
-            name: "AlmaLinux".to_string(),
-            release: "10".to_string(),
-            cloud_init,
-            architectures: vec![osm::os_config::ArchitectureConfig {
-                arch: "x86-64".to_string(),
-                kernel: "vmlinuz".to_string(),
-                initramfs: "initrd.img".to_string(),
-                modules: vec![],
-                cmdline: String::new(),
-                install_template: "install.ks".to_string(),
-            }],
-            template_variables: vec![],
-        };
-        crate::osm::store::create_operating_system(
-            conn,
-            module.id,
-            "alma",
-            "AlmaLinux",
-            "10",
-            &config,
-        )
-        .await
-        .unwrap();
-        let layout = common::disk_layout::DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-            wipe_all_disks: false,
-        };
-        let role = crate::roles::store::create(
-            conn,
-            "role",
-            None,
-            "Default",
-            "AlmaLinux",
-            "10",
-            "x86-64",
-            &layout,
-            None,
-            None,
-            None,
-            // Provisioning refuses a role cloud-config on an OS without cloud-init.
-            cloud_init.then_some("packages: [jq]\n"),
-        )
-        .await
-        .unwrap();
+        // Provisioning refuses a role cloud-config on an OS without cloud-init.
+        let role_cloud_config = cloud_init.then_some(
+            "packages: [jq]
+",
+        );
+        provisionable_device(conn, &uuid(), cloud_init, role_cloud_config).await;
         crate::settings::store::set_cloud_config(
             conn,
-            Some("disable_root: false\nusers:\n  - name: root\n    ssh_authorized_keys: [k1]\n"),
+            Some(
+                "disable_root: false
+users:
+  - name: root
+    ssh_authorized_keys: [k1]
+",
+            ),
         )
         .await
         .unwrap();
-
-        let uuid = uuid();
-        Director::new(conn)
-            .register_device(&uuid, crate::director::Architecture::X86_64)
-            .await
-            .unwrap();
-        crate::lifecycle::store::update_device_lifecycle(
-            conn,
-            &uuid,
-            DeviceLifecycle::Unprovisioned,
-        )
-        .await
-        .unwrap();
-        crate::director::store::assign_role_to_device(conn, &uuid, role.id.unwrap())
-            .await
-            .unwrap();
-        let mut director = Director::new(conn);
-        director
-            .start_lifecycle_transition(&uuid, DeviceLifecycle::Provisioned)
-            .await
-            .unwrap();
-        director
-            .get_active_plan_for_device(&uuid)
-            .await
-            .unwrap()
-            .unwrap()
-            .id
-            .unwrap()
+        start_provision(conn, &uuid()).await.id.unwrap()
     }
 
     /// Advance the device's plan past partition_disks and install_os to first_boot.

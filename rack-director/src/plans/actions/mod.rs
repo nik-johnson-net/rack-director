@@ -48,9 +48,8 @@ impl Action {
             | Action::WipeDisks => generate_agent_boot_target("daemon"),
             Action::InstallOs => generate_os_install_boot_target(ctx).await,
             Action::Console => generate_agent_boot_target("console"),
-            Action::FirstBoot => Ok(BootTarget::LocalDisk),
-            // All other actions default to local disk boot
-            _ => Ok(BootTarget::LocalDisk),
+            // FirstBoot boots the installed OS, never the agent or the installer again.
+            Action::RebootDevice | Action::FirstBoot => Ok(BootTarget::LocalDisk),
         }
     }
 
@@ -144,14 +143,7 @@ async fn generate_os_install_boot_target(ctx: &ActionContext<'_>) -> Result<Boot
     let role = crate::roles::store::get(ctx.conn, role_id).await?;
 
     // Resolve OS from OSM registry
-    let resolved = crate::osm::resolve_os(
-        ctx.conn,
-        &role.osm_module,
-        &role.os_name,
-        &role.os_release,
-        &role.os_arch,
-    )
-    .await?;
+    let resolved = role.resolve_os(ctx.conn).await?;
 
     // Build cmdline: prepend defaults, then OS cmdline, then role cmdline
     let os_cmdline = resolved.cmdline().to_string();
@@ -676,47 +668,14 @@ mod tests {
             director: None,
         };
 
-        let action = Action::RebootDevice;
-        let boot_target = action.to_boot_target(&ctx).await.unwrap();
-
-        // RebootDevice should boot to local disk (the action is just to trigger the reboot)
-        match boot_target {
-            BootTarget::LocalDisk => {} // Expected
-            _ => {
-                panic!("Expected LocalDisk for RebootDevice, got NetBoot")
-            }
+        // RebootDevice only triggers the reboot; FirstBoot boots the installed OS.
+        for action in [Action::RebootDevice, Action::FirstBoot] {
+            let boot_target = action.to_boot_target(&ctx).await.unwrap();
+            assert!(
+                matches!(boot_target, BootTarget::LocalDisk),
+                "Expected LocalDisk for {action:?}, got {boot_target:?}"
+            );
         }
-    }
-
-    /// FirstBoot must boot the installed OS, never the agent or the installer again.
-    #[tokio::test]
-    async fn test_first_boot_boot_target() {
-        let conn = setup_test_db(test_connection_factory!()).await;
-
-        let device = Device {
-            id: 0,
-            uuid: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440010").unwrap(),
-            architecture: Architecture::X86_64,
-            lifecycle: None,
-            role_id: None,
-            platform_id: None,
-            attributes: common::device_attributes::DeviceAttributes::default(),
-            created_at: None,
-            first_seen_at: None,
-            last_seen_at: None,
-            last_polled_at: None,
-        };
-        let ctx = ActionContext {
-            device: &device,
-            conn: &conn,
-            director: None,
-        };
-
-        let boot_target = Action::FirstBoot.to_boot_target(&ctx).await.unwrap();
-        assert!(
-            matches!(boot_target, BootTarget::LocalDisk),
-            "Expected LocalDisk for FirstBoot, got {boot_target:?}"
-        );
     }
 
     #[tokio::test]

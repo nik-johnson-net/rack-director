@@ -75,9 +75,9 @@ fn validate_update(
 ) -> Result<(), std::collections::HashMap<String, String>> {
     let mut errors = ValidationErrors::new();
     if req.cloud_config.is_keep() {
-        errors.add_if_err(
+        errors.add_error(
             "cloud_config",
-            Some("cloud_config is required; send null to clear".to_string()),
+            "cloud_config is required; send null to clear".to_string(),
         );
     }
     errors.add_if_err(
@@ -108,11 +108,13 @@ async fn get_device_cloud_config(
         .await?
         .and_then(|plan| plan.id);
     let seed = crate::http::cnc::cloud_init::build_device_seed(&mut conn, &uuid, plan_id).await?;
+    let supported = seed.is_some();
+    let (user_data, meta_data) = seed.map(|s| (s.user_data, s.meta_data)).unzip();
     Ok(Json(DeviceCloudConfigPreview {
-        supported: seed.is_some(),
+        supported,
         seed_path: crate::cloud_init::seed_path(&uuid),
-        user_data: seed.as_ref().map(|s| s.user_data.clone()),
-        meta_data: seed.map(|s| s.meta_data),
+        user_data,
+        meta_data,
     }))
 }
 

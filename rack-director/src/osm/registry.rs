@@ -125,7 +125,7 @@ async fn sync_existing_module(
 }
 
 /// Determine whether the bundled version should replace the existing DB record.
-fn determine_update_policy(
+pub(crate) fn determine_update_policy(
     source: &str,
     bundled_version: &semver::Version,
     existing_version: &semver::Version,

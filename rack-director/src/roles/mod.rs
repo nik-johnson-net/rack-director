@@ -5,7 +5,8 @@ pub use common::disk_layout::DiskLayout;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::database::FromRow;
+use crate::database::{Connection, FromRow};
+use crate::osm::ResolvedOs;
 use crate::patch::Patch;
 
 /// A Role defines how a device should be provisioned
@@ -70,6 +71,33 @@ impl FromRow for Role {
             updated_at: row.get("updated_at")?,
         })
     }
+}
+
+impl Role {
+    /// Resolve the role's OS reference against the OSM registry.
+    pub async fn resolve_os(&self, conn: &Connection) -> anyhow::Result<ResolvedOs> {
+        crate::osm::resolve_os(
+            conn,
+            &self.osm_module,
+            &self.os_name,
+            &self.os_release,
+            &self.os_arch,
+        )
+        .await
+    }
+}
+
+/// Why `cloud_config` can't be applied on `os`, or `None` if it can (or there is none).
+///
+/// An OS whose OSM doesn't declare `cloud_init` never runs rack-director's cloud-init setup,
+/// so a role cloud-config would be silently ignored. Role saves and provisioning both refuse it.
+pub fn unsupported_cloud_config(cloud_config: Option<&str>, os: &ResolvedOs) -> Option<String> {
+    (cloud_config.is_some() && !os.os.config.cloud_init).then(|| {
+        format!(
+            "{} {} does not support cloud-config (its OSM does not declare cloud_init)",
+            os.os.name, os.os.release
+        )
+    })
 }
 
 /// Request to create a new role
