@@ -54,15 +54,10 @@ pub async fn render_for_device(
         .map_err(Error::ServerInternalError)?;
 
     // Resolve OS from OSM
-    let resolved = crate::osm::resolve_os(
-        conn,
-        &role.osm_module,
-        &role.os_name,
-        &role.os_release,
-        &role.os_arch,
-    )
-    .await
-    .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Failed to resolve OS: {}", e)))?;
+    let resolved = role
+        .resolve_os(conn)
+        .await
+        .map_err(|e| Error::ServerInternalError(anyhow::anyhow!("Failed to resolve OS: {}", e)))?;
 
     // Load install script template — bundled modules are served from disk,
     // uploaded modules from the image store.
@@ -154,30 +149,27 @@ async fn cloud_init_context(
     let plan = crate::plans::store::get_active_plan_for_device(conn, device_uuid)
         .await
         .map_err(Error::ServerInternalError)?;
-    let Some(plan) = plan_with_first_boot(plan, resolved.os.config.cloud_init, device_uuid) else {
+    let Some(plan) =
+        plan.filter(|p| first_boot_planned(p, resolved.os.config.cloud_init, device_uuid))
+    else {
         return Ok(None);
     };
     let install_script = crate::cloud_init::install_script(root_url, device_uuid, plan.id)
         .map_err(Error::ServerInternalError)?;
     Ok(Some(templates::CloudInitContext {
-        seed_url: format!("{root_url}{}", crate::cloud_init::seed_path(device_uuid)),
+        seed_url: crate::cloud_init::seed_url(root_url, device_uuid),
         install_script,
     }))
 }
 
-/// The active plan, if it has a `first_boot` step.
+/// Whether the plan has a `first_boot` step.
 ///
 /// The plan decides, not the OS config. The plan's steps were fixed when the transition started,
 /// and the seed endpoint and the device's lifecycle follow them: installing the reporter for a
 /// plan without `first_boot` would leave the host without its cloud-config, and skipping it for
 /// a plan with one would leave the plan waiting forever. A disagreement (the OSM changed
 /// mid-provision, or the plan predates cloud-init support) is logged.
-fn plan_with_first_boot(
-    plan: Option<crate::plans::Plan>,
-    os_cloud_init: bool,
-    device_uuid: &Uuid,
-) -> Option<crate::plans::Plan> {
-    let plan = plan?;
+fn first_boot_planned(plan: &crate::plans::Plan, os_cloud_init: bool, device_uuid: &Uuid) -> bool {
     let has_first_boot = plan.actions.contains(&crate::plans::Action::FirstBoot);
     if has_first_boot != os_cloud_init {
         log::warn!(
@@ -192,7 +184,7 @@ fn plan_with_first_boot(
             },
         );
     }
-    has_first_boot.then_some(plan)
+    has_first_boot
 }
 
 /// The device's FQDN as rendered into `{{ device.fqdn }}`: hostname plus the primary NIC's
@@ -459,7 +451,7 @@ mod tests {
         assert!(path_is_within_base(base, base));
     }
 
-    // ── plan_with_first_boot ───────────────────────────────────────────────────
+    // ── first_boot_planned ─────────────────────────────────────────────────────
 
     fn provision_plan(first_boot: bool) -> crate::plans::Plan {
         use crate::plans::Action;
@@ -467,22 +459,18 @@ mod tests {
         if first_boot {
             actions.push(Action::FirstBoot);
         }
-        let mut plan = crate::plans::Plan::new(test_uuid(), actions);
-        plan.id = Some(7);
-        plan
+        crate::plans::Plan::new(test_uuid(), actions)
     }
 
     /// The plan, not the OS config, decides whether the install hands over to cloud-init.
     #[test]
-    fn test_plan_with_first_boot_follows_the_plan() {
+    fn test_first_boot_planned_follows_the_plan() {
         let uuid = test_uuid();
-        let with = plan_with_first_boot(Some(provision_plan(true)), true, &uuid);
-        assert_eq!(with.and_then(|p| p.id), Some(7));
+        assert!(first_boot_planned(&provision_plan(true), true, &uuid));
         // A plan created before the OS opted in: no reporter, or it would never be heard.
-        assert!(plan_with_first_boot(Some(provision_plan(false)), true, &uuid).is_none());
+        assert!(!first_boot_planned(&provision_plan(false), true, &uuid));
         // The OS dropped cloud_init after the plan was made: the plan still waits for it.
-        assert!(plan_with_first_boot(Some(provision_plan(true)), false, &uuid).is_some());
-        assert!(plan_with_first_boot(None, true, &uuid).is_none());
+        assert!(first_boot_planned(&provision_plan(true), false, &uuid));
     }
     use crate::http::AppState;
     use crate::storage::ImageStore;

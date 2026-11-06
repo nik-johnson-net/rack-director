@@ -20,8 +20,12 @@
 
 Agent reports (`mark_action_success` / `mark_action_failed`) take a `ReportedStep { plan_id, action }`.
 A field that is set must match the active plan and its current action, or the report is ignored as
-stale. `ReportedStep::plan(id)` is the agent's plan-only form, and `ReportedStep::default()` checks
-nothing, like an old agent.
+stale. The agent sets only `plan_id` (tests build that with `ReportedStep::plan(id)`), and
+`ReportedStep::default()` checks nothing, like an old agent.
+
+`test_support.rs` (`#[cfg(test)]`) holds provisioning fixtures shared with the HTTP tests:
+`os_config`, `provisionable_device` (a bundled `Default` AlmaLinux 10 role, with or without
+`cloud_init`) and `start_provision`.
 
 `plan_progress.rs` holds plan advancement, transition cancellation and orphaned-transition repair. A plan
 and its lifecycle transition must change together, so each of these, and `start_lifecycle_transition`,

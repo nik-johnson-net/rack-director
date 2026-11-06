@@ -12,6 +12,8 @@ pub use plan_progress::ReportedStep;
 pub(crate) mod power;
 mod power_ops;
 pub(crate) mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use power::PowerAction;
 
@@ -638,45 +640,36 @@ async fn plan_actions(
         return Ok(actions);
     }
 
-    let Some(role_id) = store::get_device(conn, device_uuid).await?.role_id else {
+    let Some(role_id) = store::get_device_role_id(conn, device_uuid).await? else {
         return Err(anyhow::anyhow!(
             "Cannot provision device {}: no Role is assigned. Assign a Role before reprovisioning.",
             device_uuid
         ));
     };
     let role = crate::roles::store::get(conn, role_id).await?;
-    let resolved = match crate::osm::resolve_os(
-        conn,
-        &role.osm_module,
-        &role.os_name,
-        &role.os_release,
-        &role.os_arch,
-    )
-    .await
-    {
+    let resolved = match role.resolve_os(conn).await {
         Ok(resolved) => resolved,
         Err(e) => {
             log::warn!("Provisioning {device_uuid}: cannot resolve role's OS: {e}");
             return Ok(actions);
         }
     };
+    if let Some(reason) = roles::unsupported_cloud_config(role.cloud_config.as_deref(), &resolved) {
+        return Err(anyhow::anyhow!(
+            "Cannot provision device {device_uuid}: role '{}' has a cloud-config, but {reason}. \
+             Clear the role's cloud-config or choose an OS that supports it.",
+            role.name
+        ));
+    }
     if resolved.os.config.cloud_init {
         actions.push(crate::plans::Action::FirstBoot);
-    } else if role.cloud_config.is_some() {
-        return Err(anyhow::anyhow!(
-            "Cannot provision device {device_uuid}: role '{}' has a cloud-config, but {} {} does \
-             not support cloud-init (its OSM does not declare cloud_init). Clear the role's \
-             cloud-config or choose an OS that supports it.",
-            role.name,
-            resolved.os.name,
-            resolved.os.release
-        ));
     }
     Ok(actions)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{provisionable_device, start_provision};
     use super::*;
     use crate::{
         database, database::DatabaseConnectionFactory, plans::PlanStatus, test_connection_factory,
@@ -2457,107 +2450,11 @@ mod tests {
         );
     }
 
-    /// Register an Unprovisioned device whose role uses an OS that does (or does not) opt
-    /// into cloud-init.
-    async fn provisionable_device(conn: &mut database::Connection, uuid: &Uuid, cloud_init: bool) {
-        let module = crate::osm::store::create_module(
-            conn,
-            "Default",
-            "1.0.0",
-            "Test",
-            "Test",
-            "bundled",
-            "osm/Default/1.0.0/",
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        let config = osm::os_config::OperatingSystemConfig {
-            name: "AlmaLinux".to_string(),
-            release: "10".to_string(),
-            cloud_init,
-            architectures: vec![osm::os_config::ArchitectureConfig {
-                arch: "x86-64".to_string(),
-                kernel: "vmlinuz".to_string(),
-                initramfs: "initrd.img".to_string(),
-                modules: vec![],
-                cmdline: String::new(),
-                install_template: "install.ks".to_string(),
-            }],
-            template_variables: vec![],
-        };
-        crate::osm::store::create_operating_system(
-            conn,
-            module.id,
-            "almalinux-10",
-            "AlmaLinux",
-            "10",
-            &config,
-        )
-        .await
-        .unwrap();
-        let empty_layout = common::disk_layout::DiskLayout {
-            disks: vec![],
-            volume_groups: None,
-            zfs_pools: None,
-            wipe_all_disks: false,
-        };
-        let role = crate::roles::store::create(
-            conn,
-            "role",
-            None,
-            "Default",
-            "AlmaLinux",
-            "10",
-            "x86-64",
-            &empty_layout,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-        Director::new(conn)
-            .register_device(uuid, Architecture::X86_64)
-            .await
-            .unwrap();
-        crate::lifecycle::store::update_device_lifecycle(
-            conn,
-            uuid,
-            DeviceLifecycle::Unprovisioned,
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "UPDATE devices SET role_id = ?1 WHERE uuid = ?2",
-            (role.id.unwrap(), *uuid),
-        )
-        .await
-        .unwrap();
-    }
-
-    /// Start the Provision transition and return its plan.
-    async fn start_provision(conn: &mut database::Connection, uuid: &Uuid) -> Plan {
-        let mut director = Director::new(conn);
-        director
-            .start_lifecycle_transition(uuid, DeviceLifecycle::Provisioned)
-            .await
-            .unwrap();
-        director
-            .get_active_plan_for_device(uuid)
-            .await
-            .unwrap()
-            .expect("provision plan should be active")
-    }
-
     #[tokio::test]
     async fn test_provision_plan_adds_first_boot_for_cloud_init_os() {
         let mut conn = setup_test_db(test_connection_factory!()).await;
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440200").unwrap();
-        provisionable_device(&mut conn, &uuid, true).await;
+        provisionable_device(&mut conn, &uuid, true, None).await;
 
         let plan = start_provision(&mut conn, &uuid).await;
 
@@ -2572,7 +2469,7 @@ mod tests {
     async fn test_provision_plan_without_cloud_init_has_no_first_boot() {
         let mut conn = setup_test_db(test_connection_factory!()).await;
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440201").unwrap();
-        provisionable_device(&mut conn, &uuid, false).await;
+        provisionable_device(&mut conn, &uuid, false, None).await;
 
         let plan = start_provision(&mut conn, &uuid).await;
 
@@ -2589,10 +2486,7 @@ mod tests {
     async fn test_provision_refused_when_role_cloud_config_unsupported() {
         let mut conn = setup_test_db(test_connection_factory!()).await;
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440205").unwrap();
-        provisionable_device(&mut conn, &uuid, false).await;
-        conn.execute("UPDATE roles SET cloud_config = 'packages: [jq]'", ())
-            .await
-            .unwrap();
+        provisionable_device(&mut conn, &uuid, false, Some("packages: [jq]")).await;
 
         let mut director = Director::new(&mut conn);
         let err = director
@@ -2617,7 +2511,7 @@ mod tests {
         uuid: &Uuid,
         success: bool,
     ) -> Option<DeviceLifecycle> {
-        provisionable_device(conn, uuid, true).await;
+        provisionable_device(conn, uuid, true, None).await;
         let plan = start_provision(conn, uuid).await;
         let mut director = Director::new(conn);
         director
@@ -2677,7 +2571,7 @@ mod tests {
         use crate::plans::Action;
         let mut conn = setup_test_db(test_connection_factory!()).await;
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440204").unwrap();
-        provisionable_device(&mut conn, &uuid, true).await;
+        provisionable_device(&mut conn, &uuid, true, None).await;
         let plan = start_provision(&mut conn, &uuid).await;
         let install_os = ReportedStep {
             plan_id: None,

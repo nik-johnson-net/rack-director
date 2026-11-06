@@ -398,7 +398,7 @@ struct ActionStatusQuery {
     ///
     /// When present, the report is ignored unless the plan is at that action, so a retried
     /// installer report can't complete a later step. Unknown names are rejected with 400.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     action: Option<String>,
 }
 
@@ -413,7 +413,7 @@ struct ActionFailedQuery {
     /// reports from a previous (cancelled) plan from corrupting a new plan.
     plan_id: Option<i64>,
     /// Optional action wire name, checked as in [`ActionStatusQuery::action`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     action: Option<String>,
 }
 

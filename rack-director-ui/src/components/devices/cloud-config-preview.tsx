@@ -8,7 +8,7 @@ interface CloudConfigPreviewProps {
 
 /**
  * Read-only view of the merged cloud-config seed (global + role layers) the device will be
- * served on its first boot. Loaded on demand when expanded.
+ * served on its first boot. Loaded on demand the first time it is expanded.
  */
 export function CloudConfigPreview({ uuid }: CloudConfigPreviewProps) {
   const [open, setOpen] = useState(false);
@@ -19,7 +19,8 @@ export function CloudConfigPreview({ uuid }: CloudConfigPreviewProps) {
   const toggle = async () => {
     const next = !open;
     setOpen(next);
-    if (!next) return;
+    // Fetch once; the parent remounts this component when the device's role changes.
+    if (!next || preview) return;
     setLoading(true);
     setError(null);
     try {

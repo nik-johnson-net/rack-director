@@ -1,7 +1,6 @@
 //! The NoCloud seed (`user-data` and `meta-data`) served to a device on first boot.
 
 use anyhow::{Result, anyhow};
-use serde::Serialize;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -20,7 +19,7 @@ pub struct SeedDevice<'a> {
 }
 
 /// Rendered NoCloud seed documents.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CloudInitSeed {
     pub user_data: String,
     pub meta_data: String,
@@ -51,7 +50,7 @@ pub fn build_seed(
 }
 
 /// Serialize a cloud-config mapping as a `#cloud-config` document.
-pub fn to_cloud_config(doc: &Value) -> Result<String> {
+fn to_cloud_config(doc: &Value) -> Result<String> {
     let yaml = serde_saphyr::to_string(doc)?;
     Ok(format!("#cloud-config\n{yaml}"))
 }

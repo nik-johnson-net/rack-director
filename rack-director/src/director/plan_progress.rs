@@ -27,6 +27,7 @@ pub struct ReportedStep {
     pub action: Option<Action>,
 }
 
+#[cfg(test)]
 impl ReportedStep {
     /// A report scoped to a plan only, as the agent sends it.
     pub fn plan(plan_id: Option<i64>) -> Self {

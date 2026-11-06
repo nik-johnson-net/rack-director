@@ -10,6 +10,6 @@ mod merge;
 mod parse;
 mod seed;
 
-pub use install::{install_script, seed_path};
+pub use install::{install_script, seed_path, seed_url};
 pub use parse::validate;
-pub use seed::{CloudInitSeed, SeedDevice, build_seed, to_cloud_config};
+pub use seed::{CloudInitSeed, SeedDevice, build_seed};

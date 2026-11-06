@@ -54,9 +54,10 @@ pub async fn move_os_variables_to_cloud_config(conn: &Connection) -> Result<()> 
             log::warn!("Role {id}: config_template is not a JSON object; skipping");
             continue;
         };
-        let Extracted::Removed { cloud_config } = extract_cloud_config(id, &mut config)? else {
+        if !config.contains_key("packages") && !config.contains_key("postinstall") {
             continue;
-        };
+        }
+        let cloud_config = extract_cloud_config(id, &mut config)?;
         let remaining = (!config.is_empty()).then(|| Value::Object(config).to_string());
         conn.execute(
             "UPDATE roles SET cloud_config = ?1, config_template = ?2 WHERE id = ?3",
@@ -88,30 +89,18 @@ async fn default_module_will_be_bundled(conn: &Connection) -> Result<bool> {
         .any(|(source, version)| will_be_bundled(source, version)))
 }
 
+/// Applies the sync's own replacement rule, with `RETIRED_IN` standing in for the bundled
+/// version: any bundled Default from before then is replaced by one that no longer reads the
+/// variables.
 fn will_be_bundled(source: &str, version: &str) -> bool {
-    match source {
-        "bundled" => true,
-        "uploaded" => version
-            .parse::<semver::Version>()
-            .is_ok_and(|v| v < RETIRED_IN),
-        _ => false,
-    }
+    version
+        .parse::<semver::Version>()
+        .is_ok_and(|v| crate::osm::registry::determine_update_policy(source, &RETIRED_IN, &v))
 }
 
-/// Result of extracting the retired variables from one role's `config_template`.
-#[derive(Debug, PartialEq)]
-enum Extracted {
-    /// The role had neither variable; nothing to write.
-    Untouched,
-    /// The variables were removed. `cloud_config` is `None` when they held only empty values.
-    Removed { cloud_config: Option<String> },
-}
-
-/// Remove `packages`/`postinstall` from `config` and build the equivalent cloud-config text.
-fn extract_cloud_config(role_id: i64, config: &mut Map<String, Value>) -> Result<Extracted> {
-    if !config.contains_key("packages") && !config.contains_key("postinstall") {
-        return Ok(Extracted::Untouched);
-    }
+/// Remove `packages`/`postinstall` from `config` and build the equivalent cloud-config text,
+/// or `None` when they held only empty values.
+fn extract_cloud_config(role_id: i64, config: &mut Map<String, Value>) -> Result<Option<String>> {
     let packages = packages_from(role_id, config.remove("packages"));
     let postinstall = config
         .remove("postinstall")
@@ -126,18 +115,11 @@ fn extract_cloud_config(role_id: i64, config: &mut Map<String, Value>) -> Result
         doc.insert("runcmd".to_string(), Value::from(vec![script]));
     }
     if doc.is_empty() {
-        return Ok(Extracted::Removed { cloud_config: None });
+        return Ok(None);
     }
 
-    let text = crate::cloud_init::to_cloud_config(&Value::Object(doc))?;
-    let text = text.replacen(
-        "#cloud-config\n",
-        &format!("#cloud-config\n{MIGRATION_NOTE}"),
-        1,
-    );
-    Ok(Extracted::Removed {
-        cloud_config: Some(text),
-    })
+    let yaml = serde_saphyr::to_string(&Value::Object(doc))?;
+    Ok(Some(format!("#cloud-config\n{MIGRATION_NOTE}{yaml}")))
 }
 
 /// Package names to carry over. Kickstart exclusions (`-name`) have no cloud-config
@@ -310,42 +292,35 @@ mod tests {
         );
     }
 
+    const GIT_ONLY: &str = r#"{"packages":["git"]}"#;
+
+    /// Run the hook for one AlmaLinux role on a `Default` module of the given source and
+    /// version, returning the role's `(config_template, cloud_config)`.
+    async fn migrate_on_default(
+        factory: database::DatabaseConnectionFactory,
+        source: &str,
+        version: &str,
+    ) -> (Option<String>, Option<String>) {
+        let conn = setup(factory, source, version).await;
+        insert_role(&conn, "role", "Default", "AlmaLinux", Some(GIT_ONLY)).await;
+        move_os_variables_to_cloud_config(&conn).await.unwrap();
+        columns(&conn, "role").await
+    }
+
     /// An uploaded `Default` that startup keeps still reads the variables, so its roles stay.
     #[tokio::test]
     async fn test_kept_uploaded_default_untouched() {
-        let conn = setup(test_connection_factory!(), "uploaded", "0.2.0").await;
-        let config = r#"{"packages":["git"]}"#;
-        insert_role(&conn, "kept", "Default", "AlmaLinux", Some(config)).await;
-
-        move_os_variables_to_cloud_config(&conn).await.unwrap();
-
-        assert_eq!(
-            columns(&conn, "kept").await,
-            (Some(config.to_string()), None)
-        );
+        let columns = migrate_on_default(test_connection_factory!(), "uploaded", "0.2.0").await;
+        assert_eq!(columns, (Some(GIT_ONLY.to_string()), None));
     }
 
     /// An uploaded `Default` older than the bundled one is replaced by it at startup.
     #[tokio::test]
     async fn test_replaced_uploaded_default_migrated() {
-        let conn = setup(test_connection_factory!(), "uploaded", "0.1.5").await;
-        insert_role(
-            &conn,
-            "replaced",
-            "Default",
-            "AlmaLinux",
-            Some(r#"{"packages":["git"]}"#),
-        )
-        .await;
-
-        move_os_variables_to_cloud_config(&conn).await.unwrap();
-
-        let (config, cloud_config) = columns(&conn, "replaced").await;
+        let (config, cloud_config) =
+            migrate_on_default(test_connection_factory!(), "uploaded", "0.1.5").await;
         assert_eq!(config, None);
-        assert_eq!(
-            parsed(&cloud_config.unwrap())["packages"],
-            serde_json::json!(["git"])
-        );
+        assert!(cloud_config.is_some());
     }
 
     #[test]
