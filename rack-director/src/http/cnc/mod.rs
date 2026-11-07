@@ -20,14 +20,14 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::Host;
-use log::{info, warn};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::http::error::Error;
 use crate::{
-    device_warnings, dhcp,
+    device_warnings,
     director::{Director, NetworkInterface, ReportedStep},
     http::AppState,
     plans::Action,
@@ -92,85 +92,12 @@ async fn ipxe_handler(
     let mac_address =
         device_registration::resolve_mac_address(&conn, params.mac.as_ref(), addr).await;
 
-    // Discovery Support
-    // For devices that don't exist, determine if the device should be created.
-    // TODO: Please make this better.
-    let director = Director::with_power_config(&mut conn, power_config);
-    if !director.device_exists(&uuid).await?
-        && let Some(mac) = &mac_address
-    {
-        if director.find_pending_device_by_mac(mac).await?.is_some() {
-            info!("Found pending device {}. Starting discovery.", uuid);
-            device_registration::register_and_start_discovery(
-                &mut conn,
-                &uuid,
-                Some(mac),
-                power_config,
-            )
-            .await;
-        } else {
-            // Device is not pending. Check to see if the network has autodiscovery enabled.
-            let dhcp_lease = dhcp::store::get_lease_by_mac(&conn, mac).await?;
-            if let Some(lease) = dhcp_lease {
-                if let Some(netid) = lease.network_id {
-                    let dhcp_network = dhcp::store::get_network(&conn, netid).await?;
+    // Discovery Support: register a device we haven't seen if its MAC says it is expected.
+    device_registration::adopt_unknown_device(&mut conn, &uuid, mac_address.as_ref(), power_config)
+        .await?;
 
-                    // Register device if it doesn't exist and automatically start discovery
-                    if dhcp_network.enable_autodiscovery {
-                        info!(
-                            "Found new device {} on network with autodiscovery enabled. Adopting and starting discovery.",
-                            uuid
-                        );
-                        device_registration::register_and_start_discovery(
-                            &mut conn,
-                            &uuid,
-                            Some(mac),
-                            power_config,
-                        )
-                        .await;
-                    }
-                } else {
-                    warn!("DHCP Lease does not have a network ID")
-                }
-            } else {
-                warn!("MAC {:?} does not have a DHCP lease", mac)
-            }
-        }
-    } else {
-        warn!("Missing MAC address")
-    }
-
-    // Handle boot event - advance plan if current action supports it
-    // This must happen before we check the boot target, because on_boot() might advance the plan
-    if let Err(e) = Director::with_power_config(&mut conn, power_config)
-        .on_boot(&uuid)
-        .await
-    {
-        log::warn!("Failed to handle boot event for {}: {:?}", uuid, e);
-    }
-
-    // Store network info from DHCP lease (reuse the MAC address lookup from above)
-    if let Some(mac) = &mac_address {
-        if let Ok(Some(lease)) = dhcp::store::get_lease_by_mac(&conn, mac).await {
-            log::info!(
-                "Found DHCP lease for device {}: MAC {} IP {}",
-                uuid,
-                lease.mac_address,
-                lease.ip_address
-            );
-
-            // Update IP address for the interface with this MAC
-            // This will also create the interface if it doesn't exist yet
-            if let Err(e) = Director::with_power_config(&mut conn, power_config)
-                .set_device_ip_address(&uuid, &lease.ip_address, &lease.mac_address)
-                .await
-            {
-                warn!("Couldn't store IP address for device {uuid}: {e}");
-            }
-        }
-    } else {
-        log::debug!("No MAC address available for device {}", uuid);
-    }
+    // Must happen before we check the boot target, because on_boot() might advance the plan
+    device_registration::record_boot(&mut conn, &uuid, mac_address.as_ref(), power_config).await;
 
     // Non-fatal. If the boot target can't be found, redirect loop back here to try again
     let boot_target = match Director::with_power_config(&mut conn, power_config)

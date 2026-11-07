@@ -35,11 +35,11 @@ pub struct ActionContext<'a> {
 }
 
 impl Action {
-    /// Convert this Action to a BootTarget for the device
+    /// The BootTarget a device should boot while this action is current.
     ///
-    /// This method determines what the device should boot into based on the current action.
-    /// For most actions, this returns LocalDisk. For special actions like hardware discovery,
-    /// BMC configuration, and OS installation, it returns NetBoot with appropriate kernel/initramfs.
+    /// The target follows whatever runs the action: the rack-agent image for agent-driven
+    /// actions, the OS installer for `InstallOs`, and the local disk when the installed OS
+    /// (or a plain reboot) takes over.
     pub async fn to_boot_target(&self, ctx: &ActionContext<'_>) -> Result<BootTarget> {
         match self {
             Action::DiscoverHardware
@@ -173,6 +173,7 @@ mod tests {
     use super::*;
     use crate::director::Architecture;
     use crate::director::Device;
+    use crate::director::test_support::{create_default_module, os_config};
     use crate::roles::DiskLayout;
     use crate::{
         database, database::DatabaseConnectionFactory, roles::store as roles_store,
@@ -329,34 +330,10 @@ mod tests {
         let conn = setup_test_db(test_connection_factory!()).await;
 
         // Set up OSM module with an OS entry
-        crate::osm::store::create_module(
-            &conn,
-            "Default",
-            "1.0.0",
-            "Test",
-            "Test",
-            "bundled",
-            "osm/Default/1.0.0/",
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        let config = osm::os_config::OperatingSystemConfig {
-            name: "TestOS".to_string(),
-            release: "1.0".to_string(),
-            cloud_init: false,
-            architectures: vec![osm::os_config::ArchitectureConfig {
-                arch: "x86-64".to_string(),
-                kernel: "vmlinuz".to_string(),
-                initramfs: "initrd.img".to_string(),
-                modules: vec![],
-                cmdline: "console=ttyS0 autoinstall ds=nocloud-net;s={{install_script_url}}"
-                    .to_string(),
-                install_template: "install.sh".to_string(),
-            }],
-            template_variables: vec![],
-        };
+        create_default_module(&conn).await;
+        let mut config = os_config("TestOS", "1.0", false);
+        config.architectures[0].cmdline =
+            "console=ttyS0 autoinstall ds=nocloud-net;s={{install_script_url}}".to_string();
         crate::osm::store::create_operating_system(&conn, 1, "testos", "TestOS", "1.0", &config)
             .await
             .unwrap();
@@ -477,33 +454,8 @@ mod tests {
         let conn = setup_test_db(test_connection_factory!()).await;
 
         // Set up OSM module with an OS entry that has NO cmdline args
-        crate::osm::store::create_module(
-            &conn,
-            "Default",
-            "1.0.0",
-            "Test",
-            "Test",
-            "bundled",
-            "osm/Default/1.0.0/",
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        let config = osm::os_config::OperatingSystemConfig {
-            name: "Debian".to_string(),
-            release: "12".to_string(),
-            cloud_init: false,
-            architectures: vec![osm::os_config::ArchitectureConfig {
-                arch: "x86-64".to_string(),
-                kernel: "vmlinuz".to_string(),
-                initramfs: "initrd.img".to_string(),
-                modules: vec![],
-                cmdline: String::new(), // No cmdline template
-                install_template: "install.sh".to_string(),
-            }],
-            template_variables: vec![],
-        };
+        create_default_module(&conn).await;
+        let config = os_config("Debian", "12", false); // No cmdline template
         crate::osm::store::create_operating_system(&conn, 1, "debian", "Debian", "12", &config)
             .await
             .unwrap();

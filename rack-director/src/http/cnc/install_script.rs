@@ -44,9 +44,8 @@ pub async fn render_for_device(
         .map_err(Error::ServerInternalError)?;
 
     // Get device role
-    let role_id = crate::director::store::get_device_role_id(conn, device_uuid)
-        .await
-        .map_err(Error::ServerInternalError)?
+    let role_id = device
+        .role_id
         .ok_or_else(|| Error::NotFound("Device has no role assigned".to_string()))?;
 
     let role = roles::store::get(conn, role_id)
@@ -172,11 +171,17 @@ async fn cloud_init_context(
 fn first_boot_planned(plan: &crate::plans::Plan, os_cloud_init: bool, device_uuid: &Uuid) -> bool {
     let has_first_boot = plan.actions.contains(&crate::plans::Action::FirstBoot);
     if has_first_boot != os_cloud_init {
+        let plan_id = plan
+            .id
+            .map_or_else(|| "(unsaved)".to_string(), |id| id.to_string());
         log::warn!(
-            "Install script for {device_uuid}: plan {:?} {} a first_boot step but the OS {} \
-             cloud_init; following the plan",
-            plan.id,
-            if has_first_boot { "has" } else { "has no" },
+            "Install script for {device_uuid}: plan {plan_id} {} but the OS {} cloud_init; \
+             following the plan",
+            if has_first_boot {
+                "has a first_boot step"
+            } else {
+                "has no first_boot step"
+            },
             if os_cloud_init {
                 "declares"
             } else {

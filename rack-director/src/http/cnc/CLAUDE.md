@@ -115,6 +115,23 @@ The bundled OSMs no longer declare `packages`/`postinstall`; use cloud-config `p
 `runcmd:` instead (the `config.packages` loop in the examples below is for OSMs that still declare
 it). See `@.claude/docs/cloud-init.md`.
 
+## iPXE endpoint (`GET /cnc/ipxe`)
+
+Without `uuid` it returns a redirect script: `chain .../cnc/ipxe?uuid=${uuid}&mac=${netX/mac}`.
+`netX` is a literal iPXE alias for the most recently opened (the booting) network device, so it is
+correct on multi-NIC machines; iPXE expands it to lowercase colon-separated hex. `mac` is optional:
+when empty or absent, `device_registration::resolve_mac_address` falls back to a DHCP lease lookup
+by client IP.
+
+With `uuid` the handler runs `adopt_unknown_device` and `record_boot` before choosing the boot
+target (`device_registration.rs`):
+
+- `adopt_unknown_device` registers an *unknown* UUID and starts discovery if its MAC has a pending
+  entry or a lease on an autodiscovery network. Registered devices return early (`Adoption::AlreadyKnown`):
+  they hit this path on every boot, so warnings about a missing MAC, no lease, or no network only
+  describe unknown devices.
+- `record_boot` advances the plan (`on_boot`) and stores the lease IP for the MAC.
+
 ## Action reports
 
 `POST /cnc/action_success` `{"uuid", "plan_id"?, "action"?}` and `POST /cnc/action_failed`

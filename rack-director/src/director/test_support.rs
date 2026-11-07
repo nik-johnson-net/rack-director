@@ -5,6 +5,7 @@ use uuid::Uuid;
 use super::{Architecture, Director};
 use crate::database::Connection;
 use crate::lifecycle::DeviceLifecycle;
+use crate::osm::store::OsmModule;
 use crate::plans::Plan;
 
 /// An OS config with one x86-64 architecture, opting into cloud-init or not.
@@ -29,18 +30,9 @@ pub(crate) fn os_config(
     }
 }
 
-/// Register an Unprovisioned device whose role runs AlmaLinux 10 from a bundled `Default`
-/// module that does (or does not) opt into cloud-init.
-///
-/// The role cloud-config is stored as given, unvalidated, so tests can set up a role that a
-/// save would refuse.
-pub(crate) async fn provisionable_device(
-    conn: &mut Connection,
-    uuid: &Uuid,
-    cloud_init: bool,
-    role_cloud_config: Option<&str>,
-) {
-    let module = crate::osm::store::create_module(
+/// Insert the bundled `Default` 1.0.0 module that fixture OSes belong to.
+pub(crate) async fn create_default_module(conn: &Connection) -> OsmModule {
+    crate::osm::store::create_module(
         conn,
         "Default",
         "1.0.0",
@@ -52,11 +44,30 @@ pub(crate) async fn provisionable_device(
         None,
     )
     .await
-    .unwrap();
+    .unwrap()
+}
+
+/// The bundled `Default` module plus its AlmaLinux 10 OS (`alma`).
+async fn create_default_alma(conn: &Connection, cloud_init: bool) {
+    let module = create_default_module(conn).await;
     let config = os_config("AlmaLinux", "10", cloud_init);
     crate::osm::store::create_operating_system(conn, module.id, "alma", "AlmaLinux", "10", &config)
         .await
         .unwrap();
+}
+
+/// Register an Unprovisioned device whose role runs AlmaLinux 10 from a bundled `Default`
+/// module that does (or does not) opt into cloud-init.
+///
+/// The role cloud-config is stored as given, unvalidated, so tests can set up a role that a
+/// save would refuse.
+pub(crate) async fn provisionable_device(
+    conn: &mut Connection,
+    uuid: &Uuid,
+    cloud_init: bool,
+    role_cloud_config: Option<&str>,
+) {
+    create_default_alma(conn, cloud_init).await;
     let layout = common::disk_layout::DiskLayout {
         disks: vec![],
         volume_groups: None,
