@@ -10,6 +10,7 @@ import {
   type Device,
   type DhcpNetwork,
   type BmcConfig,
+  type BmcConfigState,
   updateDeviceAttributes,
   getDevice,
   ValidationError,
@@ -19,13 +20,34 @@ import { PowerControls } from "./power-controls";
 type BmcConfigurationProps = {
   device: Device;
   networks: DhcpNetwork[];
+  /** How the desired config compares with the detected BMC, from `GET /ui/devices/{uuid}/requests`. */
+  configState: BmcConfigState;
   onDeviceUpdate: (device: Device) => void;
   onError: (error: string) => void;
 };
 
+// ipmitool reports the address source as e.g. "DHCP Address" or "Static Address".
+const isDhcpSource = (source: string) => source.toLowerCase().includes("dhcp");
+
+function Address({ ip }: { ip?: string | null }) {
+  return ip ? <> at <span className="font-mono">{ip}</span></> : null;
+}
+
+// What the server will do about a difference between the desired and detected BMC config. The
+// comparison itself is the server's (`bmc_config_state`), so it can't drift from what it applies.
+function bmcStatusNote(state: BmcConfigState, lifecycle: Device["lifecycle"]): string | null {
+  if (lifecycle === "new") return "Changes will be applied by the Discover transition.";
+  if (lifecycle === "removed") return "This device is decommissioned; BMC changes won't be applied.";
+  if (state === "pending") return "Changes will be applied the next time the device boots or is idle.";
+  if (state === "attempted") {
+    return "A reconfiguration with these settings already ran without taking effect; check the BMC, or edit and save the settings to retry.";
+  }
+  return null;
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: BmcConfigurationProps) {
+export function BmcConfiguration({ device, networks, configState, onDeviceUpdate, onError }: BmcConfigurationProps) {
   const [bmcMode, setBmcMode] = useState<"dhcp" | "static">("dhcp");
   const [bmcConfig, setBmcConfig] = useState<BmcConfig>({
     ip_address_source: "dhcp", // default to DHCP
@@ -45,7 +67,7 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
       setBmcMode(device.attributes.bmc_config.ip_address_source === "static" ? "static" : "dhcp");
     } else if (device.attributes?.bmc) {
       // If BMC is discovered but no config exists, create default config
-      const isDhcp = device.attributes.bmc.ip_address_source.includes("DHCP");
+      const isDhcp = isDhcpSource(device.attributes.bmc.ip_address_source);
       setBmcMode(isDhcp ? "dhcp" : "static");
 
       const network = networks.find(n => n.id === device.attributes.network_interfaces?.[0]?.network_id);
@@ -107,6 +129,11 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
     }
   };
 
+  const desired = device.attributes?.bmc_config;
+  const detected = device.attributes?.bmc;
+  const differs = configState !== "in_sync";
+  const statusNote = bmcStatusNote(configState, device.lifecycle);
+
   // Only show if device is in "new" lifecycle or BMC is discovered
   if (device.lifecycle !== "new" && !device.attributes?.bmc) {
     return null;
@@ -134,7 +161,7 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
                 <span className="font-mono">{device.attributes.bmc.ip_address || "Not assigned"}</span>
 
                 <span className="text-muted-foreground">IP Source:</span>
-                <Badge variant={device.attributes.bmc.ip_address_source.includes("DHCP") ? "outline" : "secondary"}>
+                <Badge variant={isDhcpSource(device.attributes.bmc.ip_address_source) ? "outline" : "secondary"}>
                   {device.attributes.bmc.ip_address_source}
                 </Badge>
 
@@ -148,19 +175,18 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
           )}
 
           {/* Pending Configuration Indicator */}
-          {device.attributes.bmc_config &&
-           device.attributes.bmc?.ip_address_source &&
-           ((device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "static") ||
-            (!device.attributes.bmc.ip_address_source.includes("DHCP") && device.attributes.bmc_config.ip_address_source === "dhcp")) && (
+          {differs && desired && detected?.ip_address_source && (
             <div className="p-3 bg-warn-bg border border-warn-border rounded-md">
               <div className="flex items-center gap-2">
                 <Clock className="h-4 w-4 text-status-unprovisioned" />
                 <div className="text-sm text-text-primary">
                   <strong>Configuration Pending:</strong> BMC is currently using{" "}
-                  <strong>{device.attributes.bmc.ip_address_source.includes("DHCP") ? "DHCP" : "Static IP"}</strong>,
+                  <strong>{isDhcpSource(detected.ip_address_source) ? "DHCP" : "Static IP"}</strong>
+                  <Address ip={detected.ip_address} />,
                   but configured for{" "}
-                  <strong>{device.attributes.bmc_config.ip_address_source === "dhcp" ? "DHCP" : "Static IP"}</strong>.
-                  Changes will be applied on next discovery cycle.
+                  <strong>{desired.ip_address_source === "dhcp" ? "DHCP" : "Static IP"}</strong>
+                  <Address ip={desired.ip_address_source === "dhcp" ? null : desired.ip_address} />.{" "}
+                  {statusNote}
                 </div>
               </div>
             </div>
@@ -283,10 +309,14 @@ export function BmcConfiguration({ device, networks, onDeviceUpdate, onError }: 
                   {savingBmc ? "Saving..." : "Save BMC Configuration"}
                 </Button>
 
-                {device.attributes.bmc_config && (
+                {!differs && device.lifecycle !== "new" && device.attributes.bmc && (
                   <div className="text-xs text-muted-foreground text-center">
-                    BMC will be configured on next discovery cycle
+                    The BMC matches these settings. Its netmask and gateway can't be read back, so
+                    changing only those doesn't trigger a reconfiguration.
                   </div>
+                )}
+                {device.lifecycle === "new" && (
+                  <div className="text-xs text-muted-foreground text-center">{statusNote}</div>
                 )}
               </div>
             </TabsContent>

@@ -48,7 +48,9 @@ rack-simulator boot <server>
             └── agent.rs::run()                   → Hardware attributes POST + action_success
                                                     (skipped, ending the boot, when /cnc/poll
                                                     returns 204 — the real agent would idle;
-                                                    otherwise the polled plan_id is echoed back)
+                                                    a plan-less reboot_device simulates a reboot
+                                                    without reporting; otherwise the polled
+                                                    plan_id is echoed back)
 
 rack-simulator e2e run <test.toml>
     └── runner.rs::run_test()

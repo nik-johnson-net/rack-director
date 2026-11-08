@@ -7,6 +7,8 @@ use crate::plans::Plan;
 use crate::plans::actions::BootTarget;
 use crate::{platforms, roles};
 
+mod device_requests;
+pub use device_requests::{DeviceRequests, RediscoverError};
 mod plan_progress;
 pub use plan_progress::ReportedStep;
 pub(crate) mod power;
@@ -126,16 +128,27 @@ impl<'a> Director<'a> {
         store::device_exists(self.conn, uuid).await
     }
 
+    /// Whether a device with no plan goes back to its OS instead of idling in the agent.
+    ///
+    /// Only a Provisioned device is known to have one; any other lifecycle state may have no
+    /// OS. Applies at boot ([`Self::next_boot_target`]) and to an agent that is already running
+    /// (`/cnc/poll`).
+    pub async fn returns_to_os_when_idle(&self, uuid: &Uuid) -> anyhow::Result<bool> {
+        Ok(self.get_device_lifecycle(uuid).await? == Some(DeviceLifecycle::Provisioned))
+    }
+
     /// Get the boot target for this device.
     ///
-    /// A registered device with no active plan boots local disk if Provisioned, and otherwise
-    /// idles in the agent daemon so it picks up the next plan in-band.
+    /// A registered device with no active plan first turns any outstanding request (a
+    /// rediscovery, or a pending BMC config) into a plan and boots into it. Otherwise it boots
+    /// local disk if Provisioned, and idles in the agent daemon so it picks up the next plan
+    /// in-band.
     ///
     /// `sleep_secs` controls how long an unknown (unregistered) device sleeps before
     /// rebooting to retry PXE boot — it can't idle in the daemon because `/cnc/poll`
     /// only serves registered devices.
     pub async fn next_boot_target(
-        &self,
+        &mut self,
         uuid: &Uuid,
         sleep_secs: u64,
     ) -> anyhow::Result<BootTarget> {
@@ -144,9 +157,8 @@ impl<'a> Director<'a> {
                 .await
                 .expect("update device last seen should not fail");
 
-            // Check if there's an active plan for this device
-            if let Some(plan) =
-                crate::plans::store::get_active_plan_for_device(self.conn, uuid).await?
+            // Check if there's an active plan for this device, or one to start for a request
+            if let Some(plan) = self.active_or_requested_plan(uuid).await?
                 && let Some(current_action) = plan.get_current_action()
             {
                 // Get device for ActionContext
@@ -163,11 +175,9 @@ impl<'a> Director<'a> {
                 return current_action.to_boot_target(&ctx).await;
             }
 
-            // No active plan — only boot local disk if the device is fully provisioned.
-            // Any other lifecycle state means the device may have no OS, so idle in the
-            // agent daemon until a plan becomes available.
-            let lifecycle = crate::lifecycle::store::get_device_lifecycle(self.conn, uuid).await?;
-            if matches!(lifecycle, Some(DeviceLifecycle::Provisioned)) {
+            // No active plan: boot local disk if there is an OS to boot, else idle in the agent
+            // daemon until a plan becomes available.
+            if self.returns_to_os_when_idle(uuid).await? {
                 return Ok(BootTarget::LocalDisk);
             }
             return crate::plans::actions::idle_daemon_boot_target();
@@ -190,8 +200,17 @@ impl<'a> Director<'a> {
             || attributes.contains_key("memory")
             || attributes.contains_key("network_interfaces");
 
+        let contains_bmc = attributes.contains_key("bmc");
+
         // Update the attributes
         store::update_attributes(self.conn, uuid, attributes).await?;
+
+        // A scan that finds the BMC where it should be ends the BMC reconfiguration attempt.
+        if contains_bmc
+            && let Err(e) = device_requests::forget_satisfied_bmc_attempt(self.conn, uuid).await
+        {
+            log::warn!("Couldn't reconcile BMC config attempt for device {uuid}: {e:#}");
+        }
 
         // Auto-detect platform after hardware discovery data is received
         if contains_hardware_info && let Err(e) = self.auto_detect_platform(uuid).await {
@@ -251,6 +270,17 @@ impl<'a> Director<'a> {
         // Get device attributes
         let device = store::get_device(self.conn, device_uuid).await?;
         let attrs = &device.attributes;
+
+        // A Provisioned device keeps its platform: its role's disk-layout labels were resolved
+        // against it, and a rescan triggered by a device request (or a NIC that happened to be
+        // down) must not move a live host onto a different one. Deprovision to re-detect.
+        if device.platform_id.is_some() && device.lifecycle == Some(DeviceLifecycle::Provisioned) {
+            log::info!(
+                "Device {} is Provisioned; keeping its platform on rescan",
+                device_uuid
+            );
+            return Ok(());
+        }
 
         // Perform platform detection (pass boot_mode for firmware-aware matching)
         let platform_id = crate::platforms::detect_or_create_platform(
@@ -833,16 +863,21 @@ mod tests {
         assert_eq!(transition.from_state, DeviceLifecycle::New);
         assert_eq!(transition.to_state, DeviceLifecycle::Unprovisioned);
 
-        // Verify a discovery plan was created with 2 actions
+        // Verify a discovery plan was created with 3 actions
         let active_plan = director
             .get_active_plan_for_device(&test_uuid)
             .await
             .unwrap();
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
-        assert_eq!(plan.actions.len(), 2);
-        assert_eq!(plan.actions[0], crate::plans::Action::DiscoverHardware);
-        assert_eq!(plan.actions[1], crate::plans::Action::ConfigureBmc);
+        assert_eq!(
+            plan.actions,
+            vec![
+                crate::plans::Action::DiscoverHardware,
+                crate::plans::Action::ConfigureBmc,
+                crate::plans::Action::DiscoverHardware,
+            ]
+        );
 
         // Verify the device gets the right boot target for first action (discover_hardware)
         let boot_target = director.next_boot_target(&test_uuid, 600).await.unwrap();
@@ -875,6 +910,18 @@ mod tests {
         );
 
         // Simulate BMC configuration completion
+        director
+            .mark_action_success(&test_uuid, ReportedStep::default())
+            .await
+            .unwrap();
+
+        // The closing rescan is still to come, so the BMC state it refreshes is current
+        let plan = director
+            .get_active_plan_for_device(&test_uuid)
+            .await
+            .unwrap()
+            .expect("the closing rescan should still be pending");
+        assert_eq!(plan.current_step, 2);
         director
             .mark_action_success(&test_uuid, ReportedStep::default())
             .await
@@ -1723,6 +1770,76 @@ mod tests {
         assert!(device.attributes.warnings.is_empty());
     }
 
+    #[tokio::test]
+    async fn test_rescan_keeps_platform_of_provisioned_device() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let director = Director::new(&mut conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-4466554400a3").unwrap();
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        let scan = |size: u32| {
+            let mut attrs = serde_json::Map::new();
+            attrs.insert(
+                "disks".to_string(),
+                serde_json::json!([{
+                    "name": "sda",
+                    "size": size,
+                    "disk_type": "ssd",
+                    "path": "/dev/disk/by-path/pci-0000:00:1f.2-ata-1"
+                }]),
+            );
+            attrs.insert("network_interfaces".to_string(), serde_json::json!([]));
+            attrs.insert("cpus".to_string(), serde_json::json!([]));
+            attrs.insert("memory".to_string(), serde_json::json!([]));
+            attrs
+        };
+
+        director
+            .update_attributes(&test_uuid, scan(480))
+            .await
+            .unwrap();
+        let detected = director
+            .get_device(&test_uuid)
+            .await
+            .unwrap()
+            .platform_id
+            .unwrap();
+
+        // A different scan re-detects the platform while the device isn't provisioned...
+        director
+            .update_attributes(&test_uuid, scan(960))
+            .await
+            .unwrap();
+        let redetected = director
+            .get_device(&test_uuid)
+            .await
+            .unwrap()
+            .platform_id
+            .unwrap();
+        assert_ne!(redetected, detected);
+
+        // ...but a provisioned device keeps the one its role was resolved against.
+        crate::lifecycle::store::update_device_lifecycle(
+            &conn,
+            &test_uuid,
+            DeviceLifecycle::Provisioned,
+        )
+        .await
+        .unwrap();
+        let director = Director::new(&mut conn);
+        director
+            .update_attributes(&test_uuid, scan(480))
+            .await
+            .unwrap();
+        assert_eq!(
+            director.get_device(&test_uuid).await.unwrap().platform_id,
+            Some(redetected)
+        );
+    }
+
     // ========== Role Assignment Validation Tests ==========
 
     #[tokio::test]
@@ -2120,7 +2237,7 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_device_sleep_reboot() {
         let mut conn = setup_test_db(test_connection_factory!()).await;
-        let director = Director::new(&mut conn);
+        let mut director = Director::new(&mut conn);
         // UUID that was never registered
         let unknown_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440064").unwrap();
 
@@ -2179,7 +2296,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let director = Director::new(&mut conn);
+        let mut director = Director::new(&mut conn);
 
         // Verify lifecycle is Provisioned
         let lifecycle = director.get_device_lifecycle(&test_uuid).await.unwrap();
@@ -2242,6 +2359,68 @@ mod tests {
         assert_eq!(
             transition.error_message.as_deref(),
             Some("Cancelled by user")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_plan_cancels_a_transition_plan_through_the_transition() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-4466554400a1").unwrap();
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+        director
+            .start_lifecycle_transition(&test_uuid, DeviceLifecycle::Unprovisioned)
+            .await
+            .unwrap();
+
+        director.cancel_active_plan(&test_uuid).await.unwrap();
+
+        assert_eq!(
+            director.get_device_lifecycle(&test_uuid).await.unwrap(),
+            Some(DeviceLifecycle::Broken)
+        );
+        assert!(
+            director
+                .get_active_transition_for_device(&test_uuid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_plan_cancels_a_plan_without_a_transition() {
+        let mut conn = setup_test_db(test_connection_factory!()).await;
+        let mut director = Director::new(&mut conn);
+        let test_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-4466554400a2").unwrap();
+        director
+            .register_device(&test_uuid, Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // Nothing to cancel yet.
+        assert!(director.cancel_active_plan(&test_uuid).await.is_err());
+
+        director
+            .create_plan(&Plan::new(test_uuid, vec![crate::plans::Action::Console]))
+            .await
+            .unwrap();
+        director.cancel_active_plan(&test_uuid).await.unwrap();
+
+        assert!(
+            director
+                .get_active_plan_for_device(&test_uuid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // The device's lifecycle is untouched.
+        assert_eq!(
+            director.get_device_lifecycle(&test_uuid).await.unwrap(),
+            Some(DeviceLifecycle::New)
         );
     }
 

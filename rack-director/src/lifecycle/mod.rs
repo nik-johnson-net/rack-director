@@ -180,8 +180,15 @@ impl LifecycleManager {
         use crate::plans::Action;
 
         match transition_type {
+            // The closing rescan refreshes the detected BMC state that configure_bmc changed.
+            // Without it `attributes.bmc` would still be the pre-configure scan, and the first
+            // idle poll would see a pending BMC config and configure the BMC a second time.
             TransitionType::Discover => {
-                vec![Action::DiscoverHardware, Action::ConfigureBmc]
+                vec![
+                    Action::DiscoverHardware,
+                    Action::ConfigureBmc,
+                    Action::DiscoverHardware,
+                ]
             }
             TransitionType::Provision => vec![Action::PartitionDisks, Action::InstallOs],
             TransitionType::Deprovision => vec![Action::WipeDisks],
@@ -297,6 +304,20 @@ mod tests {
         assert_eq!(
             LifecycleManager::get_plan_stub_for_transition(&TransitionType::Deprovision),
             vec![Action::WipeDisks]
+        );
+    }
+
+    #[test]
+    fn test_plan_stub_for_discover_rescans_after_configuring_bmc() {
+        use crate::plans::Action;
+
+        assert_eq!(
+            LifecycleManager::get_plan_stub_for_transition(&TransitionType::Discover),
+            vec![
+                Action::DiscoverHardware,
+                Action::ConfigureBmc,
+                Action::DiscoverHardware
+            ]
         );
     }
 

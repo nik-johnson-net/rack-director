@@ -377,7 +377,10 @@ rackdirector.url=http://rack-director:3000/cnc rackdirector.action=daemon
 5. On `reboot_device`, `install_os` or `first_boot`: exits cleanly; systemd handles the reboot
 
 **Idle mode:** rack-director also boots the daemon for registered, non-provisioned devices with **no**
-active plan. The daemon just keeps polling (`204 No Content`) until a plan arrives.
+active plan. The daemon just keeps polling (`204 No Content`) until a plan arrives. A pending device
+request (rediscovery, BMC config) becomes a plan on the poll itself. A **Provisioned** device with no
+plan gets `reboot_device` with no `plan_id` (the agent only runs there for such a plan): the daemon
+exits like any `reboot_device` and the host reboots to local disk.
 
 **Implementation:** `rack-agent/src/daemon.rs::run_daemon()`
 
