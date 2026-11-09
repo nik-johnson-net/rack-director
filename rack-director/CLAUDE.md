@@ -142,9 +142,9 @@ A table called plans is used to store a list of actions, their parameters, and t
 
 ## Overview
 
-Rack Director uses SQLite with 26 migrations. Schema is versioned and migrations are applied sequentially on startup.
+Rack Director uses SQLite with 27 migrations. Schema is versioned and migrations are applied sequentially on startup.
 
-**Current Version:** 26 (as of 2026-11)
+**Current Version:** 27 (as of 2026-11)
 
 **Migration Location:** `src/database/migrations/*.sql`
 
@@ -166,10 +166,13 @@ Tracks all devices (servers) in the rack.
 | `architecture` | TEXT | CPU architecture (x86-64) |
 | `role_id` | INTEGER | FK to roles table |
 | `attributes` | JSONB | Device metadata (hardware info, network interfaces, disks, etc.) |
+| `rediscover_requested` | INTEGER | Operator asked for a rescan; consumed when its plan is created (v27) |
+| `bmc_config_attempted` | TEXT | JSON of the BMC network settings the last automatic `configure_bmc` plan was created for; loop guard (v27) |
+| `last_request_plan_id` | INTEGER | Plan most recently started for a device request (v27) |
 
 **Indexes:** `uuid`, `role_id`, `architecture`
 
-**Migration:** v1 (base), v3 (lifecycle), v5 (role_id, architecture)
+**Migration:** v1 (base), v3 (lifecycle), v5 (role_id, architecture), v27 (device request columns)
 
 ### plans
 
@@ -377,6 +380,12 @@ pending_devices
 ```
 
 ## Recent Schema Changes
+
+### Migration v27 (2026-11)
+- Added `devices.rediscover_requested` (INTEGER NOT NULL DEFAULT 0), `devices.bmc_config_attempted` (TEXT, JSON)
+  and `devices.last_request_plan_id` (INTEGER). Plain `ADD COLUMN`s.
+- Back the deferred device requests (rediscovery, pending BMC config) that become a plan when an idle
+  registered device boots or polls. See `src/director/CLAUDE.md` ("Device requests").
 
 ### Migration v26 (2026-11)
 - Added nullable `roles.cloud_config` (role cloud-config layer, YAML text) and the `settings` key/value

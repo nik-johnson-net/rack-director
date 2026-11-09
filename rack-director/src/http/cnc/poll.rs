@@ -10,8 +10,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
+    director::Director,
     http::{AppState, error::Error},
-    plans::{self, actions::Action},
+    plans::actions::Action,
 };
 use common::poll_action::{PollAction, PollResponse};
 
@@ -41,6 +42,11 @@ impl From<&Action> for PollAction {
 ///
 /// Returns:
 /// - `200 OK` with a JSON [`PollResponse`] if the device has an active plan with a current action.
+///   With no active plan, an outstanding device request (rediscovery, pending BMC config) is
+///   turned into a plan first, so an idle daemon picks it up without a reboot.
+/// - `200 OK` with `reboot_device` (no `plan_id`) for a Provisioned device with nothing to do: it
+///   only runs the agent for a device request, and must go back to its OS whether that plan
+///   succeeded or failed.
 /// - `204 No Content` if the device has no active plan, or the plan has no remaining actions.
 /// - `500 Internal Server Error` on database failure.
 #[axum::debug_handler]
@@ -48,7 +54,7 @@ pub async fn poll_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PollQuery>,
 ) -> Result<Response, Error> {
-    let conn = state
+    let mut conn = state
         .connection_factory
         .open()
         .await
@@ -72,10 +78,14 @@ pub async fn poll_handler(
         );
     }
 
-    let plan = plans::store::get_active_plan_for_device(&conn, &params.uuid).await?;
+    let mut director = Director::new(&mut conn);
+    let plan = director
+        .active_or_requested_plan(&params.uuid)
+        .await
+        .map_err(Error::ServerInternalError)?;
 
     let Some(plan) = plan else {
-        return Ok(StatusCode::NO_CONTENT.into_response());
+        return idle_response(&director, &params.uuid).await;
     };
 
     let Some(action) = plan.get_current_action() else {
@@ -88,6 +98,28 @@ pub async fn poll_handler(
         plan_id: plan.id,
     };
 
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// Response for a device with no active plan: a Provisioned device reboots to local disk,
+/// anything else idles.
+///
+/// This applies [`Director::returns_to_os_when_idle`] to a daemon that is already running. It is a
+/// poll answer rather than a trailing `reboot_device` action because a plan that fails never
+/// reaches its last action, and the agent would then idle forever.
+async fn idle_response(director: &Director<'_>, uuid: &Uuid) -> Result<Response, Error> {
+    if !director
+        .returns_to_os_when_idle(uuid)
+        .await
+        .map_err(Error::ServerInternalError)?
+    {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    log::info!("Device {uuid} is Provisioned with nothing to do; rebooting it to local disk");
+    let response = PollResponse::Action {
+        payload: PollAction::RebootDevice,
+        plan_id: None,
+    };
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
@@ -172,6 +204,66 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_poll_starts_requested_rediscovery() {
+        let (state, _tmp, migration_conn) = setup_test_state(test_connection_factory!()).await;
+
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440015").unwrap();
+        register_device(&migration_conn, uuid).await;
+        migration_conn
+            .execute(
+                "UPDATE devices SET lifecycle = 'unprovisioned', rediscover_requested = 1
+                 WHERE uuid = ?1",
+                (uuid,),
+            )
+            .await
+            .unwrap();
+
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/cnc/poll?uuid={}", uuid))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = test_router(state).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["payload"]["type"], "discover_hardware");
+    }
+
+    #[tokio::test]
+    async fn test_poll_reboots_idle_provisioned_device() {
+        let (state, _tmp, migration_conn) = setup_test_state(test_connection_factory!()).await;
+
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440016").unwrap();
+        register_device(&migration_conn, uuid).await;
+        migration_conn
+            .execute(
+                "UPDATE devices SET lifecycle = 'provisioned' WHERE uuid = ?1",
+                (uuid,),
+            )
+            .await
+            .unwrap();
+
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/cnc/poll?uuid={}", uuid))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = test_router(state).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["payload"]["type"], "reboot_device");
+        assert!(json["plan_id"].is_null());
     }
 
     #[tokio::test]

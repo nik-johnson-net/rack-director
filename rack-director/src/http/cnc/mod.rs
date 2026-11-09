@@ -1080,7 +1080,7 @@ mod tests {
         };
         assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
 
-        // Device should have an active discovery plan with 2 actions
+        // Device should have an active discovery plan with 3 actions
         let active_plan = {
             let mut conn = test_db(&state).await;
             Director::new(&mut conn)
@@ -1090,9 +1090,14 @@ mod tests {
         };
         assert!(active_plan.is_some());
         let plan = active_plan.unwrap();
-        assert_eq!(plan.actions.len(), 2);
-        assert_eq!(plan.actions[0], crate::plans::Action::DiscoverHardware);
-        assert_eq!(plan.actions[1], crate::plans::Action::ConfigureBmc);
+        assert_eq!(
+            plan.actions,
+            vec![
+                crate::plans::Action::DiscoverHardware,
+                crate::plans::Action::ConfigureBmc,
+                crate::plans::Action::DiscoverHardware,
+            ]
+        );
 
         // iPXE response should contain agent kernel boot
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1216,10 +1221,30 @@ mod tests {
             .body(Body::from(serde_json::to_string(&success_payload).unwrap()))
             .unwrap();
 
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // The closing rescan is still pending, so the device is still New.
+        let lifecycle = {
+            let mut conn = test_db(&state).await;
+            Director::new(&mut conn)
+                .get_device_lifecycle(&test_uuid)
+                .await
+                .unwrap()
+        };
+        assert_eq!(lifecycle, Some(crate::lifecycle::DeviceLifecycle::New));
+
+        // Simulate agent reporting success for the third action (closing rescan)
+        let request = Request::builder()
+            .method("POST")
+            .uri("/cnc/action_success")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&success_payload).unwrap()))
+            .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-        // Verify device transitioned to Unprovisioned after both actions complete
+        // Verify device transitioned to Unprovisioned after all actions complete
         let lifecycle = {
             let mut conn = test_db(&state).await;
             Director::new(&mut conn)

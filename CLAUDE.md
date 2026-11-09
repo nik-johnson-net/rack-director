@@ -22,6 +22,8 @@ A server that boots will first request a DHCP lease in both BIOS and UEFI modes,
 
 The iPXE config is dynamic and will be constructed based on what the machine should do next, either instructing it to boot into the rack-image, an os installer, local disk, or something else. A registered device with no active plan that isn't Provisioned boots the agent in daemon mode and idles, polling `/cnc/poll` for its next plan; only unknown (unregistered) devices get a sleep-and-reboot script.
 
+Before that, a registered device with no active plan has its **device requests** turned into a plan (on boot and on poll): an operator-requested rediscovery, or a BMC config that differs from what was last detected on the BMC. Provisioned devices are included; `/cnc/poll` reboots an idle Provisioned agent back to local disk once the plan ends, whether it succeeded or failed. See `rack-director/src/director/CLAUDE.md`.
+
 # Key Concepts
 
 ## Device

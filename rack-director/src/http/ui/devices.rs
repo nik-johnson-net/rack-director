@@ -16,7 +16,7 @@ use super::validation::{
 
 use crate::{
     device_warnings,
-    director::{Architecture, Director},
+    director::{Architecture, DeviceRequests, Director, RediscoverError},
     http::{AppState, error::Error as HttpError},
     lifecycle::{DeviceLifecycle, LifecycleTransition},
     plans::{Action, Plan},
@@ -280,6 +280,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
             delete(delete_warning),
         )
         .route("/ui/devices/{uuid}/plan", post(post_device_plan))
+        .route("/ui/devices/{uuid}/plan/cancel", post(cancel_device_plan))
+        .route("/ui/devices/{uuid}/requests", get(get_device_requests))
+        .route("/ui/devices/{uuid}/rediscover", post(request_rediscovery))
         .with_state(state)
 }
 
@@ -427,9 +430,18 @@ async fn update_device_attributes(
         .map_err(HttpError::ServerInternalError)?;
     let director = Director::new(&mut conn);
 
+    // Saving BMC settings is an explicit request to apply them, so a reconfiguration the BMC
+    // didn't take earlier is tried again.
+    let saves_bmc_config = payload.attributes.contains_key("bmc_config");
+
     // Update device attributes
     match director.update_attributes(&uuid, payload.attributes).await {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Ok(_) => {
+            if saves_bmc_config {
+                director.clear_bmc_config_attempt(&uuid).await?;
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
         Err(e) => {
             log::error!("Failed to update device attributes for {}: {}", uuid, e);
             Err(HttpError::ServerInternalError(e))
@@ -737,6 +749,49 @@ async fn post_device_plan(
     let plan = Plan::new(uuid, payload.plan);
     director.create_plan(&plan).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Cancel the device's active plan. A plan owned by a lifecycle transition is cancelled through
+/// it, as `POST /ui/devices/{uuid}/lifecycle/cancel` does. 400 when there is no active plan.
+async fn cancel_device_plan(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<StatusCode, HttpError> {
+    let mut conn = state.connection_factory.open().await?;
+    Director::new(&mut conn)
+        .cancel_active_plan(&uuid)
+        .await
+        .map_err(|e| HttpError::BadRequest(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Outstanding requests for a device: a queued rediscovery, whether its BMC config is pending,
+/// the outcome of the last plan started for a request, and its active plan.
+async fn get_device_requests(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<Json<DeviceRequests>, HttpError> {
+    let mut conn = state.connection_factory.open().await?;
+    let director = Director::new(&mut conn);
+    if !director.device_exists(&uuid).await? {
+        return Err(HttpError::NotFound(format!("Device {uuid} not found")));
+    }
+    Ok(Json(director.get_device_requests(&uuid).await?))
+}
+
+/// Queue a hardware rescan. 202: it runs the next time the device boots or polls with no
+/// active plan.
+async fn request_rediscovery(
+    State(state): State<Arc<AppState>>,
+    Path(uuid): Path<Uuid>,
+) -> Result<StatusCode, HttpError> {
+    let mut conn = state.connection_factory.open().await?;
+    match Director::new(&mut conn).request_rediscovery(&uuid).await {
+        Ok(()) => Ok(StatusCode::ACCEPTED),
+        Err(e @ RediscoverError::NotFound(_)) => Err(HttpError::NotFound(e.to_string())),
+        Err(e @ RediscoverError::WrongLifecycle(..)) => Err(HttpError::BadRequest(e.to_string())),
+        Err(RediscoverError::Database(e)) => Err(HttpError::ServerInternalError(e)),
+    }
 }
 
 // Platform assignment handlers
@@ -2322,6 +2377,166 @@ mod tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn register_in(state: &AppState, suffix: u16, lifecycle: DeviceLifecycle) -> Uuid {
+        let uuid = test_uuid(suffix);
+        let mut conn = test_db(state).await;
+        Director::new(&mut conn)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
+            .await
+            .unwrap();
+        crate::lifecycle::store::update_device_lifecycle(&conn, &uuid, lifecycle)
+            .await
+            .unwrap();
+        uuid
+    }
+
+    async fn send(state: &Arc<AppState>, method: &str, uri: String) -> axum::response::Response {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        routes(state.clone()).oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_rediscover_maps_outcomes_to_statuses() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let ready = register_in(&state, 0x50, DeviceLifecycle::Unprovisioned).await;
+        let new = register_in(&state, 0x51, DeviceLifecycle::New).await;
+        let removed = register_in(&state, 0x52, DeviceLifecycle::Removed).await;
+
+        let uri = |uuid: Uuid| format!("/ui/devices/{uuid}/rediscover");
+        assert_eq!(
+            send(&state, "POST", uri(ready)).await.status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            send(&state, "POST", uri(new)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(&state, "POST", uri(removed)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(&state, "POST", uri(test_uuid(0x5f))).await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_device_requests_reports_state_and_404s() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let uuid = register_in(&state, 0x53, DeviceLifecycle::Unprovisioned).await;
+        send(&state, "POST", format!("/ui/devices/{uuid}/rediscover")).await;
+
+        let response = send(&state, "GET", format!("/ui/devices/{uuid}/requests")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["rediscover_requested"], true);
+        assert_eq!(json["bmc_config_state"], "in_sync");
+        assert!(json["last_request_plan"].is_null());
+        assert!(json["active_plan"].is_null());
+
+        let response = send(
+            &state,
+            "GET",
+            format!("/ui/devices/{}/requests", test_uuid(0x5f)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_device_plan_frees_a_stuck_request_plan() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let uuid = register_in(&state, 0x54, DeviceLifecycle::Unprovisioned).await;
+        let cancel = format!("/ui/devices/{uuid}/plan/cancel");
+
+        // Nothing to cancel.
+        assert_eq!(
+            send(&state, "POST", cancel.clone()).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut conn = test_db(&state).await;
+        let mut director = Director::new(&mut conn);
+        director.request_rediscovery(&uuid).await.unwrap();
+        assert!(
+            director
+                .active_or_requested_plan(&uuid)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // A new plan is refused while the request plan is active.
+        assert!(
+            director
+                .create_plan(&Plan::new(uuid, vec![Action::Console]))
+                .await
+                .is_err()
+        );
+
+        assert_eq!(
+            send(&state, "POST", cancel).await.status(),
+            StatusCode::NO_CONTENT
+        );
+        director
+            .create_plan(&Plan::new(uuid, vec![Action::Console]))
+            .await
+            .expect("cancelling the stuck plan frees the device");
+        // The cancelled request is not requeued.
+        let requests = director.get_device_requests(&uuid).await.unwrap();
+        assert!(!requests.rediscover_requested);
+    }
+
+    #[tokio::test]
+    async fn test_saving_bmc_config_clears_the_attempt_guard() {
+        let (state, _temp_dir, _migration_conn) =
+            setup_test_state(test_connection_factory!()).await;
+        let uuid = register_in(&state, 0x55, DeviceLifecycle::Unprovisioned).await;
+        {
+            let conn = test_db(&state).await;
+            conn.execute(
+                "UPDATE devices SET bmc_config_attempted = '{\"ip_address_source\":\"dhcp\"}'
+                 WHERE uuid = ?1",
+                (uuid,),
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut attributes = serde_json::Map::new();
+        attributes.insert(
+            "bmc_config".to_string(),
+            serde_json::json!({ "ip_address_source": "dhcp" }),
+        );
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ui/devices/{uuid}/attributes"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(&UpdateAttributesRequest { attributes }).unwrap(),
+            ))
+            .unwrap();
+        let response = routes(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let mut conn = test_db(&state).await;
+        let requests = Director::new(&mut conn)
+            .get_device_requests(&uuid)
+            .await
+            .unwrap();
+        assert_eq!(requests.bmc_config_attempted, None);
     }
 
     #[test]

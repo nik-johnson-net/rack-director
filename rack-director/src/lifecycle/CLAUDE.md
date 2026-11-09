@@ -42,11 +42,14 @@ Actions are atomic operations that devices execute during lifecycle transitions.
 
 | Transition Type | From State | To State | Actions |
 |-----------------|------------|----------|---------|
-| **Discover** | new | unprovisioned | discover_hardware, configure_bmc |
+| **Discover** | new | unprovisioned | discover_hardware, configure_bmc, discover_hardware (the closing rescan refreshes the BMC state `configure_bmc` changed) |
 | **Provision** | unprovisioned | provisioned | partition_disks, install_os, first_boot (only when the role's OS declares `cloud_init`) |
 | **Deprovision** | provisioned | unprovisioned | wipe_disks |
 | **Remove** | unprovisioned | removed | wipe_disks |
 | **Repair** | broken | unprovisioned | run_diagnostics, repair_issues, verify_functionality |
+
+Device requests (rediscovery, pending BMC config) run as plans **without** a lifecycle transition, so
+they never change the device's state. See `rack-director/src/director/CLAUDE.md`.
 
 ## Action Details
 

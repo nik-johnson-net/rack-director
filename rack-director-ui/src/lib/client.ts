@@ -679,6 +679,58 @@ export async function postDevicePlan(uuid: string, plan: Action[]): Promise<void
   })
 }
 
+/** How the desired BMC config compares with the detected BMC (decided by the server). */
+export type BmcConfigState = "in_sync" | "pending" | "attempted";
+
+/** A plan as returned inside {@link DeviceRequests}. */
+export type RequestPlan = {
+  id: number | null;
+  status: "Pending" | "Running" | "Success" | "Failed" | "Cancelled";
+  current_step: number;
+  total_steps: number;
+  actions: { type: string }[];
+  error_message: string | null;
+};
+
+export type DeviceRequests = {
+  rediscover_requested: boolean;
+  /** BMC network settings the last automatic BMC reconfiguration tried. */
+  bmc_config_attempted: Partial<BmcConfig> | null;
+  bmc_config_state: BmcConfigState;
+  /** The plan most recently started for a request, whatever its outcome. */
+  last_request_plan: RequestPlan | null;
+  /** The device's active plan; without an active transition it can be cancelled with {@link cancelDevicePlan}. */
+  active_plan: RequestPlan | null;
+};
+
+export async function getDeviceRequests(uuid: string): Promise<DeviceRequests> {
+  const response = await fetch(`/ui/devices/${uuid}/requests`);
+  if (!response.ok) {
+    return handleApiError(response, 'Failed to fetch device requests');
+  }
+  return response.json();
+}
+
+/** Cancel the device's active plan, e.g. a stuck request or console plan. */
+export async function cancelDevicePlan(uuid: string): Promise<void> {
+  const response = await fetch(`/ui/devices/${uuid}/plan/cancel`, { method: 'POST' });
+  if (!response.ok) {
+    return handleApiError(response, 'Failed to cancel plan');
+  }
+}
+
+/** Queue a hardware rescan; it runs the next time the device boots or polls with no active plan. */
+export async function requestRediscovery(uuid: string): Promise<void> {
+  const response = await fetch(`/ui/devices/${uuid}/rediscover`, { method: 'POST' });
+  if (response.status === 400) {
+    // Plain-text reason, e.g. the device is New and needs the Discover transition instead.
+    throw new Error((await response.text()) || 'Failed to request rediscovery');
+  }
+  if (!response.ok) {
+    return handleApiError(response, 'Failed to request rediscovery');
+  }
+}
+
 // DHCP Networks API
 
 export async function getNetworks(): Promise<DhcpNetwork[]> {
