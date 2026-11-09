@@ -73,8 +73,10 @@ stale. The agent sets only `plan_id` (tests build that with `ReportedStep::plan(
 `ReportedStep::default()` checks nothing, like an old agent.
 
 `test_support.rs` (`#[cfg(test)]`) holds provisioning fixtures shared with the HTTP tests:
-`os_config`, `provisionable_device` (a bundled `Default` AlmaLinux 10 role, with or without
-`cloud_init`) and `start_provision`.
+`os_config`, `create_default_module` (the bundled `Default` module the fixture OSes hang off),
+`provisionable_device` (a bundled `Default` AlmaLinux 10 role, with or without `cloud_init`) and
+`start_provision`. Tests that need a different OS build it with `os_config(..)`, adjusting the
+returned config in place.
 
 `plan_progress.rs` holds plan advancement, transition cancellation and orphaned-transition repair. A plan
 and its lifecycle transition must change together, so each of these, and `start_lifecycle_transition`,

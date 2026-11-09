@@ -647,7 +647,7 @@ function DeviceDetail() {
         )}
       </SectionCard>
 
-      {assignedRole && uuid && <CloudConfigPreview key={assignedRole.id} uuid={uuid} />}
+      {assignedRole && uuid && <CloudConfigPreview key={`${uuid}-${assignedRole.id}`} uuid={uuid} />}
     </div>
   );
 

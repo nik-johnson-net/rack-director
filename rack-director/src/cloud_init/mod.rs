@@ -11,5 +11,5 @@ mod parse;
 mod seed;
 
 pub use install::{install_script, seed_path, seed_url};
-pub use parse::validate;
+pub use parse::{has_content, validate};
 pub use seed::{CloudInitSeed, SeedDevice, build_seed};

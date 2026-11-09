@@ -43,6 +43,119 @@ pub async fn resolve_mac_address(
     }
 }
 
+/// What `adopt_unknown_device` did with a booting device.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Adoption {
+    /// Already registered; nothing to do.
+    AlreadyKnown,
+    /// Unknown and no MAC could be determined, so it can't be matched to a pending device
+    /// or lease.
+    MissingMac,
+    /// Unknown and not expected: no pending entry, and no lease on an autodiscovery network.
+    NotExpected,
+    /// Registered, and discovery was started.
+    Adopted,
+}
+
+/// Registers an unknown booting device when its MAC says it is expected.
+///
+/// A device is expected if its MAC has a pending entry, or a DHCP lease on a network with
+/// autodiscovery enabled. Registered devices return early: their every boot arrives here, so
+/// the "missing MAC" / "no lease" warnings must only fire for unknown ones.
+pub async fn adopt_unknown_device(
+    conn: &mut Connection,
+    device_uuid: &Uuid,
+    mac_address: Option<&String>,
+    power_config: PowerConfig,
+) -> anyhow::Result<Adoption> {
+    if Director::new(conn).device_exists(device_uuid).await? {
+        return Ok(Adoption::AlreadyKnown);
+    }
+    let Some(mac) = mac_address else {
+        warn!(
+            "Unknown device {device_uuid} sent no MAC address and none was found in the DHCP leases; not adopting it"
+        );
+        return Ok(Adoption::MissingMac);
+    };
+    if !is_expected_device(conn, device_uuid, mac).await? {
+        return Ok(Adoption::NotExpected);
+    }
+    register_and_start_discovery(conn, device_uuid, Some(mac), power_config).await;
+    Ok(Adoption::Adopted)
+}
+
+/// Whether an unknown device with this MAC should be registered: it has a pending entry or a
+/// lease on an autodiscovery network. Logs why when it isn't expected.
+async fn is_expected_device(
+    conn: &mut Connection,
+    device_uuid: &Uuid,
+    mac: &str,
+) -> anyhow::Result<bool> {
+    if Director::new(conn)
+        .find_pending_device_by_mac(mac)
+        .await?
+        .is_some()
+    {
+        log::info!("Found pending device {device_uuid}. Starting discovery.");
+        return Ok(true);
+    }
+    // Not pending: fall back to the network's autodiscovery setting.
+    let Some(lease) = dhcp::store::get_lease_by_mac(conn, mac).await? else {
+        warn!("MAC {mac:?} does not have a DHCP lease");
+        return Ok(false);
+    };
+    let Some(network_id) = lease.network_id else {
+        warn!("DHCP lease for MAC {mac:?} does not have a network ID");
+        return Ok(false);
+    };
+    let network = dhcp::store::get_network(conn, network_id).await?;
+    if network.enable_autodiscovery {
+        log::info!(
+            "Found new device {device_uuid} on network with autodiscovery enabled. Adopting and starting discovery."
+        );
+    }
+    Ok(network.enable_autodiscovery)
+}
+
+/// Advances the device's plan on boot and stores the IP address from its DHCP lease.
+///
+/// Best-effort: failures are logged so the boot script is still served. `on_boot` runs first
+/// because it can advance the plan, which decides the boot target.
+pub async fn record_boot(
+    conn: &mut Connection,
+    device_uuid: &Uuid,
+    mac_address: Option<&String>,
+    power_config: PowerConfig,
+) {
+    if let Err(e) = Director::with_power_config(conn, power_config)
+        .on_boot(device_uuid)
+        .await
+    {
+        warn!("Failed to handle boot event for {device_uuid}: {e:?}");
+    }
+
+    let Some(mac) = mac_address else {
+        log::debug!("No MAC address available for device {device_uuid}");
+        return;
+    };
+    let Ok(Some(lease)) = dhcp::store::get_lease_by_mac(conn, mac).await else {
+        return;
+    };
+    log::info!(
+        "Found DHCP lease for device {}: MAC {} IP {}",
+        device_uuid,
+        lease.mac_address,
+        lease.ip_address
+    );
+    // Also creates the interface if it doesn't exist yet
+    if let Err(e) = Director::with_power_config(conn, power_config)
+        .set_device_ip_address(device_uuid, &lease.ip_address, &lease.mac_address)
+        .await
+    {
+        warn!("Couldn't store IP address for device {device_uuid}: {e}");
+    }
+}
+
 /// Registers a new device and starts the discovery lifecycle.
 ///
 /// This function performs the complete device registration workflow:
@@ -156,6 +269,10 @@ mod tests {
 
     /// Helper to create a test network for tests that need DHCP functionality.
     async fn create_test_network(conn: &Connection) -> i64 {
+        create_test_network_with(conn, false).await
+    }
+
+    async fn create_test_network_with(conn: &Connection, enable_autodiscovery: bool) -> i64 {
         let network = dhcp::store::create_network(
             conn,
             "Test Network",
@@ -164,7 +281,7 @@ mod tests {
             &["8.8.8.8".to_string()],
             86400,
             None,
-            false,
+            enable_autodiscovery,
             None,
         )
         .await
@@ -220,6 +337,103 @@ mod tests {
         let addr: SocketAddr = format!("{}:1234", ip).parse().unwrap();
         let result = resolve_mac_address(&conn, None, addr).await;
         assert_eq!(result, Some(mac.to_string()));
+    }
+
+    /// Gives `mac` an active lease on `network_id`.
+    async fn lease_mac(conn: &Connection, mac: &str, network_id: i64) {
+        let ip: Ipv4Addr = "10.0.0.150".parse().unwrap();
+        dhcp::store::create_or_update_lease_with_network(
+            conn,
+            mac,
+            &ip,
+            None,
+            crate::dhcp::LeaseState::Active,
+            3600,
+            network_id,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_adopt_known_device_is_left_alone() {
+        let mut conn = create_test_conn(test_database_path!()).await;
+        let uuid = test_uuid();
+        Director::new(&mut conn)
+            .register_device(&uuid, crate::director::Architecture::X86_64)
+            .await
+            .unwrap();
+
+        // A registered device has no use for a MAC; this must not read as a missing MAC.
+        let result = adopt_unknown_device(&mut conn, &uuid, None, PowerConfig::default()).await;
+        assert_eq!(result.unwrap(), Adoption::AlreadyKnown);
+    }
+
+    #[tokio::test]
+    async fn test_adopt_unknown_device_without_mac() {
+        let mut conn = create_test_conn(test_database_path!()).await;
+        let uuid = test_uuid();
+
+        let result = adopt_unknown_device(&mut conn, &uuid, None, PowerConfig::default()).await;
+        assert_eq!(result.unwrap(), Adoption::MissingMac);
+        assert!(!Director::new(&mut conn).device_exists(&uuid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_adopt_unknown_device_without_lease_or_pending_entry() {
+        let mut conn = create_test_conn(test_database_path!()).await;
+        let uuid = test_uuid();
+        let mac = "aa:bb:cc:dd:ee:ff".to_string();
+
+        let result =
+            adopt_unknown_device(&mut conn, &uuid, Some(&mac), PowerConfig::default()).await;
+        assert_eq!(result.unwrap(), Adoption::NotExpected);
+        assert!(!Director::new(&mut conn).device_exists(&uuid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_adopt_unknown_device_on_autodiscovery_network() {
+        let mut conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network_with(&conn, true).await;
+        let uuid = test_uuid();
+        let mac = "aa:bb:cc:dd:ee:ff".to_string();
+        lease_mac(&conn, &mac, network_id).await;
+
+        let result =
+            adopt_unknown_device(&mut conn, &uuid, Some(&mac), PowerConfig::default()).await;
+        assert_eq!(result.unwrap(), Adoption::Adopted);
+        assert!(Director::new(&mut conn).device_exists(&uuid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_adopt_unknown_device_without_autodiscovery() {
+        let mut conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network_with(&conn, false).await;
+        let uuid = test_uuid();
+        let mac = "aa:bb:cc:dd:ee:ff".to_string();
+        lease_mac(&conn, &mac, network_id).await;
+
+        let result =
+            adopt_unknown_device(&mut conn, &uuid, Some(&mac), PowerConfig::default()).await;
+        assert_eq!(result.unwrap(), Adoption::NotExpected);
+        assert!(!Director::new(&mut conn).device_exists(&uuid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_adopt_unknown_device_with_pending_entry() {
+        let mut conn = create_test_conn(test_database_path!()).await;
+        let network_id = create_test_network(&conn).await;
+        let uuid = test_uuid();
+        let mac = "aa:bb:cc:dd:ee:ff".to_string();
+        Director::new(&mut conn)
+            .create_pending_device(&mac, network_id)
+            .await
+            .unwrap();
+
+        let result =
+            adopt_unknown_device(&mut conn, &uuid, Some(&mac), PowerConfig::default()).await;
+        assert_eq!(result.unwrap(), Adoption::Adopted);
+        assert!(Director::new(&mut conn).device_exists(&uuid).await.unwrap());
     }
 
     #[tokio::test]

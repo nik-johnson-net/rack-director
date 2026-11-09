@@ -395,33 +395,8 @@ mod tests {
 
     /// Create an OSM module with a single Ubuntu 24.04 x86-64 OS entry.
     async fn create_osm_module(conn: &database::Connection) {
-        crate::osm::store::create_module(
-            conn,
-            "Default",
-            "1.0.0",
-            "Test",
-            "Test module",
-            "bundled",
-            "osm/Default/1.0.0/",
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        let config = osm::os_config::OperatingSystemConfig {
-            name: "Ubuntu".to_string(),
-            release: "24.04".to_string(),
-            cloud_init: false,
-            architectures: vec![osm::os_config::ArchitectureConfig {
-                arch: "x86-64".to_string(),
-                kernel: "vmlinuz".to_string(),
-                initramfs: "initrd.img".to_string(),
-                modules: vec![],
-                cmdline: String::new(),
-                install_template: "install.sh".to_string(),
-            }],
-            template_variables: vec![],
-        };
+        crate::director::test_support::create_default_module(conn).await;
+        let config = crate::director::test_support::os_config("Ubuntu", "24.04", false);
         crate::osm::store::create_operating_system(conn, 1, "ubuntu", "Ubuntu", "24.04", &config)
             .await
             .unwrap();

@@ -89,13 +89,22 @@ async fn default_module_will_be_bundled(conn: &Connection) -> Result<bool> {
         .any(|(source, version)| will_be_bundled(source, version)))
 }
 
-/// Applies the sync's own replacement rule, with `RETIRED_IN` standing in for the bundled
-/// version: any bundled Default from before then is replaced by one that no longer reads the
-/// variables.
+/// The sync's replacement rule, frozen here so this run-once migration doesn't change when the
+/// sync does. A bundled module is always refreshed, whatever its version (even one that isn't
+/// semver, which the sync later rejects). An uploaded one is replaced only by a newer bundled
+/// version; this release bundles `RETIRED_IN`.
+///
+/// Known gap: the bundled OSM is loaded after migrations, so a later release bundling a newer
+/// `Default` still compares against `RETIRED_IN`. An uploaded `Default` between the two is
+/// replaced by the sync but its roles keep the variables.
 fn will_be_bundled(source: &str, version: &str) -> bool {
-    version
-        .parse::<semver::Version>()
-        .is_ok_and(|v| crate::osm::registry::determine_update_policy(source, &RETIRED_IN, &v))
+    match source {
+        "bundled" => true,
+        "uploaded" => version
+            .parse::<semver::Version>()
+            .is_ok_and(|v| v < RETIRED_IN),
+        _ => false,
+    }
 }
 
 /// Remove `packages`/`postinstall` from `config` and build the equivalent cloud-config text,
@@ -320,12 +329,21 @@ mod tests {
         let (config, cloud_config) =
             migrate_on_default(test_connection_factory!(), "uploaded", "0.1.5").await;
         assert_eq!(config, None);
-        assert!(cloud_config.is_some());
+        let cloud_config = cloud_config.expect("packages moved into cloud-config");
+        assert!(cloud_config.starts_with(&format!(
+            "#cloud-config
+{MIGRATION_NOTE}"
+        )));
+        assert_eq!(
+            parsed(&cloud_config)["packages"],
+            serde_json::json!(["git"])
+        );
     }
 
     #[test]
     fn test_will_be_bundled() {
         assert!(will_be_bundled("bundled", "9.0.0"));
+        assert!(will_be_bundled("bundled", "dev"));
         assert!(will_be_bundled("uploaded", "0.1.9"));
         assert!(!will_be_bundled("uploaded", "0.2.0"));
         assert!(!will_be_bundled("uploaded", "not-semver"));

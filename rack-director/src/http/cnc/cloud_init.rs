@@ -81,18 +81,13 @@ pub(crate) async fn build_device_seed(
     uuid: &Uuid,
     plan_id: Option<i64>,
 ) -> Result<Option<CloudInitSeed>, Error> {
-    let director = Director::new(conn);
-    if !director
-        .device_exists(uuid)
-        .await
-        .map_err(Error::ServerInternalError)?
-    {
-        return Err(Error::NotFound(format!("Device {uuid} not found")));
-    }
-    let device = director
-        .get_device(uuid)
-        .await
-        .map_err(Error::ServerInternalError)?;
+    let device = match Director::new(conn).get_device(uuid).await {
+        Ok(device) => device,
+        Err(e) if is_no_rows(&e) => {
+            return Err(Error::NotFound(format!("Device {uuid} not found")));
+        }
+        Err(e) => return Err(Error::ServerInternalError(e)),
+    };
     let role_id = device
         .role_id
         .ok_or_else(|| Error::BadRequest("Device has no role assigned".to_string()))?;
@@ -124,6 +119,16 @@ pub(crate) async fn build_device_seed(
     Ok(Some(seed))
 }
 
+/// Whether `err` is a "no rows returned" lookup miss rather than a real database failure.
+fn is_no_rows(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::QueryReturnedNoRows)
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{routes, test_helpers::setup_test_state};
@@ -142,20 +147,11 @@ mod tests {
     /// and role cloud-config, and start provisioning. Returns the plan id.
     async fn provisioning_device(conn: &mut database::Connection, cloud_init: bool) -> i64 {
         // Provisioning refuses a role cloud-config on an OS without cloud-init.
-        let role_cloud_config = cloud_init.then_some(
-            "packages: [jq]
-",
-        );
+        let role_cloud_config = cloud_init.then_some("packages: [jq]\n");
         provisionable_device(conn, &uuid(), cloud_init, role_cloud_config).await;
         crate::settings::store::set_cloud_config(
             conn,
-            Some(
-                "disable_root: false
-users:
-  - name: root
-    ssh_authorized_keys: [k1]
-",
-            ),
+            Some("disable_root: false\nusers:\n  - name: root\n    ssh_authorized_keys: [k1]\n"),
         )
         .await
         .unwrap();
@@ -257,5 +253,17 @@ users:
         let (_state, _dir, mut conn) = setup_test_state(test_connection_factory!()).await;
         let result = build_device_seed(&mut conn, &uuid(), None).await;
         assert!(matches!(result, Err(Error::NotFound(_))), "{result:?}");
+    }
+
+    /// A failing lookup must stay a 500, not be mistaken for a missing device.
+    #[tokio::test]
+    async fn test_build_device_seed_database_error_is_internal() {
+        let (_state, _dir, mut conn) = setup_test_state(test_connection_factory!()).await;
+        conn.execute("DROP TABLE devices", ()).await.unwrap();
+        let result = build_device_seed(&mut conn, &uuid(), None).await;
+        assert!(
+            matches!(result, Err(Error::ServerInternalError(_))),
+            "{result:?}"
+        );
     }
 }
