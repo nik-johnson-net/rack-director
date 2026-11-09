@@ -27,6 +27,10 @@ import {
   getDeviceWarnings,
   dismissDeviceWarning,
   postDevicePlan,
+  requestRediscovery,
+  cancelDevicePlan,
+  getDeviceRequests,
+  type DeviceRequests,
   type Action,
   type Device,
   type Role,
@@ -39,7 +43,7 @@ import {
   type Platform,
   type DeviceWarning,
 } from "@/lib/client";
-import { AlertCircle, Pin, Trash2, Zap, XCircle, WrenchIcon } from "lucide-react";
+import { AlertCircle, Pin, Trash2, Zap, XCircle, WrenchIcon, ScanSearch } from "lucide-react";
 import { EditableHostname } from "@/components/devices/editable-hostname";
 import { MakeStaticDialog } from "@/components/networks/make-static-dialog";
 import { TransitionDialog } from "@/components/devices/transition-dialog";
@@ -201,6 +205,7 @@ function DeviceDetail() {
   const [info, setInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [transitioning, setTransitioning] = useState(false);
+  const [requests, setRequests] = useState<DeviceRequests | null>(null);
   const [dismissing, setDismissing] = useState<Set<number>>(new Set());
 
   const [activeTab, setActiveTab] = useState<TabId>("overview");
@@ -222,7 +227,7 @@ function DeviceDetail() {
     if (!uuid) return;
     const fetchData = async () => {
       try {
-        const [deviceData, roleData, platformData, statusData, transitionsData, warningsData, rolesData, platformsData, networksData] =
+        const [deviceData, roleData, platformData, statusData, transitionsData, warningsData, rolesData, platformsData, networksData, requestsData] =
           await Promise.all([
             getDevice(uuid),
             getDeviceRole(uuid),
@@ -233,9 +238,12 @@ function DeviceDetail() {
             getRoles(),
             getPlatforms(),
             getNetworks(),
+            // Only decorates the page (cancel button, last-plan notice); never block on it.
+            getDeviceRequests(uuid).catch(() => null),
           ]);
 
         setDevice(deviceData);
+        setRequests(requestsData);
         setAssignedRole(roleData);
         setAssignedPlatform(platformData);
         setStatus(statusData);
@@ -387,6 +395,41 @@ function DeviceDetail() {
       setError(err instanceof Error ? err.message : "Failed to create plan")
     }
   }
+
+  const refreshRequests = async () => {
+    if (!uuid) return;
+    setRequests(await getDeviceRequests(uuid).catch(() => null));
+  };
+
+  // Run a request action, then reload `requests` so the cancel button and notices follow it.
+  const runRequestAction = async (
+    action: (uuid: string) => Promise<void>,
+    success: string,
+    failure: string,
+  ) => {
+    if (!uuid) return;
+    try {
+      await action(uuid);
+      setInfo(success);
+      await refreshRequests();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : failure);
+    }
+  };
+
+  const rediscover = () =>
+    runRequestAction(
+      requestRediscovery,
+      "Rediscovery requested: it runs the next time the device boots or is idle",
+      "Failed to request rediscovery",
+    );
+
+  // For a plan no lifecycle transition owns (a device request or console run); a transition's
+  // plan is cancelled with "Cancel Transition" so the device is marked Broken.
+  const handleCancelPlan = () =>
+    runRequestAction(cancelDevicePlan, "Plan cancelled", "Failed to cancel plan");
+
+  const hasActiveTransition = !!status?.active_transition && !status.active_transition.completed_at;
 
   // ── Guard renders ────────────────────────────────────────────────────────
 
@@ -678,7 +721,12 @@ function DeviceDetail() {
           <BmcConfiguration
             device={device}
             networks={networks}
-            onDeviceUpdate={(updated) => setDevice(updated)}
+            configState={requests?.bmc_config_state ?? "in_sync"}
+            onDeviceUpdate={(updated) => {
+              setDevice(updated);
+              // Saving a BMC config can make it pending, which the server decides.
+              void refreshRequests();
+            }}
             onError={(msg) => setError(msg)}
           />
         </div>
@@ -928,7 +976,7 @@ function DeviceDetail() {
         </>
       )}
       {/* Cancel Transition: shown when a transition is in progress */}
-      {status?.active_transition && !status.active_transition.completed_at && (
+      {hasActiveTransition && (
         <Button
           variant="danger"
           size="sm"
@@ -937,6 +985,18 @@ function DeviceDetail() {
         >
           <XCircle className="size-3.5" />
           Cancel Transition
+        </Button>
+      )}
+      {requests?.active_plan && !hasActiveTransition && (
+        <Button variant="danger" size="sm" onClick={handleCancelPlan} disabled={transitioning}>
+          <XCircle className="size-3.5" />
+          Cancel Plan
+        </Button>
+      )}
+      {(lifecycle === "unprovisioned" || lifecycle === "provisioned" || lifecycle === "broken") && (
+        <Button variant="secondary" size="sm" onClick={rediscover} disabled={transitioning}>
+          <ScanSearch className="size-3.5" />
+          Rediscover
         </Button>
       )}
       <Button variant="danger" size="sm" onClick={() => createPlan([ActionConsole], "boot into console")} disabled={transitioning}><WrenchIcon className="size-3.5" />Console</Button>
@@ -976,6 +1036,19 @@ function DeviceDetail() {
           >
             <XCircle className="size-4" />
           </button>
+        </div>
+      )}
+
+      {/* A request (rediscovery, BMC reconfiguration) is consumed when its plan starts, so a
+          failed plan is not retried; say so rather than leave the operator guessing. */}
+      {requests?.last_request_plan?.status === "Failed" && (
+        <div className="mb-4 flex items-start gap-2 border border-error-border bg-error-bg px-3 py-2 text-sm text-status-broken">
+          <AlertCircle className="size-4 shrink-0 mt-0.5" />
+          <span>
+            The last automatic plan ({requests.last_request_plan.actions.map((a) => a.type).join(", ")}) failed
+            {requests.last_request_plan.error_message ? `: ${requests.last_request_plan.error_message}` : "."}{" "}
+            It isn't retried automatically.
+          </span>
         </div>
       )}
 

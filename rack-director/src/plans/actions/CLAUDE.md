@@ -14,7 +14,7 @@ Actions are atomic operations that devices execute during lifecycle transitions.
 
 **Purpose:** Scans device hardware and uploads metadata to rack-director
 
-**Lifecycle:** Discover transition (new → unprovisioned)
+**Lifecycle:** Discover transition (new → unprovisioned, first and last action); also run on request
 
 **Agent Command:** `device-scan`
 
@@ -51,7 +51,8 @@ cmdline: rackdirector.url=http://<server>/cnc rackdirector.action=daemon
 
 **Purpose:** Configures BMC (Baseboard Management Controller) with static IP and credentials
 
-**Lifecycle:** Discover transition (new → unprovisioned)
+**Lifecycle:** Discover transition (new → unprovisioned); also run with `discover_hardware` when the device's `bmc_config` differs from its
+detected BMC — see Device requests in `rack-director/src/director/CLAUDE.md`
 
 **Agent Command:** `configure-bmc`
 
@@ -364,6 +365,12 @@ no special-casing is needed beyond the existing `mark_action_failed` path.
 When rack-agent runs in daemon mode (`rackdirector.action=daemon`), it polls
 `GET /cnc/poll?uuid={UUID}` instead of reading the action from the kernel cmdline.
 The endpoint returns the current plan action as JSON, or `204 No Content` if no plan is active.
+
+**Device requests first.** With no active plan, `next_boot_target()` and `/cnc/poll` first turn an
+outstanding device request (rediscovery, pending BMC config) into a plan and serve its first action;
+see `rack-director/src/director/CLAUDE.md`. A Provisioned device is diverted this way too, and once it
+has nothing to do `/cnc/poll` answers `reboot_device` with no `plan_id`, so the agent exits and it
+reboots to local disk.
 
 **Idle daemon (no active plan).** `Director::next_boot_target()` serves the daemon agent image
 (`idle_daemon_boot_target()`) to every *registered* device that has no active plan and is not

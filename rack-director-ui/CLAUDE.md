@@ -95,7 +95,7 @@ Complex cards and sections should be extracted into separate components when the
 
 Available extracted components:
 - `PlatformAssignment` (`components/devices/platform-assignment.tsx`) - Platform selection and assignment
-- `BmcConfiguration` (`components/devices/BmcConfiguration.tsx`) - BMC network configuration
+- `BmcConfiguration` (`components/devices/BmcConfiguration.tsx`) - BMC network configuration. Its "Configuration Pending" banner shows `bmc_config_state` from `GET /ui/devices/{uuid}/requests` (the server owns the comparison; don't reimplement it here). The device page's **Rediscover** button calls `POST /ui/devices/{uuid}/rediscover`, **Cancel Plan** (shown for an active plan with no transition) calls `POST /ui/devices/{uuid}/plan/cancel`, and a failed `last_request_plan` is shown as a notice
 - `EditableHostname` (`components/devices/editable-hostname.tsx`) - Inline hostname editing
 - `CloudConfigEditor` (`components/cloud-config/cloud-config-editor.tsx`) - Monospace cloud-config textarea with the root SSH key example
 - `GlobalCloudConfigCard` (`components/cloud-config/global-cloud-config-card.tsx`) - Settings page global cloud-config layer

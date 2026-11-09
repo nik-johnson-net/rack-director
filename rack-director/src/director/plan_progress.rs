@@ -156,6 +156,33 @@ impl<'a> super::Director<'a> {
             .await
     }
 
+    /// Cancel the device's active plan, whatever started it.
+    ///
+    /// A plan owned by a lifecycle transition is cancelled through the transition (see
+    /// [`Self::cancel_active_transition`]), so the device still ends up Broken. Any other plan
+    /// (a device request, a manual console or diagnostics run) is only cancelled. Without this,
+    /// such a plan on a dead device blocks every later plan until the device is deleted.
+    pub async fn cancel_active_plan(&mut self, device_uuid: &Uuid) -> anyhow::Result<()> {
+        self.conn
+            .in_transaction(async |conn| {
+                let plan = plan_store::get_active_plan_for_device(conn, device_uuid)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("No active plan to cancel"))?;
+                let plan_id = plan
+                    .id
+                    .ok_or_else(|| anyhow::anyhow!("Plan record has no ID"))?;
+                if lifecycle_store::get_transition_by_plan_id(conn, plan_id)
+                    .await?
+                    .is_some()
+                {
+                    return cancel_transition(conn, device_uuid).await;
+                }
+                plan_store::cancel_plan(conn, plan_id).await?;
+                Ok(())
+            })
+            .await
+    }
+
     /// Atomically load the device's active plan, let `apply` mutate it, persist it, and
     /// close the lifecycle transition if the plan finished. `apply` returns whether it
     /// changed the plan. Returns `false` if the device has no active plan.

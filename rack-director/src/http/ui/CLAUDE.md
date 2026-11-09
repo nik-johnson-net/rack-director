@@ -26,13 +26,17 @@ This module (`src/http/ui`) serves the rack-director-ui React frontend and expos
 | GET | `/ui/devices` | List all devices |
 | GET | `/ui/devices/{uuid}` | Get device |
 | DELETE | `/ui/devices/{uuid}` | Delete device |
-| PATCH | `/ui/devices/{uuid}/attributes` | Update device attributes (hostname, BMC config, cmdline, etc.) |
+| PATCH | `/ui/devices/{uuid}/attributes` | Update device attributes (hostname, BMC config, cmdline, etc.). Saving `bmc_config` also clears the attempted-BMC-settings guard so the settings are retried |
 | GET | `/ui/devices/{uuid}/lifecycle` | Get lifecycle history |
 | POST | `/ui/devices/{uuid}/lifecycle/transition` | Start a lifecycle transition |
 | POST | `/ui/devices/{uuid}/lifecycle/cancel` | Cancel the active lifecycle transition |
 | GET | `/ui/devices/{uuid}/transitions` | List all transitions |
 | GET | `/ui/devices/{uuid}/transitions/active` | Get active transition |
 | GET | `/ui/devices/{uuid}/status` | Get current plan step/status |
+| GET | `/ui/devices/{uuid}/requests` | Outstanding device requests: `rediscover_requested`, `bmc_config_attempted`, `bmc_config_state` (`in_sync`/`pending`/`attempted`), `last_request_plan`, `active_plan` — 404 unknown UUID |
+| POST | `/ui/devices/{uuid}/rediscover` | Queue a hardware rescan for the next idle boot/poll — 202; 400 for New/Removed; 404 unknown UUID |
+| POST | `/ui/devices/{uuid}/plan` | Create a manual plan |
+| POST | `/ui/devices/{uuid}/plan/cancel` | Cancel the active plan (a transition's plan via the transition, so the device ends Broken) — 204; 400 when there is none |
 | GET | `/ui/devices/{uuid}/power` | Get live BMC power state — 200 for existing device (degrades to `unknown`/null on BMC failure), 404 for unknown UUID, 500 on DB error |
 | POST | `/ui/devices/{uuid}/power` | Issue an OOB power command (`on`/`off`/`cycle`; `off` is a hard/immediate power-off) — 200 on success, 404 unknown UUID, 409 no BMC, 502 BMC error |
 | POST | `/ui/devices/{uuid}/platform` | Assign platform to device |
